@@ -1,0 +1,482 @@
+import {
+  forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
+  type RefObject,
+} from 'react';
+import type { BoardData, Piece } from '../types';
+import { BoardRenderer, boardBackground } from './boardRenderer';
+import { texHtml } from './tex';
+import { cleanLatex } from './texClean';
+import { clauses, texLayouts, writtenText } from './texLayout';
+import { formatTime, seekTarget, typesetIds } from './timing';
+
+export interface BoardHandle {
+  render(t: number): void;
+}
+
+interface Props {
+  jobId: string;
+  board: BoardData;
+  typeset: boolean;
+  timeRef: RefObject<number>;
+  clipStart: number;
+  playing: boolean;
+  onSeekPiece(p: Piece): void;
+  onTogglePlay(): void;
+}
+
+const kindLabel = (k: string | undefined) => (k ? k.charAt(0).toUpperCase() + k.slice(1) : 'Writing');
+
+/** True when the plain text only repeats the LaTeX, e.g. "A = P(1+r)^n" and "A=P(1+r)^n". */
+function sameReading(text: string, latex: string) {
+  const norm = (s: string) =>
+    s
+      .replace(/\\(left|right|tfrac|dfrac|frac|quad|qquad|cdot|,|;|!)/g, '')
+      .replace(/[\s{}\\]/g, '')
+      .toLowerCase();
+  return norm(text) === norm(latex);
+}
+
+/** Largest font size (board px, at most maxFont) at which the content fits the piece's box. */
+function fitText(inner: HTMLElement, w: number, h: number, maxFont: number): number {
+  let lo = 2;
+  let hi = Math.max(6, Math.min(h * 1.25, maxFont));
+  let best = lo;
+  for (let i = 0; i < 13; i++) {
+    const mid = (lo + hi) / 2;
+    inner.style.fontSize = `${mid}px`;
+    if (inner.scrollWidth <= w + 0.5 && inner.scrollHeight <= h + 0.5) {
+      best = mid;
+      lo = mid;
+    } else hi = mid;
+  }
+  inner.style.fontSize = `${best}px`;
+  return best;
+}
+
+interface Candidate {
+  html: string;
+  className: string;
+  lines: number;
+  penalty: number; // multiplies the fitted size when choosing between candidates
+}
+
+const escapeHtml = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
+/** Ways to typeset a reading: LaTeX broken only between clauses and before relations, KaTeX's own wrapping as a
+ *  last resort, and the plain text when KaTeX can't parse the LaTeX. */
+function candidatesFor(latex: string, text: string): Candidate[] {
+  const out: Candidate[] = [];
+  const clean = latex ? cleanLatex(latex) : '';
+  for (const layout of texLayouts(clean)) {
+    const parts = layout.map((l) => texHtml(l.tex));
+    if (parts.some((p) => p == null)) continue;
+    out.push({
+      html: parts.map((p, k) => `<div class="ts-line${layout[k].cont ? ' cont' : ''}">${p}</div>`).join(''),
+      className: 'ts-inner',
+      lines: layout.length,
+      penalty: 1 - 0.03 * (layout.length - 1),
+    });
+  }
+  const whole = clean ? texHtml(clean) : null;
+  if (whole) out.push({ html: `<div class="ts-line">${whole}</div>`, className: 'ts-inner wrap', lines: 1, penalty: 0.78 });
+  if (!out.length && text) out.push({ html: escapeHtml(text), className: 'ts-inner wrap ts-text', lines: 1, penalty: 1 });
+  return out;
+}
+
+/** Indent each continuation line ("= ...") so its relation sits under the first relation of the line above. */
+function alignContinuations(inner: HTMLElement) {
+  const size = parseFloat(inner.style.fontSize) || 16;
+  let anchor = 0;
+  for (const line of Array.from(inner.children) as HTMLElement[]) {
+    if (!line.classList.contains('cont')) {
+      line.style.paddingLeft = '';
+      const rel = line.querySelector<HTMLElement>('.base > .mrel');
+      anchor = 0;
+      for (let el: HTMLElement | null = rel; el && el !== line; el = el.offsetParent as HTMLElement | null) {
+        anchor += el.offsetLeft;
+      }
+      if (!rel) anchor = 0;
+    } else line.style.paddingLeft = `${(anchor / size).toFixed(3)}em`;
+  }
+}
+
+/** The reading for the tooltip: short LaTeX on one display line; long LaTeX as a paragraph of its clauses that
+ *  wraps between clauses and after relations, so nothing is cut off at the tooltip's edge. */
+function tipTex(latex: string): string | null {
+  if (!latex) return null;
+  const clean = cleanLatex(latex);
+  if (clean.length <= 34) return texHtml(clean, true);
+  const parts = clauses(clean).map((c) => texHtml(c));
+  if (!parts.length || parts.some((x) => x == null)) return texHtml(clean, true);
+  return `<div class="tip-line">${parts.join(' ')}</div>`;
+}
+
+const TypesetPiece = memo(function TypesetPiece(props: {
+  piece: Piece;
+  ink: string;
+  cy: number;
+  maxFont: number;
+  minFont: number;
+  fontsVersion: number;
+  register(id: number, el: HTMLElement | null): void;
+  onFit(id: number, legible: boolean): void;
+}) {
+  const { piece, ink, cy, maxFont, minFont, fontsVersion, register, onFit } = props;
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [x, y, w, h] = piece.box;
+  const latex = piece.read?.latex?.trim() ?? '';
+  const text = writtenText(piece.read?.text ?? '') || latex;
+  const candidates = useMemo(() => candidatesFor(latex, text), [latex, text]);
+  const registerEl = useCallback((el: HTMLDivElement | null) => register(piece.id, el), [register, piece.id]);
+  useLayoutEffect(() => {
+    const inner = innerRef.current;
+    if (!inner) return;
+    // The inner element is filled here, not by React: try each layout and keep the one that fits largest.
+    // Unwrapped layouts scale linearly with the font size, so one measurement at a reference size is enough;
+    // only wrapping text needs the (costlier) search.
+    const REF = 40;
+    const cap = Math.max(6, Math.min(h * 1.25, maxFont));
+    const load = (c: Candidate) => {
+      inner.className = c.className;
+      inner.innerHTML = c.html;
+      inner.style.fontSize = `${REF}px`;
+      alignContinuations(inner);
+    };
+    const wraps = (c: Candidate) => c.className.includes('wrap');
+    const sizeOf = (c: Candidate): number => {
+      load(c);
+      if (wraps(c)) return fitText(inner, w, h, maxFont);
+      inner.style.width = 'max-content';
+      const cw = inner.offsetWidth;
+      const ch = inner.offsetHeight;
+      inner.style.width = `${w}px`;
+      if (!cw || !ch) return 0;
+      return Math.min(cap, REF * Math.min(w / cw, h / ch) * 0.98);
+    };
+    let best: Candidate | null = null;
+    let bestSize = 0;
+    let bestScore = -1;
+    for (const c of candidates) {
+      if (wraps(c) && best && cap * c.penalty <= bestScore + 0.01) continue; // cannot win
+      const size = sizeOf(c);
+      const score = size * c.penalty;
+      if (score > bestScore + 0.01) {
+        best = c;
+        bestSize = size;
+        bestScore = score;
+      }
+    }
+    let size = 0;
+    if (best) {
+      load(best);
+      if (wraps(best)) size = fitText(inner, w, h, maxFont);
+      else {
+        size = bestSize;
+        inner.style.fontSize = `${size}px`;
+      }
+    }
+    // Centre the text block on where the ink actually is (a box can hold more than its main line).
+    const th = inner.offsetHeight;
+    inner.style.top = `${Math.min(Math.max(0, cy * h - th / 2), Math.max(0, h - th))}px`;
+    // Too small to read: keep the handwriting for this piece instead.
+    onFit(piece.id, size >= minFont);
+  }, [piece.id, w, h, cy, candidates, maxFont, minFont, fontsVersion, onFit]);
+  // Opacity, visibility and the left-to-right reveal are set every frame by BoardRenderer.
+  return (
+    <div className="ts-piece" ref={registerEl} style={{ left: x, top: y, width: w, height: h, color: ink }}>
+      <div ref={innerRef} className="ts-inner" style={{ width: w }} />
+    </div>
+  );
+});
+
+// Memoised: the player re-renders on every spoken word, the board only needs to when its props change.
+export const Board = memo(
+  forwardRef<BoardHandle, Props>(function Board(props, ref) {
+    const { jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay } = props;
+    const [W, H] = board.size;
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const stageRef = useRef<HTMLDivElement>(null);
+    const tipRef = useRef<HTMLDivElement>(null);
+    const rendererRef = useRef<BoardRenderer | null>(null);
+    const typesetEls = useRef(new Map<number, HTMLElement>()).current;
+    const tagEls = useRef(new Map<number, HTMLElement>()).current;
+    const hoverRef = useRef<Piece | null>(null);
+    const pointerRef = useRef({ x: 0, y: 0 }); // last pointer position in stage CSS pixels
+    const [cssW, setCssW] = useState(0);
+    const [hover, setHover] = useState<Piece | null>(null);
+    const [inks, setInks] = useState<Record<number, { ink: string; cy: number }>>({});
+    const [fontsVersion, setFontsVersion] = useState(0);
+    const [flash, setFlash] = useState<{ key: number; play: boolean } | null>(null);
+    const [tipPos, setTipPos] = useState<{ left: number; top: number; below: boolean } | null>(null);
+    const { css: background, light } = useMemo(() => boardBackground(board), [board]);
+    const defaultInk = light ? '#1f2633' : '#f1f1ea';
+
+    const typesetPieces = useMemo(() => {
+      const ids = typesetIds(board.pieces, W, H);
+      return board.pieces.filter((p) => ids.has(p.id));
+    }, [board, W, H]);
+    const hiddenPieces = useMemo(() => board.pieces.filter((p) => p.revealed && !p.pre_existing), [board]);
+    const typesetRef = useRef(typeset);
+    typesetRef.current = typeset;
+    // Which typeset readings fit their box legibly (measured by the typeset layer, possibly before the renderer exists).
+    const legible = useRef(new Map<number, boolean>()).current;
+    const onFit = useCallback(
+      (id: number, ok: boolean) => {
+        legible.set(id, ok);
+        rendererRef.current?.setTypesetOk(id, ok);
+      },
+      [legible],
+    );
+
+    useLayoutEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const r = new BoardRenderer(canvas, board, jobId);
+      r.typesetEls = typesetEls;
+      r.tagEls = tagEls;
+      r.onSpriteLoaded = (id, s) => setInks((m) => ({ ...m, [id]: { ink: s.ink, cy: s.cy } }));
+      r.setTypeset(typesetRef.current);
+      for (const [id, ok] of legible) r.setTypesetOk(id, ok);
+      rendererRef.current = r;
+      const w = stageRef.current?.clientWidth ?? 0;
+      if (w) r.resize(w, window.devicePixelRatio || 1);
+      r.render(timeRef.current ?? 0);
+      return () => {
+        r.destroy();
+        rendererRef.current = null;
+      };
+    }, [board, jobId, typesetEls, tagEls, timeRef, legible]);
+
+    useEffect(() => {
+      rendererRef.current?.setTypeset(typeset);
+    }, [typeset]);
+
+    useEffect(() => {
+      const stage = stageRef.current;
+      if (!stage) return;
+      const ro = new ResizeObserver(() => {
+        const w = stage.clientWidth;
+        setCssW(w);
+        rendererRef.current?.resize(w, window.devicePixelRatio || 1);
+        rendererRef.current?.render(timeRef.current ?? 0); // redraw at once so a resized canvas never shows blank
+      });
+      ro.observe(stage);
+      return () => ro.disconnect();
+    }, [timeRef]);
+
+    useEffect(() => {
+      const fonts = document.fonts;
+      if (!fonts) return;
+      // Re-fit the typeset readings once KaTeX's fonts arrive; bursts of font loads are coalesced into one pass.
+      let timer: number | undefined;
+      let alive = true;
+      const bump = () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => alive && setFontsVersion((v) => v + 1), 250);
+      };
+      fonts.ready.then(bump);
+      fonts.addEventListener('loadingdone', bump);
+      return () => {
+        alive = false;
+        window.clearTimeout(timer);
+        fonts.removeEventListener('loadingdone', bump);
+      };
+    }, []);
+
+    const changeHover = useCallback((p: Piece | null) => {
+      if (hoverRef.current?.id === p?.id) return;
+      hoverRef.current = p;
+      rendererRef.current?.setHover(p?.id ?? null);
+      setHover(p);
+    }, []);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        render(t: number) {
+          const r = rendererRef.current;
+          if (!r) return;
+          const h = hoverRef.current;
+          if (h && !r.isVisible(h.id, t)) changeHover(null);
+          r.render(t);
+        },
+      }),
+      [changeHover],
+    );
+
+    const register = useCallback(
+      (id: number, el: HTMLElement | null) => {
+        if (el) typesetEls.set(id, el);
+        else typesetEls.delete(id);
+        rendererRef.current?.invalidate();
+      },
+      [typesetEls],
+    );
+
+    const pick = (clientX: number, clientY: number): Piece | null => {
+      const canvas = canvasRef.current;
+      const r = rendererRef.current;
+      if (!canvas || !r) return null;
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      const bx = ((clientX - rect.left) / rect.width) * W;
+      const by = ((clientY - rect.top) / rect.height) * H;
+      return r.hitTest(bx, by, timeRef.current ?? 0);
+    };
+
+    // Place the tooltip above (or below) the hovered piece, kept inside the stage horizontally.
+    useLayoutEffect(() => {
+      const tip = tipRef.current;
+      if (!hover || !tip || !cssW) {
+        setTipPos(null);
+        return;
+      }
+      const k = cssW / W;
+      const [x, y, w, h] = hover.box;
+      const tw = tip.offsetWidth;
+      const th = tip.offsetHeight;
+      const stageH = H * k;
+      const clampX = (v: number) => Math.min(Math.max(8, v), Math.max(8, cssW - tw - 8));
+      const aboveTop = y * k - th - 10;
+      const belowTop = (y + h) * k + 10;
+      if (aboveTop >= -40) setTipPos({ left: clampX((x + w / 2) * k - tw / 2), top: aboveTop, below: false });
+      else if (belowTop + th <= stageH + 120) setTipPos({ left: clampX((x + w / 2) * k - tw / 2), top: belowTop, below: true });
+      else {
+        // A piece as tall as the board: put the tip by the pointer, inside the board.
+        const p = pointerRef.current;
+        const top = Math.min(Math.max(8, p.y + 18), Math.max(8, stageH - th - 8));
+        setTipPos({ left: clampX(p.x - tw / 2), top, below: true });
+      }
+    }, [hover, cssW, W, H, typeset]);
+
+    const onClick = (e: React.MouseEvent) => {
+      const p = pick(e.clientX, e.clientY);
+      if (p) {
+        onSeekPiece(p);
+        return;
+      }
+      setFlash({ key: Date.now(), play: !playing });
+      onTogglePlay();
+    };
+
+    const tipTime = hover ? seekTarget(hover, clipStart) : 0;
+    const tipLatex = hover?.read?.latex?.trim() ?? '';
+    const tipHtml = useMemo(() => tipTex(tipLatex), [tipLatex]);
+    const rawText = hover?.read?.text?.trim() ?? '';
+    const tipText = tipHtml && sameReading(rawText, tipLatex) ? '' : rawText || (tipHtml ? '' : tipLatex);
+    const noSpoken = hover ? !(hover.spoken && hover.spoken.length) : false;
+
+    return (
+      <div
+        ref={stageRef}
+        className={`board-stage ${hover ? 'is-hovering' : ''}`}
+        style={{ aspectRatio: `${W} / ${H}`, background }}
+        onPointerMove={(e) => {
+          const r = stageRef.current?.getBoundingClientRect();
+          if (r) pointerRef.current = { x: e.clientX - r.left, y: e.clientY - r.top };
+          changeHover(pick(e.clientX, e.clientY));
+        }}
+        onPointerLeave={() => changeHover(null)}
+        onClick={onClick}
+      >
+        <canvas ref={canvasRef} className="board-canvas" />
+
+        {/* The clip box has the stage's own size, so the scaled board-pixel layer never widens the page. */}
+        <div className="ts-clip">
+          <div
+            className={`ts-layer ${typeset ? 'on' : ''}`}
+            style={{ width: W, height: H, transform: `scale(${cssW ? cssW / W : 0})` }}
+            aria-hidden={!typeset}
+          >
+            {typesetPieces.map((p) => (
+              <TypesetPiece
+                key={p.id}
+                piece={p}
+                ink={inks[p.id]?.ink ?? defaultInk}
+                cy={inks[p.id]?.cy ?? 0.5}
+                maxFont={W * 0.019} // about the height of handwriting on a filmed board
+                minFont={W * 0.0085}
+                fontsVersion={fontsVersion}
+                register={register}
+                onFit={onFit}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div className="tag-layer" aria-hidden>
+          {hiddenPieces.map((p) => {
+            const [x, y, w, h] = p.box;
+            const nearTop = y < H * 0.12;
+            const rightEdge = x + w > W * 0.85;
+            return (
+              <div
+                key={p.id}
+                ref={(el) => {
+                  if (el) tagEls.set(p.id, el);
+                  else tagEls.delete(p.id);
+                }}
+                className={`hidden-tag ${nearTop ? 'below' : 'above'} ${rightEdge ? 'from-right' : ''}`}
+                style={{
+                  left: `${((rightEdge ? x + w : x) / W) * 100}%`,
+                  top: `${((nearTop ? y + h : y) / H) * 100}%`,
+                }}
+              >
+                <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden>
+                  <path
+                    d="M2 2l12 12M6.6 6.7a2 2 0 002.7 2.7M4.2 4.4C2.8 5.3 1.8 6.6 1.3 8c1.1 3 3.8 5 6.7 5 1.3 0 2.5-.4 3.6-1M7 3.1c.3 0 .7-.1 1-.1 2.9 0 5.6 2 6.7 5-.3.9-.8 1.7-1.4 2.4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                </svg>
+                was hidden
+              </div>
+            );
+          })}
+        </div>
+
+        {hover && (
+          <div
+            ref={tipRef}
+            className={`board-tip ${tipPos?.below ? 'below' : ''}`}
+            style={{ left: tipPos?.left ?? 0, top: tipPos?.top ?? 0, visibility: tipPos ? 'visible' : 'hidden' }}
+          >
+            <div className="tip-head">
+              <span className="tip-kind">{kindLabel(hover.read?.kind)}</span>
+              {hover.revealed && !hover.pre_existing && <span className="tip-flag">was hidden</span>}
+            </div>
+            {tipHtml && <div className="tip-tex" dangerouslySetInnerHTML={{ __html: tipHtml }} />}
+            {tipText && <div className={tipHtml ? 'tip-text muted' : 'tip-text'}>{tipText}</div>}
+            <div className="tip-foot">
+              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden>
+                <path d="M4 3l9 5-9 5z" fill="currentColor" />
+              </svg>
+              {noSpoken && hover.pre_existing
+                ? `Already on the board · click to play from ${formatTime(tipTime)}`
+                : `Click to hear it explained · ${formatTime(tipTime)}`}
+            </div>
+          </div>
+        )}
+
+        {flash && (
+          <div key={flash.key} className="board-flash" aria-hidden>
+            {flash.play ? (
+              <svg viewBox="0 0 24 24" width="28" height="28">
+                <path d="M8 5l11 7-11 7z" fill="currentColor" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" width="28" height="28">
+                <path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor" />
+              </svg>
+            )}
+          </div>
+        )}
+
+        {board.pieces.length === 0 && <div className="board-empty">No writing was found on this board.</div>}
+      </div>
+    );
+  }),
+);

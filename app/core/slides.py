@@ -42,6 +42,7 @@ class SlideParams:
     change_diff: float = 30
     change_area: float = 1500
     change_side: float = 60
+    group_px: float = 11  # changed pixels this close form one component (glyphs -> words)
     settle_s: float = 0.5
     new_slide_screen: float = 0.25
     new_slide_text: float = 0.25
@@ -70,6 +71,7 @@ class SlideParams:
     park_match: float = 0.08
     match_pad: int = 8
     parked_rms: float = 0.08
+    seen_app: float = 0.2  # a copied sighting must look this much like a learned cursor
     inpaint_rounds: int = 3
     # gestures
     gap_s: float = 0.35
@@ -276,12 +278,22 @@ def _content_change(a: np.ndarray, b: np.ndarray, ignore: np.ndarray, p: SlidePa
     ch = (_absdiff_max(a, b) > p.change_diff) & ~ignore
     if not ch.any():
         return ch
-    n, lab, st, _ = cv2.connectedComponentsWithStats(ch.astype(np.uint8), connectivity=8)
-    keep = np.zeros(n, bool)
-    for i in range(1, n):
-        x, y, w, h, area = st[i]
-        keep[i] = area >= p.change_area * s * s or max(w, h) >= p.change_side * s
-    return keep[lab]
+    # Group nearby changes first: new text appears as separate glyphs, each far below the
+    # size rule, while a line or word of them is clearly content.
+    grouped = cv2.dilate(ch.astype(np.uint8), _ell(p.group_px * s))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(grouped, connectivity=8)
+    lab_ch = lab[ch]
+    if lab_ch.size == 0:
+        return np.zeros_like(ch)
+    count = np.bincount(lab_ch, minlength=n)
+    ys, xs = np.nonzero(ch)
+    x0 = np.full(n, 1 << 30); x1 = np.full(n, -1); y0 = np.full(n, 1 << 30); y1 = np.full(n, -1)
+    np.minimum.at(x0, lab_ch, xs); np.maximum.at(x1, lab_ch, xs)
+    np.minimum.at(y0, lab_ch, ys); np.maximum.at(y1, lab_ch, ys)
+    side = np.maximum(x1 - x0, y1 - y0) + 1
+    keep = (count >= p.change_area * s * s) | (side >= p.change_side * s)
+    keep[0] = False
+    return ch & keep[lab]
 
 
 def _text_pixels(img: np.ndarray, p: SlideParams) -> np.ndarray:
@@ -314,6 +326,10 @@ def find_states(work: VideoInfo, live: list, bg_colour, p: SlideParams,
             continue
         moved = _content_change(f, prev, ignore, p, s).any()
         prev = f
+        if not moved and changing_since is None and _content_change(f, ref, ignore, p, s).any():
+            # A slow change (ink drawn stroke by stroke, a slow fade) never jumps between two
+            # frames: catch it against the state's reference instead.
+            moved = True
         if moved:
             if changing_since is None:
                 changing_since = t
@@ -327,7 +343,7 @@ def find_states(work: VideoInfo, live: list, bg_colour, p: SlideParams,
             changing_since_ = changing_since
             changing_since = None
             if not diff.any():
-                transitions.append((changing_since_, last_change + dt))
+                transitions.append((changing_since_ - dt, last_change + dt))
                 continue
             text = _text_pixels(ref, p) & ~ignore
             screen = diff.mean()
@@ -337,7 +353,7 @@ def find_states(work: VideoInfo, live: list, bg_colour, p: SlideParams,
             cur.t_end = changing_since_
             _close_state(cur, p, bg_colour, ignore)
             states.append(cur)
-            transitions.append((changing_since_, t_new))
+            transitions.append((changing_since_ - dt, t_new))
             cur = SlideState(len(states), kind, t_new, t_new, changing_since_)
             ref = f
         _sample(cur, f, t)
@@ -388,6 +404,7 @@ class PointerTracker:
         self.shapes: list[Shape] = []
         self.last = None  # (t, x, y, box)
         self.track: list = []
+        self.seen: dict = {}  # time -> (x0, y0, grey crop) around each cursor sighting
 
     # -- appearance
     def _match(self, grey: np.ndarray, shape: Shape, x0: int, y0: int, pad: int):
@@ -437,20 +454,33 @@ class PointerTracker:
             return None
         d = _absdiff_max(f, clean)
         changed = (d > p.ptr_diff) & ~ignore
-        grey = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        laser = self._laser(f, changed, s)
-        if laser is not None:
-            self.track.append((t, "laser", laser[0], laser[1]))
-            return ("laser",) + laser
-        cands = []
+        grey = None
+        cands, lasers = [], []
         if changed.any():
             n, lab, st, cen = cv2.connectedComponentsWithStats(changed.astype(np.uint8), connectivity=8)
             for i in range(1, n):
-                x, y, w, h, a = st[i]
+                x, y, w, h, a = (int(v) for v in st[i])
+                if max(w, h) > max(p.laser_comp, p.cur_side) * s:
+                    continue
+                own = lab[y:y + h, x:x + w] == i
+                if max(w, h) <= p.laser_comp * s:
+                    lz = self._laser_blob(f[y:y + h, x:x + w], own, x, y, s)
+                    if lz is not None:
+                        lasers.append(lz)
                 if p.cur_min * s * s <= a <= p.cur_max * s * s and max(w, h) <= p.cur_side * s:
-                    contrast = float(d[lab == i].max())
-                    cands.append({"box": (int(x), int(y), int(w), int(h)), "c": (float(cen[i][0]), float(cen[i][1])),
+                    contrast = float(d[y:y + h, x:x + w][own].max())
+                    cands.append({"box": (x, y, w, h), "c": (float(cen[i][0]), float(cen[i][1])),
                                   "contrast": contrast, "lab": i})
+        if lasers or cands or self.last is not None:
+            grey = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        if lasers:
+            k, lx, ly = max(lasers)
+            # Coloured ink next to a moving cursor is not a laser.
+            beside = [c for c in cands if self.shapes and math.hypot(c["c"][0] - lx, c["c"][1] - ly) <= 30 * s
+                      and self.best_shape(grey, c["box"])[0] <= p.app_good]
+            if not beside:
+                self.track.append((t, "laser", lx, ly))
+                return ("laser", lx, ly)
         lost = self.last is None or t - self.last[0] > p.lost_s
         pick = None
         if cands and self.shapes and not lost:
@@ -488,6 +518,7 @@ class PointerTracker:
                     x, y = bx + sh.hot[0], by + sh.hot[1]
                     self.last = (t, x, y, (bx, by), sh)
                     self.track.append((t, "cursor", x, y))
+                    self._keep(t, grey, x, y)
                     return ("cursor", x, y)
             return None
         app, dist, c, sh, bx, by = pick
@@ -498,37 +529,30 @@ class PointerTracker:
         x, y = bx + sh.hot[0], by + sh.hot[1]
         self.last = (t, x, y, (bx, by), sh)
         self.track.append((t, "cursor", x, y))
+        self._keep(t, grey, x, y)
         return ("cursor", x, y)
 
-    def _laser(self, f: np.ndarray, changed: np.ndarray, s: float):
+    def _keep(self, t, grey, x, y, r: int = 32):
+        H, W = grey.shape
+        x0, y0 = max(0, int(x) - r), max(0, int(y) - r)
+        self.seen[t] = (x0, y0, grey[y0:min(H, int(y) + r), x0:min(W, int(x) + r)].copy())
+
+    def _laser_blob(self, crop: np.ndarray, own: np.ndarray, x: int, y: int, s: float):
+        """A laser dot inside one small change component: bright, saturated, compact."""
         p = self.p
-        mx = f.max(axis=2)
-        mn = f.min(axis=2)
-        col = (mx > p.laser_bright) & ((mx.astype(np.int16) - mn) > p.laser_sat) & changed
-        if not col.any():
+        b, g, r = cv2.split(crop)
+        mx = cv2.max(cv2.max(b, g), r)
+        mn = cv2.min(cv2.min(b, g), r)
+        col = (mx > p.laser_bright) & (cv2.subtract(mx, mn) > p.laser_sat) & own
+        k = int(col.sum())
+        if k < max(10, 15 * s * s):
             return None
-        n, lab, st, _ = cv2.connectedComponentsWithStats(changed.astype(np.uint8), connectivity=8)
-        best = None
-        for i in np.unique(lab[col]):
-            if i == 0:
-                continue
-            x, y, w, h, a = st[i]
-            if max(w, h) > p.laser_comp * s:
-                continue
-            m = col & (lab == i)
-            k = int(m.sum())
-            if k < max(10, 15 * s * s):
-                continue
-            ys, xs = np.nonzero(m)
-            bw, bh = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
-            if max(bw, bh) > p.laser_box * s or k < p.laser_fill * bw * bh or max(bw, bh) / max(1, min(bw, bh)) > p.laser_aspect:
-                continue
-            # Coloured ink next to a moving cursor is not a laser: the component must be mostly the dot.
-            if k < 0.5 * a:
-                continue
-            if best is None or k > best[0]:
-                best = (k, float(xs.mean()), float(ys.mean()))
-        return None if best is None else (best[1], best[2])
+        ys, xs = np.nonzero(col)
+        bw, bh = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+        if (max(bw, bh) > p.laser_box * s or k < p.laser_fill * bw * bh
+                or max(bw, bh) / max(1, min(bw, bh)) > p.laser_aspect):
+            return None
+        return (k, float(x + xs.mean()), float(y + ys.mean()))
 
 
 def track_pointer(work: VideoInfo, states: list, transitions: list, live: list, p: SlideParams,
@@ -550,51 +574,77 @@ def track_pointer(work: VideoInfo, states: list, transitions: list, live: list, 
         in_tr = any(a <= t < b for a, b in transitions) or st.image is None
         clean = st.image if st.image is not None else f
         tr.step(t, f, clean, ignore, in_tr)
-    return tr.track, tr.shapes
+    return tr.track, tr.shapes, tr.seen
 
 
-def remove_parked_cursor(states: list, track: list, shapes: list, p: SlideParams) -> set:
-    """Find learned cursor shapes baked into clean slides near places the cursor was seen; inpaint them.
+def _filled(mask: np.ndarray) -> np.ndarray:
+    """A cursor shape's mask with its outline filled in (the white inside of an arrow)."""
+    m = mask.astype(np.uint8)
+    cnts, _ = cv2.findContours(cv2.morphologyEx(m, cv2.MORPH_CLOSE, _ell(3)), cv2.RETR_EXTERNAL,
+                               cv2.CHAIN_APPROX_NONE)
+    out = m.copy()
+    cv2.drawContours(out, cnts, -1, 1, thickness=-1)
+    return out.astype(bool)
 
-    Returns the ids of the states that changed.
+
+def remove_parked_cursor(states: list, track: list, shapes: list, p: SlideParams, seen: dict | None = None) -> set:
+    """Find a cursor baked into clean slides, near places it was seen, and inpaint it.
+
+    Places: inside the state, the last sighting before it and the first after it. The cursor's
+    exact look is copied from the frame where it was seen at that spot (scaling makes its pixels
+    depend on the sub-pixel position, so a template learned elsewhere matches poorly); learned
+    shapes are the fallback. Returns the ids of the states that changed.
     """
-    s = p.width / 960.0
     fixed = set()
     if not shapes:
         return fixed
-    ts = np.array([x[0] for x in track]) if track else np.zeros(0)
-    for k, st in enumerate(states):
+    seen = seen or {}
+    cursor = [x for x in track if x[1] == "cursor"]
+    for st in states:
         if st.image is None or st.blank:
             continue
-        pts = [(x, y) for (t, tool, x, y) in track if tool == "cursor" and st.t_change <= t < st.t_end]
-        before = [x for x in track if x[1] == "cursor" and x[0] < st.t_change]
-        after = [x for x in track if x[1] == "cursor" and x[0] >= st.t_end]
-        if before:
-            pts.append((before[-1][2], before[-1][3]))
-        if after:
-            pts.append((after[0][2], after[0][3]))
-        if not pts:
+        inside = [x for x in cursor if st.t_change <= x[0] < st.t_end]
+        before = [x for x in cursor if x[0] < st.t_change][-1:]
+        after = [x for x in cursor if x[0] >= st.t_end][:1]
+        spots: dict[tuple, tuple] = {}
+        for t, _, x, y in before + after + inside:
+            spots.setdefault((int(round(x)) // 3, int(round(y)) // 3), (t, x, y))
+        if not spots:
             continue
         grey = cv2.cvtColor(st.image, cv2.COLOR_BGR2GRAY).astype(np.float32)
         H, W = grey.shape
         mask = np.zeros((H, W), np.uint8)
-        for sh in shapes:
-            h, w = sh.patch.shape
-            for (x, y) in pts:
-                x0, y0 = int(x) - sh.hot[0], int(y) - sh.hot[1]
-                ax0, ay0 = max(0, x0 - 40), max(0, y0 - 40)
-                ax1, ay1 = min(W, x0 + w + 40), min(H, y0 + h + 40)
-                if ax1 - ax0 < w or ay1 - ay0 < h:
+        for (t, x, y) in list(spots.values())[:40]:
+            for sh in shapes:
+                h, w = sh.patch.shape
+                x0, y0 = int(round(x)) - sh.hot[0], int(round(y)) - sh.hot[1]
+                if x0 < 0 or y0 < 0 or x0 + w > W or y0 + h > H:
                     continue
-                res = cv2.matchTemplate(grey[ay0:ay1, ax0:ax1], sh.patch, cv2.TM_SQDIFF,
-                                        mask=sh.mask.astype(np.float32))
-                res = np.nan_to_num(res, nan=1e18, posinf=1e18)
-                mn, _, loc, _ = cv2.minMaxLoc(res)
-                rms = math.sqrt(max(0.0, mn) / max(1, sh.mask.sum())) / 255.0
-                if rms <= p.parked_rms:
-                    bx, by = ax0 + loc[0], ay0 + loc[1]
-                    m = cv2.dilate(sh.mask.astype(np.uint8), _ell(3)) * 255
-                    mask[by:by + h, bx:bx + w] = np.maximum(mask[by:by + h, bx:bx + w], m)
+                full = _filled(sh.mask)
+                tmpls = []
+                if t in seen:
+                    cx0, cy0, crop = seen[t]
+                    tx, ty = x0 - cx0, y0 - cy0
+                    if 0 <= tx and 0 <= ty and tx + w <= crop.shape[1] and ty + h <= crop.shape[0]:
+                        tm = crop[ty:ty + h, tx:tx + w]
+                        # Only if it really shows the cursor (not background at a misplaced spot).
+                        app = float(np.abs(tm - sh.patch)[sh.mask].mean() / 255.0)
+                        if app <= p.seen_app and tm[full].std() >= p.shape_min_std:
+                            tmpls.append((tm, 2))
+                tmpls.append((sh.patch, 6))
+                for patch, pad in tmpls:
+                    ax0, ay0 = max(0, x0 - pad), max(0, y0 - pad)
+                    ax1, ay1 = min(W, x0 + w + pad), min(H, y0 + h + pad)
+                    res = cv2.matchTemplate(grey[ay0:ay1, ax0:ax1], np.ascontiguousarray(patch), cv2.TM_SQDIFF,
+                                            mask=full.astype(np.float32))
+                    res = np.nan_to_num(res, nan=1e18, posinf=1e18)
+                    mn, _, loc, _ = cv2.minMaxLoc(res)
+                    rms = math.sqrt(max(0.0, mn) / max(1, full.sum())) / 255.0
+                    if rms <= p.parked_rms:
+                        bx, by = ax0 + loc[0], ay0 + loc[1]
+                        m = cv2.dilate(full.astype(np.uint8), _ell(3)) * 255
+                        mask[by:by + h, bx:bx + w] = np.maximum(mask[by:by + h, bx:bx + w], m)
+                        break
         if mask.any():
             st.image = cv2.inpaint(st.image, mask, 3, cv2.INPAINT_TELEA)
             fixed.add(st.id)
@@ -705,6 +755,8 @@ def _segment_gestures(t, xy, tool, states, p, s, content) -> list:
         for b in range(a, n - 2):
             if t[b + 2] - t[a] > p.circle_max_s:
                 break
+            if abs(turn[b]) > math.radians(150):
+                break  # a reversal (back and forth) is not part of a circle
             tot += turn[b]
             absum += abs(turn[b])
             if abs(tot) >= math.radians(p.circle_turn) and absum <= p.circle_consistency * abs(tot):
@@ -858,7 +910,7 @@ def analyse_slides(info: VideoInfo, workdir: Path, start: float = 0.0, end: floa
         progress(0.15)
 
     # Slide background colour: the most common colour over a few frames.
-    frames = [f for _, f in zip(range(5), _frames(work, 0.5, p.width))]
+    frames = [f for _, (_t, f) in zip(range(5), _frames(work, 0.5, p.width))]
     bg_img = np.median(np.stack(frames), axis=0).astype(np.uint8) if frames else None
     bg_colour = tuple(int(v) for v in np.median(bg_img.reshape(-1, 3), axis=0)) if bg_img is not None else (255, 255, 255)
 
@@ -868,12 +920,13 @@ def analyse_slides(info: VideoInfo, workdir: Path, start: float = 0.0, end: floa
     states, transitions = find_states(work, live, bg_colour, p)
     if progress:
         progress(0.5)
-    track, shapes = track_pointer(work, states, transitions, live, p)
+    track, shapes, seen = track_pointer(work, states, transitions, live, p)
     for _ in range(p.inpaint_rounds):
-        fixed = remove_parked_cursor(states, track, shapes, p)
+        fixed = remove_parked_cursor(states, track, shapes, p, seen)
         if not fixed:
             break
-        sub, _ = track_pointer(work, states, transitions, live, p, shapes=shapes, only=fixed)
+        sub, _, seen2 = track_pointer(work, states, transitions, live, p, shapes=shapes, only=fixed)
+        seen.update(seen2)
         keep = [x for x in track if _state_at(states, x[0]) not in {i for i, st in enumerate(states) if st.id in fixed}]
         track = sorted(keep + sub, key=lambda x: x[0])
     if progress:

@@ -34,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         print("stopped", file=sys.stderr)
         return 130
     except Exception as e:
-        print(f"error: {type(e).__name__}: {e} (details in the job folder's error.log)", file=sys.stderr)
+        from .pipeline import plain_error
+        print(f"error: {plain_error(e)}", file=sys.stderr)
         return 1
 
 

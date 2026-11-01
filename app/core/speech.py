@@ -118,6 +118,9 @@ class Aligner:
         # MMS_FA works through torchaudio 2.8; it only warns that 2.9 removes it (hence our pin).
         warnings.filterwarnings("ignore", message=".*forced_align has been deprecated.*")
         warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
+        # Hyper-threads help a little here (~15% measured on 4 cores / 8 threads).
+        import os
+        torch.set_num_threads(max(1, os.cpu_count() or 1))
         self.torch = torch
         bundle = torchaudio.pipelines.MMS_FA
         self.rate = bundle.sample_rate

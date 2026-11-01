@@ -158,6 +158,8 @@ class BoardResult:
     add_color: np.ndarray  # N x 3 BGR, already darkened
     rem_t: np.ndarray
     rem_idx: np.ndarray
+    add_drift: np.ndarray | None = None  # per add: ink re-accepted after the camera drifted
+    add_gone: np.ndarray | None = None  # per add: when it leaves the replayed board (inf = never)
     stats: dict = field(default_factory=dict)
 
     def ink_at(self, t: float) -> np.ndarray:
@@ -182,29 +184,51 @@ class BoardResult:
         out[ink] = img[ink]
         return out.reshape(self.height, self.width, 3)
 
-    def piece_image(self, piece_id: int) -> tuple[np.ndarray, np.ndarray, list]:
-        """BGRA crop of a piece (transparent background) and its 8-bit drawing-order map.
+    def piece_image(self, piece_id: int) -> tuple[np.ndarray, np.ndarray, list, np.ndarray | None, list]:
+        """A piece for the player: BGRA crop, drawing-order map, box, and removal map.
 
-        Order: accept time first, then left to right; 1..255, 0 where there is no ink. A pixel
-        added more than once keeps its first order and its last colour.
+        - BGRA: the strokes on a transparent background.
+        - order: 8-bit, 1..255 linear in write time over the returned [draw_start, draw_end]
+          (within one sample, left to right); 0 where there is no ink.
+        - removal map: 24-bit RGB per pixel = deciseconds + 1 when that pixel leaves the board
+          (partial erases), 0 = stays; None when nothing of the piece is ever removed.
+        Ink re-accepted after the camera drifted is left out: the original marks stand for it.
+        A pixel added more than once keeps its first order and its last colour.
         """
         sel = self.add_piece == piece_id
+        if self.add_drift is not None and (sel & ~self.add_drift).any():
+            sel &= ~self.add_drift
         idx, t, col = self.add_idx[sel], self.add_t[sel], self.add_color[sel]
+        gone = self.add_gone[sel] if self.add_gone is not None else np.full(idx.size, np.inf)
         if idx.size == 0:
-            return np.zeros((1, 1, 4), np.uint8), np.zeros((1, 1), np.uint8), [0, 0, 1, 1]
+            return np.zeros((1, 1, 4), np.uint8), np.zeros((1, 1), np.uint8), [0, 0, 1, 1], None, [0.0, 0.0]
         ys, xs = np.divmod(idx, self.width)
         x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
         bgra = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
         bgra[ys - y0, xs - x0, :3] = col  # adds are in time order, so later colours win
         bgra[ys - y0, xs - x0, 3] = 255
-        order = np.lexsort((xs, t))
-        rank = np.empty(idx.size, np.int64)
-        rank[order] = np.arange(idx.size)
-        val = (1 + (rank * 254) // max(1, idx.size - 1)).astype(np.uint8)
+        # Order follows real time: each sample's new pixels were written during the sample
+        # interval before it, so spread them over it left to right. Then 1..255 maps linearly
+        # onto [draw_start, draw_end], so a piece written in bursts replays in bursts.
+        te = t.astype(np.float64).copy()
+        dt = 1.0 / max(1e-6, self.fps)
+        for tv in np.unique(t):
+            m = t == tv
+            r = np.argsort(np.argsort(xs[m], kind="stable"), kind="stable")
+            te[m] = tv - dt + dt * (r + 1) / max(1, m.sum())
+        lo, hi = float(te.min()), float(te.max())
+        val = (1 + np.round(254 * (te - lo) / max(1e-6, hi - lo))).astype(np.int64).clip(1, 255).astype(np.uint8)
         omap = np.zeros((y1 - y0, x1 - x0), np.uint8)
-        rev = np.argsort(-rank)  # write latest first so the earliest order wins
+        rev = np.argsort(-te, kind="stable")  # write latest first so the earliest order wins
         omap[ys[rev] - y0, xs[rev] - x0] = val[rev]
-        return bgra, omap, [int(x0), int(y0), int(x1 - x0), int(y1 - y0)]
+        gmap = None
+        if np.isfinite(gone).any():
+            # The latest add of a pixel decides when it leaves (it may have been rewritten).
+            code = np.where(np.isfinite(gone), np.round(np.nan_to_num(gone, posinf=0) * 10) + 1, 0).astype(np.int64)
+            last = np.zeros((y1 - y0, x1 - x0), np.int64)
+            last[ys - y0, xs - x0] = code  # adds are in time order
+            gmap = np.stack([last & 255, (last >> 8) & 255, (last >> 16) & 255], axis=2).astype(np.uint8)  # BGR
+        return bgra, omap, [int(x0), int(y0), int(x1 - x0), int(y1 - y0)], gmap, [round(lo, 2), round(hi, 2)]
 
 
 def _middle(gray: np.ndarray) -> np.ndarray:
@@ -400,6 +424,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             n_adds += nnew
             pid = np.zeros(nnew, np.int64)
             drift = np.zeros(nnew, bool)
+            stale = np.zeros(nnew, bool)  # small bits that joined an old piece: not an update
             pre_window = t - t_settle <= p.pre_window
 
             # Drift: ink within ~2 px of accepted ink. Decided per component below: a component
@@ -451,6 +476,10 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                         near = touch_img[cy, cx].astype(np.int64)
                         if (near > 0).any():
                             target = int(np.bincount(near[near > 0]).argmax())
+                            if t - pieces[target].last_update > p.join_recent:
+                                # Joining an old piece must not make it "recent", or the rest of
+                                # new writing that starts next to it would chain into it.
+                                stale[members] = True
                     if not target and not pre_window:
                         hits = [q for q in pieces.values() if not q.pre_existing
                                 and t - q.last_update <= p.join_recent and touches(q.box, box, pad)]
@@ -477,7 +506,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                     q.written_after = min(q.written_after, wa)
                     # Grow the box now, so later components of this step see it.
                     q.box = [min(q.box[0], box[0]), min(q.box[1], box[1]), max(q.box[2], box[2]), max(q.box[3], box[3])]
-                    if members.size >= p.update_min_px * s * s:
+                    if members.size >= p.update_min_px * s * s and not stale[members[0]]:
                         q.last_update = t
 
             pid = np.array([resolve(int(v)) for v in pid], np.int64) if alias else pid
@@ -492,7 +521,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                          max(q.box[2], int(xs[sel].max()) + 1), max(q.box[3], int(ys[sel].max()) + 1)]
                 # Only real writing counts as an update: not a stray edge pixel or two, and not
                 # ink re-accepted after the camera drifted.
-                if (sel & ~drift).sum() >= p.update_min_px * s * s:
+                if (sel & ~drift & ~stale).sum() >= p.update_min_px * s * s:
                     q.last_update = t
 
             accepted[ys, xs] = True
@@ -543,6 +572,7 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
         removed_at[R_add] = R_t
     life = removed_at - A_t
     short = life < p.min_life
+    shown_removed, replaced = _display_removals(A_t, A_idx, A_drift, removed_at, W, H, s, p)
 
     bx, by = p.band_frac * W, p.band_frac * H
     out_pieces = []
@@ -582,9 +612,10 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
         times = np.sort(A_t[written if written.size else kept])
         t_seen = float(times[int(np.floor(p.seen_frac * (times.size - 1)))])
         t_shown = float(times[int(np.floor(0.95 * (times.size - 1)))])
-        rem = removed_at[kept]
+        shown = kept[~A_drift[kept]] if (~A_drift[kept]).any() else kept
+        rem = shown_removed[shown]
         removed = rem[np.isfinite(rem)]
-        rem_when = float(np.median(removed)) if removed.size >= 0.5 * kept.size and removed.size else None
+        rem_when = float(np.median(removed)) if removed.size >= 0.5 * shown.size and removed.size else None
         kys, kxs = np.divmod(A_idx[kept], W)
         if q.pre_existing:
             t_seen = t_shown = float(t_settle)
@@ -611,6 +642,8 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
             continue
         if short[adds].mean() > p.short_life_frac:
             continue
+        if replaced[adds].mean() > 0.5:
+            continue  # the camera moved; the ink came back next to where it was
         x0, y0, x1, y1 = e["box"]
         out_erases.append({"t": round(float(e["t"]), 2), "box": [x0, y0, x1 - x0, y1 - y0], "pixels": int(adds.size)})
 
@@ -635,5 +668,39 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
         pieces=out_pieces, erases=out_erases,
         add_t=A_t[kept_ids], add_idx=A_idx[kept_ids], add_piece=A_pid[kept_ids], add_color=col,
         rem_t=removed_at[rem_ids], rem_idx=A_idx[rem_ids],
+        add_drift=A_drift[kept_ids], add_gone=shown_removed[kept_ids],
         stats={"pieces_raw": len(pieces), "pieces_kept": len(out_pieces), "erases": len(out_erases)},
     )
+
+
+def _display_removals(A_t, A_idx, A_drift, removed_at, W, H, s, p):
+    """When each mark should disappear from the replayed board.
+
+    A removal followed within a few seconds by drift-accepted ink within ~2 px is the camera
+    moving, not an erase: the original mark stays, and inherits the removal time of the ink that
+    replaced it (newest first, so chains of drift resolve). Returns (times, replaced flags).
+    """
+    shown = removed_at.copy()
+    replaced = np.zeros(removed_at.size, bool)
+    drift_ids = np.nonzero(A_drift)[0]
+    rem_ids = np.nonzero(np.isfinite(removed_at))[0]
+    if drift_ids.size == 0 or rem_ids.size == 0:
+        return shown, replaced
+    d_order = drift_ids[np.argsort(A_t[drift_ids], kind="stable")]
+    d_times = A_t[d_order]
+    k = _ellipse(2 * p.drift_r * s + 1)
+    rem_times = removed_at[rem_ids]
+    for tr in np.unique(rem_times)[::-1]:
+        lo, hi = np.searchsorted(d_times, [tr - 1.0, tr + 4.0])
+        if hi <= lo:
+            continue
+        cand = d_order[lo:hi]
+        img = np.zeros(W * H, np.float32)
+        img[A_idx[cand]] = (cand + 1).astype(np.float32)  # ids up to 2^24 are exact in float32
+        near = cv2.dilate(img.reshape(H, W), k).reshape(-1)
+        batch = rem_ids[rem_times == tr]
+        by = near[A_idx[batch]].astype(np.int64) - 1
+        hit = by >= 0
+        replaced[batch[hit]] = True
+        shown[batch[hit]] = shown[by[hit]]
+    return shown, replaced

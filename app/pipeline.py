@@ -25,11 +25,34 @@ from .core.meta_api import MetaAPIError, MetaClient
 from .core import understand
 
 JOBS = DATA_DIR / "jobs"
-STAGES = ["probe", "classify", "board", "people", "capture", "speech", "read", "link", "write"]
+STAGES = ["probe", "classify", "board", "people", "capture", "speech", "read", "link", "write", "align"]
 
 
 class JobError(Exception):
     """Something the owner should read as one plain line."""
+
+
+def replace_file(tmp: Path, path: Path, tries: int = 40) -> bool:
+    """os.replace that waits out a reader: on Windows it fails while the server has the file open."""
+    for i in range(tries):
+        try:
+            tmp.replace(path)
+            return True
+        except PermissionError:
+            time.sleep(0.05 * (1 + i % 5))
+    return False
+
+
+def plain_error(e: BaseException) -> str:
+    """One line for the owner, whatever went wrong."""
+    if isinstance(e, (media.MediaError, MetaAPIError, JobError)):
+        return str(e)
+    if isinstance(e, MemoryError):
+        return "ran out of memory; try a shorter part of the video with --start/--end"
+    if isinstance(e, OSError):
+        return f"file problem: {e.strerror or e} ({Path(e.filename).name if getattr(e, 'filename', None) else 'disk'})"
+    text = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+    return f"something went wrong ({type(e).__name__}: {text[:160]}); details are in error.log"
 
 
 def job_id_for(video: Path, start: float | None, end: float | None) -> str:
@@ -59,7 +82,8 @@ class Status:
         self._last_write = now
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, indent=1), encoding="utf-8")
-        tmp.replace(self.path)
+        if not replace_file(tmp, self.path) and not force:
+            return  # a reader held the file; the next update will get through
         if self.on_change:
             self.on_change(self.data)
 
@@ -94,6 +118,86 @@ class Status:
             self.write(force=True)
 
 
+class SpeechJob:
+    """Transcribe at once; align word times with MMS on its own thread.
+
+    MMS on CPU runs at only ~1-3x real time, so for long lectures the replay is first written
+    with turn-level (proportional) word times and rewritten when MMS lands.
+    """
+
+    def __init__(self, info, s0: float, s1: float, client: MetaClient, status: "Status"):
+        self.info, self.s0, self.s1, self.client, self.status = info, s0, s1, client, status
+        self.pool = ThreadPoolExecutor(max_workers=2)
+        self.aligned = None
+        self.transcribed = self.pool.submit(self._transcribe)
+
+    def _transcribe(self):
+        st, s0 = self.status, self.s0
+        st.start("speech")
+        pcm = media.extract_audio(self.info, s0, self.s1) if self.info.has_audio else None
+        if pcm is None or pcm.size < speech.RATE // 2:
+            st.skip("speech", "no sound track")
+            st.skip("align", "no sound track")
+            return None, []
+        turns = speech.transcribe(pcm, self.client, progress=lambda f: st.progress("speech", f))
+        st.done("speech", f"{len(turns)} turns")
+        self.aligned = self.pool.submit(self._align, pcm, [dict(t) for t in turns])
+        for t in turns:
+            t["start"] = round(t["start"] + s0, 3)
+            t["end"] = round(t["end"] + s0, 3)
+        return pcm, turns
+
+    def _align(self, pcm, turns):
+        st = self.status
+        st.start("align", "MMS word times")
+        words, how = speech.align_words(pcm, turns, progress=lambda f: st.progress("align", f))
+        for w in words:
+            w["s"] = round(w["s"] + self.s0, 3)
+            w["e"] = round(w["e"] + self.s0, 3)
+        st.done("align", f"{len(words)} words, timing: {how}")
+        return words, how
+
+    def first(self):
+        """(turns, words, timing) now: MMS times if they are ready, else proportional ones."""
+        pcm, turns = self.transcribed.result()
+        if not turns:
+            return [], [], "none"
+        if self.aligned is not None and self.aligned.done():
+            words, how = self.aligned.result()
+            return turns, words, how
+        words = [w for t in turns for w in speech._proportional(t, t["text"].split())]
+        return turns, words, "proportional"
+
+    def final(self):
+        pcm, turns = self.transcribed.result()
+        if self.aligned is None:
+            return turns, [], "none"
+        words, how = self.aligned.result()
+        return turns, words, how
+
+
+def _write_replay(job_dir: Path, replay: dict):
+    path = job_dir / "replay.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(replay, ensure_ascii=False, indent=1), encoding="utf-8")
+    if not replace_file(tmp, path, tries=200):
+        raise JobError("could not save replay.json: the file is locked by another program")
+
+
+def _finish_with_speech(speech_job: SpeechJob, link_and_write, job_dir: Path, pool, log) -> Path:
+    """Write the replay now; if word times were still refining, link again and rewrite it."""
+    turns, words, how = speech_job.first()
+    log(f"speech: {len(turns)} turns, {len(words)} words ({how})")
+    link_and_write(turns, words, how)
+    if how == "proportional":
+        log("first version written; refining word times with MMS")
+        turns, words, how = speech_job.final()
+        link_and_write(turns, words, how)
+    shutil.rmtree(job_dir / "tmp", ignore_errors=True)
+    pool.shutdown(wait=False)
+    return job_dir / "replay.json"
+
+
 def _link_or_copy(src: Path, dst: Path):
     if dst.exists():
         return
@@ -124,7 +228,7 @@ def run(video: str | Path, job_dir: Path | None = None, start: float | None = No
         return out
     except Exception as e:  # report one line; keep the traceback in the job folder
         (job_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
-        msg = str(e) if isinstance(e, (media.MediaError, MetaAPIError, JobError)) else f"{type(e).__name__}: {e}"
+        msg = plain_error(e)
         status.finish(msg)
         raise
 
@@ -144,24 +248,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     pool = ThreadPoolExecutor(max_workers=3)
 
     # Speech runs alongside everything else.
-    def do_speech():
-        status.start("speech")
-        pcm = media.extract_audio(info, s0, s1) if info.has_audio else None
-        if pcm is None or pcm.size < speech.RATE // 2:
-            status.skip("speech", "no sound track")
-            return [], [], "none"
-        turns = speech.transcribe(pcm, client, progress=lambda f: status.progress("speech", 0.5 * f))
-        words, how = speech.align_words(pcm, turns, progress=lambda f: status.progress("speech", 0.5 + 0.5 * f))
-        for t in turns:
-            t["start"] = round(t["start"] + s0, 3)
-            t["end"] = round(t["end"] + s0, 3)
-        for w in words:
-            w["s"] = round(w["s"] + s0, 3)
-            w["e"] = round(w["e"] + s0, 3)
-        status.done("speech", f"{len(turns)} turns, {len(words)} words, timing: {how}")
-        return turns, words, how
-
-    speech_job = pool.submit(do_speech)
+    speech_job = SpeechJob(info, s0, s1, client, status)
 
     status.start("classify")
     times = [s0 + (s1 - s0) * f for f in (0.15, 0.4, 0.65, 0.9)]
@@ -210,20 +297,22 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     everything = _board_all(board)
     media.imwrite(job_dir / "board_final.png", final)
     for p in pieces:
-        bgra, order, box = board.piece_image(p["id"])
+        bgra, order, box, gone, draw = board.piece_image(p["id"])
         media.imwrite(job_dir / "pieces" / f"{p['id']:03d}.png", bgra)
         media.imwrite(job_dir / "pieces" / f"{p['id']:03d}_order.png", order)
         p["image"], p["order"] = f"pieces/{p['id']:03d}.png", f"pieces/{p['id']:03d}_order.png"
+        p["gone"] = None
+        if gone is not None:
+            media.imwrite(job_dir / "pieces" / f"{p['id']:03d}_gone.png", gone)
+            p["gone"] = f"pieces/{p['id']:03d}_gone.png"
+        p["image_box"] = box
+        p["draw"] = draw
 
     status.start("read")
     reads = understand.read_pieces(client, board, everything, pieces, subject=kind.get("subject", ""),
                                    progress=lambda f: status.progress("read", f))
     status.done("read", f"{len(reads)} read")
 
-    turns, words, how = speech_job.result()
-    log(f"speech: {len(turns)} turns, {len(words)} words ({how})")
-
-    status.start("link")
     elements = []
     for p in pieces:
         r = reads.get(p["id"], {})
@@ -231,49 +320,48 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
                          "t_seen": p["t_seen"], "t_shown": p["t_shown"], "written_after": p["written_after"],
                          "revealed": p["revealed"], "removed_at": p["removed_at"],
                          **({"pre_existing": True} if p["pre_existing"] else {})})
-    links = understand.link(client, elements, words, s1, kind="board") if words else {"elements": {}, "chapters": []}
-    status.done("link", f"{len(links['elements'])} linked, {len(links['chapters'])} chapters")
 
-    status.start("write")
-    out_pieces = []
-    for p in pieces:
-        r = reads.get(p["id"], {"kind": "other", "text": "", "latex": ""})
-        lk = links["elements"].get(str(p["id"]), {})
-        spoken = understand.snap_to_words(lk.get("spoken", []), words)
-        redraw = lk.get("redraw_at") if p["revealed"] else None
-        if p["revealed"] and redraw is None:
-            redraw = spoken[0]["start"] if spoken and spoken[0]["start"] < p["t_seen"] else None
-        out_pieces.append({
-            "id": p["id"], "box": p["box"], "image": p["image"], "order": p["order"],
-            "t_seen": p["t_seen"], "t_shown": p["t_shown"], "written_after": p["written_after"],
-            "revealed": p["revealed"], "removed_at": p["removed_at"], "pre_existing": p["pre_existing"],
-            "read": r, "spoken": spoken, "redraw_at": redraw,
-        })
-    replay = {
-        "version": 1,
-        "video": {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width,
-                  "height": info.height, "start": round(s0, 3), "end": round(s1, 3)},
-        "type": "board",
-        "subject": kind.get("subject", ""),
-        "board": {
-            "size": [board.width, board.height], "mode": board.mode, "corners": board.corners,
-            "background": hexcolor(board.background), "pieces": out_pieces, "erases": board.erases,
-            "t_start": round(board.t_start, 2),
-        },
-        "transcript": {"turns": turns, "words": words, "timing": how},
-        "chapters": links["chapters"],
-        "stats": {"seconds": round(time.perf_counter() - t_all, 1), "api": client.summary(),
-                  "capture": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in board.stats.items()}},
-    }
-    path = job_dir / "replay.json"
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(replay, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(path)
-    shutil.rmtree(job_dir / "tmp", ignore_errors=True)
-    pool.shutdown(wait=False)
-    status.done("write")
-    log(f"done in {replay['stats']['seconds']}s, API {client.summary()}")
-    return path
+    def link_and_write(turns, words, how):
+        status.start("link")
+        links = understand.link(client, elements, words, s1, kind="board") if words else {"elements": {}, "chapters": []}
+        status.done("link", f"{len(links['elements'])} linked, {len(links['chapters'])} chapters")
+        status.start("write")
+        out_pieces = []
+        for p in pieces:
+            r = reads.get(p["id"], {"kind": "other", "text": "", "latex": ""})
+            lk = links["elements"].get(str(p["id"]), {})
+            spoken = understand.snap_to_words(lk.get("spoken", []), words)
+            redraw = lk.get("redraw_at") if p["revealed"] else None
+            if p["revealed"] and redraw is None:
+                redraw = spoken[0]["start"] if spoken and spoken[0]["start"] < p["t_seen"] else None
+            out_pieces.append({
+                "id": p["id"], "box": p["image_box"], "image": p["image"], "order": p["order"], "gone": p["gone"],
+                "draw": p["draw"],
+                "t_seen": p["t_seen"], "t_shown": p["t_shown"], "written_after": p["written_after"],
+                "revealed": p["revealed"], "removed_at": p["removed_at"], "pre_existing": p["pre_existing"],
+                "read": r, "spoken": spoken, "redraw_at": redraw,
+            })
+        replay = {
+            "version": 1,
+            "video": {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width,
+                      "height": info.height, "start": round(s0, 3), "end": round(s1, 3)},
+            "type": "board",
+            "subject": kind.get("subject", ""),
+            "board": {
+                "size": [board.width, board.height], "mode": board.mode, "corners": board.corners,
+                "background": hexcolor(board.background), "pieces": out_pieces, "erases": board.erases,
+                "t_start": round(board.t_start, 2),
+            },
+            "transcript": {"turns": turns, "words": words, "timing": how},
+            "chapters": links["chapters"],
+            "stats": {"seconds": round(time.perf_counter() - t_all, 1), "api": client.summary(),
+                      "capture": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in board.stats.items()}},
+        }
+        _write_replay(job_dir, replay)
+        status.done("write", "word times refining" if how == "proportional" else "")
+        log(f"wrote replay.json ({how} word times) after {replay['stats']['seconds']}s, API {client.summary()}")
+
+    return _finish_with_speech(speech_job, link_and_write, job_dir, pool, log)
 
 
 def _words_between(words: list[dict], a: float, b: float) -> str:
@@ -311,8 +399,7 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
             elements[sid] = els
             status.progress("read", 0.5 * (k + 1) / max(1, len(readable)))
 
-    turns, words, how = speech_job.result()
-    log(f"speech: {len(turns)} turns, {len(words)} words ({how})")
+    turns, words, how = speech_job.first()
 
     # What each pointing gesture means (Muse Spark), with the code's guess as a hint.
     def state_of(t):
@@ -355,45 +442,42 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
                                 "path": g.get("path", [])[:200]})
     status.done("read", f"{sum(len(v) for v in elements.values())} elements, {len(annotations)} annotations")
 
-    status.start("link")
     link_els = [{"id": e["id"], "kind": e["kind"], "text": e["text"], "t_start": round(st.t_start, 2),
                  "t_end": round(st.t_end, 2), "slide": st.id} for st in readable for e in elements.get(st.id, [])]
-    links = understand.link(client, link_els, words, s1, kind="slides") if words else {"elements": {}, "chapters": []}
-    status.done("link", f"{len(links['elements'])} linked, {len(links['chapters'])} chapters")
 
-    status.start("write")
-    out_states = []
-    for st in res.states:
-        els = []
-        for e in elements.get(st.id, []):
-            lk = links["elements"].get(e["id"], {})
-            els.append({**e, "spoken": understand.snap_to_words(lk.get("spoken", []), words)})
-        out_states.append({"id": st.id, "kind": st.kind, "t_start": round(st.t_start, 2), "t_end": round(st.t_end, 2),
-                           "t_change": round(st.t_change, 2), "blank": st.blank,
-                           "image": f"slides/{st.id:03d}.png" if st.image is not None else None, "elements": els})
-    replay = {
-        "version": 1,
-        "video": {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width,
-                  "height": info.height, "start": round(s0, 3), "end": round(s1, 3)},
-        "type": "slides",
-        "subject": kind.get("subject", ""),
-        "slides": {"size": [res.width, res.height], "background": hexcolor(res.background), "live": res.live,
-                   "states": out_states, "annotations": annotations,
-                   "pointer": [[round(t, 2), tool[0], round(x, 1), round(y, 1)] for t, tool, x, y in res.track]},
-        "transcript": {"turns": turns, "words": words, "timing": how},
-        "chapters": links["chapters"],
-        "stats": {"seconds": round(time.perf_counter() - t_all, 1), "api": client.summary(),
-                  "slides": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in res.stats.items()}},
-    }
-    path = job_dir / "replay.json"
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(replay, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(path)
-    shutil.rmtree(job_dir / "tmp", ignore_errors=True)
-    pool.shutdown(wait=False)
-    status.done("write")
-    log(f"done in {replay['stats']['seconds']}s, API {client.summary()}")
-    return path
+    def link_and_write(turns, words, how):
+        status.start("link")
+        links = understand.link(client, link_els, words, s1, kind="slides") if words else {"elements": {}, "chapters": []}
+        status.done("link", f"{len(links['elements'])} linked, {len(links['chapters'])} chapters")
+        status.start("write")
+        out_states = []
+        for st in res.states:
+            els = []
+            for e in elements.get(st.id, []):
+                lk = links["elements"].get(e["id"], {})
+                els.append({**e, "spoken": understand.snap_to_words(lk.get("spoken", []), words)})
+            out_states.append({"id": st.id, "kind": st.kind, "t_start": round(st.t_start, 2), "t_end": round(st.t_end, 2),
+                               "t_change": round(st.t_change, 2), "blank": st.blank,
+                               "image": f"slides/{st.id:03d}.png" if st.image is not None else None, "elements": els})
+        replay = {
+            "version": 1,
+            "video": {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width,
+                      "height": info.height, "start": round(s0, 3), "end": round(s1, 3)},
+            "type": "slides",
+            "subject": kind.get("subject", ""),
+            "slides": {"size": [res.width, res.height], "background": hexcolor(res.background), "live": res.live,
+                       "states": out_states, "annotations": annotations,
+                       "pointer": [[round(t, 2), tool[0], round(x, 1), round(y, 1)] for t, tool, x, y in res.track]},
+            "transcript": {"turns": turns, "words": words, "timing": how},
+            "chapters": links["chapters"],
+            "stats": {"seconds": round(time.perf_counter() - t_all, 1), "api": client.summary(),
+                      "slides": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in res.stats.items()}},
+        }
+        _write_replay(job_dir, replay)
+        status.done("write", "word times refining" if how == "proportional" else "")
+        log(f"wrote replay.json ({how} word times) after {replay['stats']['seconds']}s, API {client.summary()}")
+
+    return _finish_with_speech(speech_job, link_and_write, job_dir, pool, log)
 
 
 def _board_all(board) -> np.ndarray:
