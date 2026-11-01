@@ -1,7 +1,7 @@
 // Draws the virtual board for a time t on a <canvas>, and drives the HTML overlays (typeset pieces,
 // "was hidden" tags) from the same clock. Pure canvas drawing: the original video is never touched.
 import { jobFileUrl } from '../api';
-import type { BoardData, Piece } from '../types';
+import type { BoardData, BoardLine, Piece } from '../types';
 import { FrameCache, goneCount, loadSprite, type Sprite } from './sprites';
 import { alphaAt, progressAt, schedule, stepFor, tagAt, talkingAt, typesetIds, type Schedule } from './timing';
 
@@ -16,7 +16,22 @@ interface Entry {
   /** Bigger typeset pieces whose box holds this one and whose reading repeats it (the reader saw it twice). */
   coveredBy: Entry[];
   hide: number; // 0..1, how far a covering piece has replaced this one in typeset mode (last render)
+  lineHide: number; // 0..1, how far its finished line has replaced it in typeset mode (last render)
 }
+
+/** A line written in bursts (several pieces), typeset as one expression once all of it is written. */
+interface LineEntry {
+  line: BoardLine;
+  key: number; // negative id of its typeset element
+  members: Entry[];
+  ok: boolean; // its typesetting fits legibly
+  w: number; // 0..1 shown (last render)
+}
+
+const LINE_FADE = 0.4;
+
+/** Typeset-layer id of a line: negative, so it never clashes with a piece id. */
+export const lineKey = (i: number) => -(i + 1);
 
 /** Reading reduced to its symbols, for "does this reading repeat that one" checks. */
 const readingKey = (p: Piece) =>
@@ -61,6 +76,8 @@ export class BoardRenderer {
   /** Elements the renderer updates every frame; filled by the React layer. */
   typesetEls = new Map<number, HTMLElement>();
   tagEls = new Map<number, HTMLElement>();
+  readonly lines: LineEntry[] = [];
+  private lineByKey = new Map<number, LineEntry>();
 
   private cache = new FrameCache();
   private ctx: CanvasRenderingContext2D;
@@ -95,6 +112,7 @@ export class BoardRenderer {
       a: 0,
       coveredBy: [],
       hide: 0,
+      lineHide: 0,
     }));
     for (const e of this.entries) {
       if (!e.typeset) continue;
@@ -108,6 +126,13 @@ export class BoardRenderer {
     // Pre-existing writing underneath, then in the order it is drawn.
     this.entries.sort((a, b) => a.sched.start - b.sched.start);
     for (const e of this.entries) this.byId.set(e.piece.id, e);
+    (board.lines ?? []).forEach((line, i) => {
+      const members = line.pieces.map((id) => this.byId.get(id)).filter((m): m is Entry => !!m);
+      if (members.length < 2 || !(line.read?.latex?.trim() || line.read?.text?.trim())) return;
+      const le: LineEntry = { line, key: lineKey(i), members, ok: true, w: 0 };
+      this.lines.push(le);
+      this.lineByKey.set(le.key, le);
+    });
     for (const e of this.entries) {
       const p = e.piece;
       const file = (f: string | null | undefined) => (f ? jobFileUrl(jobId, f) : null);
@@ -165,6 +190,14 @@ export class BoardRenderer {
 
   /** The typeset layer reports when a reading cannot be shown legibly in its box: keep the handwriting. */
   setTypesetOk(id: number, ok: boolean) {
+    const le = this.lineByKey.get(id);
+    if (le) {
+      if (le.ok !== ok) {
+        le.ok = ok;
+        this.dirty = true;
+      }
+      return;
+    }
     const e = this.byId.get(id);
     if (!e) return;
     const v = ok && this.typesetIds.has(id);
@@ -228,8 +261,23 @@ export class BoardRenderer {
     // In typeset mode a repeated reading fades out as the piece that repeats it is drawn.
     for (const e of this.entries) {
       e.hide = 0;
+      e.lineHide = 0;
       if (!this.typesetMode || !e.typeset) continue;
       for (const o of e.coveredBy) if (o.typeset) e.hide = Math.max(e.hide, o.p * o.a);
+    }
+    // A finished line replaces its fragments: shown once every piece of it is fully drawn (fading in over
+    // LINE_FADE after the last one finishes) and faded with the first of them to be erased.
+    for (const le of this.lines) {
+      le.w = 0;
+      if (!this.typesetMode || !le.ok || le.members.some((m) => m.p < 1)) continue;
+      let since = Infinity;
+      let alpha = 1;
+      for (const m of le.members) {
+        if (m.sched.end !== -Infinity) since = Math.min(since, t - m.sched.end);
+        alpha = Math.min(alpha, m.a);
+      }
+      le.w = Math.min(1, since / LINE_FADE) * alpha;
+      for (const m of le.members) m.lineHide = Math.max(m.lineHide, le.w);
     }
 
     // Highlighter behind whatever is being talked about right now.
@@ -256,10 +304,11 @@ export class BoardRenderer {
     for (const e of this.entries) {
       if (e.p <= 0 || e.a <= 0 || !e.sprite) continue;
       if (this.typesetMode && e.typeset) continue;
+      if (e.lineHide > 0.98) continue;
       const step = stepFor(e.p);
       if (!step) continue;
       const [x, y, w, h] = e.piece.box;
-      ctx.globalAlpha = e.a;
+      ctx.globalAlpha = e.a * (1 - e.lineHide);
       ctx.drawImage(this.cache.frame(e.sprite, step, goneCount(e.sprite, t)), x, y, w || e.sprite.w, h || e.sprite.h);
     }
     ctx.globalAlpha = 1;
@@ -274,9 +323,14 @@ export class BoardRenderer {
     }
 
     for (const [id, el] of this.typesetEls) {
+      const le = this.lineByKey.get(id);
+      if (le) {
+        this.setStyle(el, le.w, 'none');
+        continue;
+      }
       const e = this.byId.get(id);
       if (!e) continue;
-      const vis = e.p > 0 && e.typeset ? e.a * (1 - e.hide) : 0;
+      const vis = e.p > 0 && e.typeset ? e.a * (1 - e.hide) * (1 - e.lineHide) : 0;
       this.setStyle(el, vis, e.p >= 1 ? 'none' : `inset(-20% ${((1 - e.p) * 100).toFixed(1)}% -20% -5%)`);
     }
     for (const [id, el] of this.tagEls) {
@@ -297,7 +351,7 @@ export class BoardRenderer {
       const [x, y, w, h] = e.piece.box;
       if (bx < x - R || bx > x + w + R || by < y - R || by > y + h + R) continue;
       let d: number;
-      if (this.typesetMode && e.typeset) {
+      if (this.typesetMode && (e.typeset || e.lineHide > 0.5)) {
         const dx = Math.max(x - bx, 0, bx - (x + w));
         const dy = Math.max(y - by, 0, by - (y + h));
         d = Math.hypot(dx, dy);

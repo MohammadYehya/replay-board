@@ -40,12 +40,24 @@ export interface Erase {
   box: Box;
 }
 
+/** Pieces written on one line in bursts, read (and typeset) together. */
+export interface BoardLine {
+  id: string;
+  pieces: number[];
+  box: Box;
+  t_complete: number;
+  removed_at?: number | null;
+  pre_existing?: boolean;
+  read?: Reading;
+}
+
 export interface BoardData {
   size: [number, number];
   mode?: string;
   corners?: number[][];
   background?: string;
   pieces: Piece[];
+  lines?: BoardLine[];
   erases?: Erase[];
   t_start?: number;
 }

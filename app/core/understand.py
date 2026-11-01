@@ -101,7 +101,8 @@ def hires_crops(info, corners, board, pieces: list[dict], person=None, scale: fl
     plans = []
     for p in pieces:
         own = np.zeros(W * H, bool)
-        own[board.add_idx[board.add_piece == p["id"]]] = True
+        ids = p.get("members") or [p["id"]]  # a line of several pieces reads as one
+        own[board.add_idx[np.isin(board.add_piece, ids)]] = True
         own = own.reshape(H, W)
         if not own.any():
             continue
@@ -167,7 +168,7 @@ def read_pieces(client: MetaClient, board, board_img: np.ndarray, pieces: list[d
                 crop = crops[p["id"]]
             else:
                 own = np.zeros(board_img.shape[:2], bool)
-                idx = board.add_idx[board.add_piece == p["id"]]
+                idx = board.add_idx[np.isin(board.add_piece, p.get("members") or [p["id"]])]
                 own.reshape(-1)[idx] = True
                 crop = piece_crop(board_img, own, p["box"])
             parts.append(text_part(f"Piece id {p['id']}:"))

@@ -43,7 +43,22 @@ def build_notes(replay: dict) -> str:
                     t = (e.get("spoken") or [{}])[0].get("start", st["t_start"])
                     entries.append((t, line, e.get("spoken") or []))
     else:
+        pieces = {p.get("id"): p for p in replay["board"]["pieces"]}
+        in_line = set()
+        for ln in replay["board"].get("lines") or []:  # a line written in bursts reads as one entry
+            text = _item(ln.get("read") or {})
+            members = [pieces[i] for i in ln["pieces"] if i in pieces]
+            if not text or not members:
+                continue
+            in_line.update(ln["pieces"])
+            sp = sorted((s for p in members for s in (p.get("spoken") or [])), key=lambda s: s["start"])
+            if ln.get("pre_existing") and not sp:
+                continue
+            t = sp[0]["start"] if sp else min(p.get("redraw_at") or p["t_seen"] for p in members)
+            entries.append((t, text, sp))
         for p in replay["board"]["pieces"]:
+            if p.get("id") in in_line:
+                continue
             line = _item(p.get("read") or {})
             if not line:
                 continue

@@ -342,7 +342,22 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
         crops = {}
     reads = understand.read_pieces(client, board, everything, pieces, subject=kind.get("subject", ""),
                                    progress=lambda f: status.progress("read", f), crops=crops)
-    status.done("read", f"{len(reads)} read")
+    # Lines: pieces written on one line in bursts are read (and typeset) together.
+    from .core.lines import group_lines
+    view = [{**p, "box": p["image_box"]} for p in pieces]
+    lines = group_lines(view, reads)
+    if lines:
+        pseudo = [{"id": 100000 + i, "members": ln["pieces"], "box": ln["box"], "t_shown": ln["t_complete"],
+                   "removed_at": ln["removed_at"], "pre_existing": ln["pre_existing"]} for i, ln in enumerate(lines)]
+        try:
+            line_crops = understand.hires_crops(info, board.corners, board, pseudo, person, t_end=s1)
+        except Exception:
+            line_crops = {}
+        line_reads = understand.read_pieces(client, board, everything, pseudo, subject=kind.get("subject", ""),
+                                            crops=line_crops)
+        for i, ln in enumerate(lines):
+            ln["read"] = line_reads.get(100000 + i, {"kind": "other", "text": "", "latex": ""})
+    status.done("read", f"{len(reads)} pieces, {len(lines)} lines")
 
     elements = []
     for p in pieces:
@@ -381,6 +396,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
             "board": {
                 "size": [board.width, board.height], "mode": board.mode, "corners": board.corners,
                 "background": hexcolor(board.background), "pieces": out_pieces, "erases": board.erases,
+                "lines": lines,
                 "t_start": round(board.t_start, 2),
             },
             "transcript": {"turns": turns, "words": words, "timing": how},

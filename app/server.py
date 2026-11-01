@@ -24,6 +24,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 _work: queue.Queue = queue.Queue()
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
+NO_CACHE = {"Cache-Control": "no-cache"}
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
 
@@ -116,7 +117,7 @@ def job_replay(job_id: str):
     data = _read_json(p)
     if not data:
         raise HTTPException(503, "replay.json is being written; try again")
-    return JSONResponse(data)
+    return JSONResponse(data, headers=NO_CACHE)
 
 
 @app.get("/api/jobs/{job_id}/notes.md")
@@ -157,7 +158,8 @@ def job_file(job_id: str, path: str):
     p = (d / path).resolve()
     if d not in p.parents or not p.is_file():
         raise HTTPException(404, "no such file")
-    return FileResponse(p)  # supports Range requests, so the video can seek
+    # Revalidate: a re-processed job rewrites its piece images under the same names.
+    return FileResponse(p, headers=NO_CACHE)  # supports Range requests, so the video can seek
 
 
 # The built player (web/dist), if present, at /
@@ -170,8 +172,10 @@ def player(path: str):
         return JSONResponse({"message": "player not built: run `npm run build` in web/, or use `npm run dev`"})
     p = (_dist / path).resolve()
     if path and _dist.resolve() in p.parents and p.is_file():
-        return FileResponse(p)
-    return FileResponse(_dist / "index.html")
+        # Vite's assets carry a content hash in their name: cache them for good.
+        hashed = path.startswith("assets/")
+        return FileResponse(p, headers={"Cache-Control": "public, max-age=31536000, immutable"} if hashed else NO_CACHE)
+    return FileResponse(_dist / "index.html", headers=NO_CACHE)
 
 
 def main():

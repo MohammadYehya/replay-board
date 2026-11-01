@@ -3,7 +3,7 @@ import {
   type RefObject,
 } from 'react';
 import type { BoardData, Piece } from '../types';
-import { BoardRenderer, boardBackground } from './boardRenderer';
+import { BoardRenderer, boardBackground, lineKey } from './boardRenderer';
 import { texHtml } from './tex';
 import { cleanLatex } from './texClean';
 import { texLayouts, writtenText } from './texLayout';
@@ -198,6 +198,18 @@ export const Board = memo(
       const ids = typesetIds(board.pieces, W, H);
       return board.pieces.filter((p) => ids.has(p.id));
     }, [board, W, H]);
+    // Lines written in bursts are typeset whole once finished; the renderer decides when (keys < 0).
+    const typesetLines = useMemo(
+      () =>
+        (board.lines ?? [])
+          .map((ln, i) => ({ ln, key: lineKey(i) }))
+          .filter(({ ln }) => ln.pieces.length >= 2 && (ln.read?.latex?.trim() || ln.read?.text?.trim()))
+          .map(({ ln, key }) => ({
+            first: ln.pieces[0],
+            piece: { id: key, box: ln.box, image: '', t_seen: ln.t_complete, t_shown: ln.t_complete, read: ln.read } as Piece,
+          })),
+      [board],
+    );
     const hiddenPieces = useMemo(() => board.pieces.filter((p) => p.revealed && !p.pre_existing), [board]);
     const typesetRef = useRef(typeset);
     typesetRef.current = typeset;
@@ -442,6 +454,19 @@ export const Board = memo(
             style={{ width: W, height: H, transform: `scale(${cssW ? cssW / W : 0})` }}
             aria-hidden={!typeset}
           >
+            {typesetLines.map(({ first, piece }) => (
+              <TypesetPiece
+                key={piece.id}
+                piece={piece}
+                ink={inks[first]?.ink ?? defaultInk}
+                cy={0.5}
+                maxFont={W * 0.019}
+                minFont={W * 0.0085}
+                fontsVersion={fontsVersion}
+                register={register}
+                onFit={onFit}
+              />
+            ))}
             {typesetPieces.map((p) => (
               <TypesetPiece
                 key={p.id}
