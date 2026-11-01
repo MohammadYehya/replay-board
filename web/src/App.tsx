@@ -1,14 +1,19 @@
 import { useEffect, useState } from 'react';
 import { HomePage } from './pages/HomePage';
 import { JobPage } from './pages/JobPage';
+import { NotesPage } from './pages/NotesPage';
 
-type Route = { page: 'home' } | { page: 'job'; id: string };
+type Route = { page: 'home' } | { page: 'job'; id: string; t: number | null } | { page: 'notes'; id: string };
 
+// #/job/<id>, #/job/<id>?t=<seconds> (open the player at a moment), #/job/<id>/notes
 function parse(hash: string): Route {
-  const m = hash.match(/^#\/job\/([^/?#]+)/);
+  const m = hash.match(/^#\/job\/([^/?#]+)(\/notes)?(?:\?(.*))?$/);
   if (m) {
     try {
-      return { page: 'job', id: decodeURIComponent(m[1]) };
+      const id = decodeURIComponent(m[1]);
+      if (m[2]) return { page: 'notes', id };
+      const t = Number(new URLSearchParams(m[3] ?? '').get('t'));
+      return { page: 'job', id, t: m[3] && Number.isFinite(t) && t >= 0 ? t : null };
     } catch {
       return { page: 'home' };
     }
@@ -27,7 +32,7 @@ export function App() {
     return () => window.removeEventListener('hashchange', on);
   }, []);
   useEffect(() => {
-    document.title = route.page === 'job' ? `${route.id} · Replay Board` : 'Replay Board';
+    document.title = route.page === 'home' ? 'Replay Board' : `${route.id} · Replay Board`;
   }, [route]);
   // A file dropped outside the upload page's handler must never replace the app with the file itself.
   useEffect(() => {
@@ -42,5 +47,6 @@ export function App() {
       window.removeEventListener('drop', block);
     };
   }, []);
-  return route.page === 'job' ? <JobPage key={route.id} jobId={route.id} /> : <HomePage />;
+  if (route.page === 'notes') return <NotesPage key={`n-${route.id}`} jobId={route.id} />;
+  return route.page === 'job' ? <JobPage key={route.id} jobId={route.id} startAt={route.t} /> : <HomePage />;
 }

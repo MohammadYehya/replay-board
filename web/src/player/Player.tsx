@@ -1,5 +1,5 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { getJob, getReplay, jobFileUrl, notesUrl } from '../api';
+import { getJob, getReplay, jobFileUrl } from '../api';
 import type { Piece, Replay } from '../types';
 import { Board, type BoardHandle } from './Board';
 import { Slides, type SlidesHandle } from './Slides';
@@ -66,10 +66,13 @@ export function Player({
   replay: first,
   name,
   running,
+  startAt = null,
 }: {
   jobId: string;
   replay: Replay;
   name?: string;
+  /** Open at this moment (seconds on the video's clock), e.g. from a link in the notes. */
+  startAt?: number | null;
   /** Whether the job was still running when the replay was loaded (false: its word times are final). */
   running?: boolean;
 }) {
@@ -284,7 +287,12 @@ export function Player({
     if (!v) return;
     if (v.videoWidth && v.videoHeight) setVideoAspect(v.videoWidth / v.videoHeight);
     if (clipStart > 0.05 && v.currentTime < clipStart) v.currentTime = clipStart;
+    if (startAt != null && !startedAt.current) {
+      startedAt.current = true;
+      v.currentTime = Math.min(Math.max(startAt, clipStart), clipEnd);
+    }
   };
+  const startedAt = useRef(false);
 
   const viewSize = board?.size ?? slides?.size;
   const boardAspect = viewSize && viewSize[0] > 0 && viewSize[1] > 0 ? viewSize[0] / viewSize[1] : 16 / 9;
@@ -320,10 +328,8 @@ export function Player({
           </a>
           <a
             className="ghost-btn notes-btn"
-            href={notesUrl(jobId)}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Study notes for this lecture (Markdown, opens in a new tab)"
+            href={`#/job/${encodeURIComponent(jobId)}/notes`}
+            title="Study notes for this lecture, by chapter"
           >
             <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
               <path

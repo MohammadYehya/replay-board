@@ -176,7 +176,7 @@ function JobProgress({ status, error, missing }: { status: JobStatus | null; err
   );
 }
 
-export function JobPage({ jobId }: { jobId: string }) {
+export function JobPage({ jobId, startAt = null }: { jobId: string; startAt?: number | null }) {
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [replay, setReplay] = useState<Replay | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -244,7 +244,7 @@ export function JobPage({ jobId }: { jobId: string }) {
 
   if (replay) {
     const running = status ? status.state === 'running' || status.state === 'queued' : undefined;
-    return <Player key={jobId} jobId={jobId} replay={replay} name={status?.name} running={running} />;
+    return <Player key={jobId} jobId={jobId} replay={replay} name={status?.name} running={running} startAt={startAt} />;
   }
   return <JobProgress status={status} error={error} missing={missing} />;
 }

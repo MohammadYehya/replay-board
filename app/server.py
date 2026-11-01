@@ -166,6 +166,16 @@ def job_popout(job_id: str, piece_id: int):
         raise HTTPException(502, str(e)) from None
 
 
+@app.get("/api/jobs/{job_id}/notes.json")
+def job_notes_json(job_id: str):
+    from .notes import notes_data
+
+    p = _job_dir(job_id) / "replay.json"
+    if not p.exists():
+        raise HTTPException(404, "not processed yet")
+    return JSONResponse(notes_data(_read_json(p)), headers=NO_CACHE)
+
+
 @app.get("/api/jobs/{job_id}/files/{path:path}")
 def job_file(job_id: str, path: str):
     d = _job_dir(job_id).resolve()
