@@ -9,6 +9,7 @@ import time
 import queue
 import re
 import threading
+import traceback
 import uuid
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from .config import ROOT
-from .pipeline import JOBS, run
+from .pipeline import JOBS, STAGES, plain_error, replace_file, run
 
 app = FastAPI(title="Replay Board")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -28,13 +29,33 @@ NO_CACHE = {"Cache-Control": "no-cache"}
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
 
+def _process(job_dir: Path, video: Path, start, end):
+    """One queued job. The pipeline reports its own failures, except those before it starts its status (a bad
+    file, a start past the end): those are written here, or the job would stay 'queued' for good."""
+    try:
+        run(video, job_dir, start, end, log=lambda m: None)
+    except Exception as e:
+        path = job_dir / "status.json"
+        st = _read_json(path) if path.exists() else {}
+        if st.get("state") not in (None, "queued", "running"):
+            return  # status.json and error.log already say what went wrong
+        (job_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        started = st.get("started") or time.time()
+        st.update(state="failed", error=plain_error(e), started=started, seconds=round(time.time() - started, 1))
+        if not st.get("stages"):
+            st["stages"] = {s: {"state": "pending", "progress": 0.0, "seconds": None, "note": ""} for s in STAGES}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(st, indent=1), encoding="utf-8")
+        replace_file(tmp, path)
+
+
 def _worker():
     while True:
-        job_dir, video, start, end = _work.get()
+        job = _work.get()
         try:
-            run(video, job_dir, start, end, log=lambda m: None)
+            _process(*job)
         except Exception:
-            pass  # status.json and error.log already say what went wrong
+            pass  # never stop the worker
         finally:
             _work.task_done()
 

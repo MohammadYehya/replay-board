@@ -1,4 +1,4 @@
-"""CLI: python -m app.process <video> [--start S] [--end E] [--no-sam] [--job DIR]
+"""CLI: python -m app.process <video> [--start S] [--end E] [--no-sam] [--no-gestures] [--job DIR]
 
 Writes data/jobs/<id>/replay.json plus piece images. Errors are one plain line.
 """
@@ -21,12 +21,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--deck", default=None, help="PDF of the slides, for slide lectures (optional)")
     ap.add_argument("--job", default=None, help="job folder (default data/jobs/<name>-<hash>)")
     ap.add_argument("--no-sam", action="store_true", help="skip SAM (whole frame, built-in person detector)")
+    ap.add_argument("--no-gestures", action="store_true",
+                    help="skip the teacher's pointing on a board (saves about half the API cost)")
     ap.add_argument("--width", type=int, default=800, help="board analysis width (default 800)")
     ap.add_argument("--no-cache", action="store_true", help="ask the models again instead of using saved answers")
     a = ap.parse_args(argv)
     try:
         path = run(a.video, Path(a.job) if a.job else None, a.start, a.end, use_sam=not a.no_sam, width=a.width,
-                   use_cache=not a.no_cache, deck=a.deck)
+                   use_cache=not a.no_cache, deck=a.deck, gestures=not a.no_gestures)
         print(f"wrote {path}")
         return 0
     except (MediaError, MetaAPIError, JobError) as e:

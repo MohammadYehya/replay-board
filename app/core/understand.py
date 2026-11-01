@@ -242,6 +242,15 @@ GESTURE_SCHEMA = {
         "why": {"type": "string"},
     },
 }
+# On a board one piece of writing can be a whole block of lines: which part of it a gesture was about.
+PART_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "whole": {"type": "boolean"},
+        "box_2d": {"type": "array", "items": {"type": "number"},
+                   "description": "[x_min, y_min, x_max, y_max] normalised 0-1000; [] when whole"},
+    },
+}
 
 
 def draw_path(img: np.ndarray, path: list, colour=(255, 0, 200)) -> np.ndarray:
@@ -312,6 +321,37 @@ def board_gesture_meaning(client: MetaClient, frame: np.ndarray, board_img: np.n
     img2 = draw_path(board_img, gesture.get("path") or [])
     return client.ask(prompt, [image_part(img1, max_side=1280), image_part(img2, fmt=".png")],
                       schema=GESTURE_SCHEMA, reasoning="low")
+
+
+def board_gesture_part(client: MetaClient, board_img: np.ndarray, region: list, path: list, meaning: dict,
+                       text: str, words: str, side: int = 960) -> list | None:
+    """Which part of a big block of writing a gesture was about, as [x, y, w, h] in board pixels; None = all of it.
+
+    Spark sees `region` of the clean board zoomed in (a small box on a wide board image is too rough to place a
+    line exactly), with the hand's path, what it already decided the gesture was, and the words spoken.
+    """
+    x, y, w, h = (int(v) for v in region)
+    k = min(4.0, side / max(w, h))
+    crop = cv2.resize(board_img[y:y + h, x:x + w], (max(1, round(w * k)), max(1, round(h * k))),
+                      interpolation=cv2.INTER_CUBIC)
+    zpath = [[(px - x) * k, (py - y) * k] for px, py in path]
+    prompt = (
+        "This is a zoomed-in part of a clean copy of a lecture board. The magenta line is the path of the teacher's "
+        "hand (dot = start, arrowhead = end). They were pointing at this writing: "
+        f"\"{text[:160]}\". Gesture: {meaning.get('type')} - {meaning.get('why', '')}\n"
+        f"Words spoken meanwhile: \"{words or '(none)'}\".\n"
+        "Did they mean all of the writing in this image, or one part of it (a line, a term, a number)? "
+        "If a part, box_2d is the box of exactly that writing, [x_min, y_min, x_max, y_max] normalised to 0-1000 "
+        "from the top-left of this image. If all of it, whole = true and box_2d = [].")
+    out = client.ask(prompt, [image_part(draw_path(crop, zpath), fmt=".png")], schema=PART_SCHEMA, reasoning="low")
+    b = out.get("box_2d") or []
+    if out.get("whole") or len(b) != 4 or not all(isinstance(v, (int, float)) for v in b):
+        return None
+    x0, x1 = sorted(max(0.0, min(1000.0, float(v))) for v in (b[0], b[2]))
+    y0, y1 = sorted(max(0.0, min(1000.0, float(v))) for v in (b[1], b[3]))
+    cw, ch = crop.shape[1], crop.shape[0]
+    return [x + x0 * cw / 1000 / k, y + y0 * ch / 1000 / k, max(1.0, (x1 - x0) * cw / 1000 / k),
+            max(1.0, (y1 - y0) * ch / 1000 / k)]
 
 
 # ---------------------------------------------------------------- linking

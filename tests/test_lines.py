@@ -32,3 +32,17 @@ def test_notes_use_the_line_reading():
                                                                       "latex": "A=(1+1)^1=2"}}]}}
     md = build_notes(replay)
     assert "$A=(1+1)^1=2$" in md and "A = (1+" not in md
+
+
+def test_a_block_of_lines_does_not_chain_its_neighbours():
+    items = [
+        piece(1, [100, 10, 300, 250], 0.0, "When x<0 ... =2ln|x| ... x=-e", pre_existing=True),  # a whole block
+        piece(2, [20, 60, 60, 16], 0.0, "y=|ln x|", pre_existing=True),
+        piece(3, [420, 60, 60, 16], 0.0, "A=(1+r)^n", pre_existing=True),
+        piece(4, [420, 140, 60, 18], 0.0, "#2.", pre_existing=True),
+        piece(5, [490, 138, 40, 20], 0.0, "A = 2.25", pre_existing=True),
+    ] + [piece(10 + i, [20 + 70 * i, 280, 50, 15], 0.0, "x", pre_existing=True) for i in range(4)]
+    pieces = [p for p, _ in items]
+    reads = {p["id"]: r for p, r in items}
+    lines = group_lines(pieces, reads)
+    assert sorted(ln["pieces"] for ln in lines) == [[4, 5], [10, 11, 12, 13]]

@@ -4,8 +4,10 @@
 the original, untouched, next to a virtual board that redraws the teacher's writing stroke by stroke,
 in sync with their voice, including writing that was hidden behind the teacher while it was written.
 Click any piece of writing to jump to the moment it was explained, or switch handwriting to typeset maths.
-Slide lectures get the same treatment: clean slides, and the teacher's cursor or laser turned into
-calm spotlight, circle, underline and arrow animations.
+When the teacher points at the board (resting a finger on a line, tapping a result, sweeping under an
+equation), the virtual board shows it as a calm spotlight, circle, underline or arrow on that writing.
+Slide lectures get the same treatment: clean slides, and the teacher's cursor or laser turned into the
+same animations.
 
 Built for the Meta Global AI Developer Hackathon. **Meta models do the understanding**; plain code does
 the per-pixel measurement.
@@ -17,14 +19,19 @@ flowchart LR
   V[Lecture video] --> C{Muse Spark<br/>board or slides?}
   C -->|board| S1[SAM 3.1<br/>board corners]
   C -->|board| S2[SAM 3.1 video<br/>person masks]
+  C -->|board| S3[SAM 3.1 video<br/>hand masks]
   S1 --> BC[Board capture<br/>code, per pixel]
   S2 --> BC
   BC --> R1[Muse Spark<br/>read each piece]
+  S3 --> PT[Pointing samples<br/>code: hand stretched out,<br/>on writing, not writing]
+  BC --> PT
+  PT --> G1[Muse Spark<br/>gesture meaning]
   C -->|slides| SA[Slide analysis<br/>code: states, clean slides,<br/>pointer track, gesture guesses]
   SA --> R2[Muse Spark<br/>read slides +<br/>gesture meaning]
   V --> T[Muse Voice Transcribe<br/>parallel pieces]
   T --> A[MMS forced aligner<br/>word times]
   R1 --> L[Muse Spark<br/>link writing to speech,<br/>redraw times, chapters]
+  G1 --> J
   R2 --> L
   A --> L
   L --> J[(replay.json)]
@@ -38,8 +45,9 @@ flowchart LR
 | Who is in front of the board | **SAM 3.1 video mode** ("person") on a 2 fps copy | occlusion mask for every sample |
 | What is written, where and when | board capture (code) | pieces of writing, erases, hidden writing |
 | What each piece says | **Muse Spark** on sharp crops from the video | kind, text, LaTeX |
+| Where the teacher's hand is | **SAM 3.1 video mode** ("hand") on a 3 fps copy | hand masks; code keeps moments where the hand is stretched out onto visible writing and no new ink follows |
 | Slide changes, clean slides, pointer | slide analysis (code) | states, live regions, cursor/laser track, gesture guesses |
-| What a pointing gesture means | **Muse Spark** with the path drawn on the slide + the words spoken | spotlight / circle / underline / arrow / pulse, target elements |
+| What a pointing gesture means | **Muse Spark** with the path drawn on the slide (or on the video frame and the clean board) + the words spoken | spotlight / circle / underline / arrow / pulse, target elements, or "not pointing" |
 | Words | **Muse Voice Transcribe** in parallel pieces | turns |
 | Word times | **MMS forced aligner** (Meta, torchaudio) | per-word start/end |
 | When each element is talked about | **Muse Spark** with elements + timed transcript | spoken ranges, redraw time of hidden writing, chapters |
@@ -57,6 +65,17 @@ long after its spot was last seen blank was written while hidden, and is redrawn
 Camera drift of a pixel or two is tolerated rather than treated as erase-and-rewrite. The result is a
 per-pixel replay log; the player gets per-piece images with drawing-order and erase-time maps.
 
+### Pointing on the board
+SAM 3.1 tracks the teacher's hands at 3 fps. Code keeps a moment as pointing only when the hand is stretched
+away from the body (not gesturing in front of the chest), its tip is on writing that is on the board at that
+moment, and no new ink appears next to it in the following seconds (that would be writing). Nearby moments
+become one gesture with a guessed shape (rest, sweep, circle). Muse Spark then sees the video frame and the
+clean board with the hand's path drawn on both, plus the words spoken, and decides whether the teacher was
+really pointing, at what, and how to show it. Most candidates are talking gestures and are dropped. When the
+target is a block of several lines (often everything already on the board when the recording starts), Spark
+gets that block zoomed in and says which line or term was meant; code fits the box to the ink. The
+annotations are drawn on the virtual board only; the original video is never marked up.
+
 ### Self-tests on generated lectures
 `tests/gen_board.py` and `tests/gen_slides.py` render lectures with known answers (a teacher who walks in
 front of what he writes, an eraser, chalk, fade-ins, camera drift, a webcam corner, a parked cursor, a
@@ -72,12 +91,13 @@ Measured on an 8-minute 1080p board lecture, nothing cached, on a 4-core laptop:
 
 | | |
 |---|---|
-| Meta model calls | 19 (Muse Spark 9, SAM 3.1 7, Voice Transcribe 3) |
-| API cost | $0.38 (SAM person masks $0.19) |
-| First replay ready | 4.8 min |
-| Word times refined (MMS) | 7.4 min (the replay is rewritten in place; the player picks it up) |
-| Board capture alone | 4–12× real time, depending on what else the machine is doing |
+| Meta model calls | 100 (Muse Spark 86, SAM 3.1 11, Voice Transcribe 3) |
+| API cost | $1.17: base $0.39 (SAM person masks $0.19) + pointing gestures $0.78 (SAM hands $0.29, Muse Spark judging 74 candidates $0.49) |
+| First replay ready | 5.0 min |
+| Word times refined (MMS) | 5.8 min (the replay is rewritten in place; the player picks it up) |
+| Board capture alone | 3–12× real time, depending on what else the machine is doing |
 
+That is about $9 per hour of lecture; with `--no-gestures` (no pointing on the board) about $3 per hour.
 Re-running a lecture is free: every model answer is cached.
 
 ## Run it (Windows, PowerShell)
@@ -98,7 +118,7 @@ Open http://127.0.0.1:8000, drop a lecture video, and watch the stages; the play
 
 Or from the command line (writes `data\jobs\<name>-<hash>\replay.json`):
 ```powershell
-.venv\Scripts\python -m app.process my-lecture.mp4 [--start 60] [--end 600] [--deck slides.pdf]
+.venv\Scripts\python -m app.process my-lecture.mp4 [--start 60] [--end 600] [--deck slides.pdf] [--no-gestures]
 ```
 For a slide lecture you can add the PDF deck: Muse Spark then reads the crisp pages, and a page replaces the
 video's slide wherever they match exactly (build steps and pen ink keep the video's image).

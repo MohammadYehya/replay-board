@@ -1,8 +1,11 @@
 // Pure timing and geometry for the slide view: which slide state shows at t, the crossfade between states,
 // when each pointer annotation is drawn, held and faded, the pulse rings, the pointer dot, and the SVG shapes.
+// The board view draws the teacher's hand gestures with the same annotations (see "board annotations").
 // Every animation is a function of the shared clock, so scrubbing shows exactly the frame for that time.
 // No DOM here, so `npm test` can run it with plain Node.
-import type { Box, PointerSample, SlideAnnotation, SlideElement, SlideState } from '../types';
+import type {
+  BoardData, BoardLine, Box, Piece, PointerSample, SlideAnnotation, SlideElement, SlideState,
+} from '../types';
 
 /** An annotation stays this long after the gesture ends, then fades out over FADE_OUT. */
 export const HOLD = 1.5;
@@ -35,11 +38,22 @@ export function kindOf(a: SlideAnnotation): Kind {
   return (ANNOTATION_TYPES as readonly string[]).includes(a.type) ? (a.type as Kind) : 'pulse';
 }
 
+/** Annotations the player can draw: a box and a start time. */
+export function drawable(a: SlideAnnotation | null | undefined): a is SlideAnnotation {
+  return !!a && Array.isArray(a.box) && a.box.length >= 4 && fin(a.t_start);
+}
+
 export const toolOf = (tool: string | undefined): 'cursor' | 'laser' =>
   tool === 'laser' || tool === 'l' ? 'laser' : 'cursor';
 
-/** Warm amber for the mouse cursor, red for a laser pointer. */
-export const toolColour = (tool: string | undefined) => (toolOf(tool) === 'laser' ? '#ef4444' : '#f59e0b');
+/** The teacher's hand on a filmed board: a calm teal, apart from the cursor's amber and the laser's red. Deeper on a
+ *  light board (a brighter teal fades into a grey-white board), brighter on dark chalk. */
+export const HAND_ON_LIGHT = '#0d9488';
+export const HAND_ON_DARK = '#2dd4bf';
+
+/** Warm amber for the mouse cursor, red for a laser pointer, teal for the teacher's hand (light: the background). */
+export const toolColour = (tool: string | undefined, light = true) =>
+  tool === 'hand' ? (light ? HAND_ON_LIGHT : HAND_ON_DARK) : toolOf(tool) === 'laser' ? '#ef4444' : '#f59e0b';
 
 // ---------------------------------------------------------------- slide states
 
@@ -368,22 +382,57 @@ export interface ArrowGeom {
   head: string; // the two wings of the arrowhead
   tip: Pt;
   from: Pt;
+  ctrl: Pt; // the shaft's control point
+  wings: [Pt, Pt]; // ends of the head's wings
+}
+
+/** The boxes an arrow points from and to, and (board) the other writing it should keep off. */
+export interface ArrowBoxes {
+  from: Box | null;
+  to: Box | null;
+  obstacles?: readonly Box[];
 }
 
 /**
  * A curved arrow from `from` to `to`. When an end sits inside its element's box (the backend points at element
  * centres), it is pulled back to just outside that box, so the arrow points at the text instead of covering it.
+ * With `obstacles` (the board's other writing) an arrow that would run over them goes round instead (keepOff).
  */
-export function arrowGeometry(from: Pt, to: Pt, size: [number, number], fromBox?: Box | null, toBox?: Box | null): ArrowGeom {
+export function arrowGeometry(
+  from: Pt,
+  to: Pt,
+  size: [number, number],
+  fromBox?: Box | null,
+  toBox?: Box | null,
+  obstacles?: readonly Box[] | null,
+): ArrowGeom {
+  const g = directArrow(from, to, size, fromBox, toBox);
+  return obstacles?.length ? keepOff(g, from, size, fromBox, toBox, obstacles) : g;
+}
+
+function directArrow(from: Pt, to: Pt, size: [number, number], fromBox?: Box | null, toBox?: Box | null): ArrowGeom {
   const u = unitOf(size);
   let a: Pt = from;
   let b: Pt = to;
   if (fromBox && inside(a, fromBox)) a = exitPoint(a, b, fromBox, 5 * u) ?? a;
   if (toBox && inside(b, toBox)) b = exitPoint(b, a, toBox, 6 * u) ?? b;
   if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 36 * u) {
+    // Too short to point from one box to the other: between two lines stacked close, curve round their ends
+    // (a straight arrow would sit on their writing); else point from / to as given.
+    if (fromBox && toBox && stacked(fromBox, toBox)) return sideArrow(fromBox, toBox, size);
     a = from;
     b = to;
   }
+  return bowArrow(a, b, u);
+}
+
+/** A quadratic arrow a → b bowed upwards (downwards with `down`) by k of its length, at most cap (960-wide px). */
+function bowArrow(a: Pt, b: Pt, u: number, k = 0.14, cap = 50, down = false): ArrowGeom {
+  return arrowFrom(a, bowCtrl(a, b, u, k, cap, down), b, Math.max(1e-6, Math.hypot(b[0] - a[0], b[1] - a[1])), u);
+}
+
+/** The control point of bowArrow's curve. */
+function bowCtrl(a: Pt, b: Pt, u: number, k: number, cap: number, down: boolean): Pt {
   const dx = b[0] - a[0];
   const dy = b[1] - a[1];
   const len = Math.max(1e-6, Math.hypot(dx, dy));
@@ -393,9 +442,329 @@ export function arrowGeometry(from: Pt, to: Pt, size: [number, number], fromBox?
     nx = -nx;
     ny = -ny; // always bow upwards
   }
-  const bend = Math.min(len * 0.14, 50 * u);
-  const c: Pt = [(a[0] + b[0]) / 2 + nx * bend, (a[1] + b[1]) / 2 + ny * bend];
-  // Arrowhead along the curve's end tangent.
+  const bend = Math.min(len * k, cap * u) * (down ? -1 : 1);
+  return [(a[0] + b[0]) / 2 + nx * bend, (a[1] + b[1]) / 2 + ny * bend];
+}
+
+/** Where an arrow runs, without its SVG: tail, control point, tip and the ends of its head's wings. */
+type ArrowShape = Pick<ArrowGeom, 'from' | 'ctrl' | 'tip' | 'wings'>;
+
+/**
+ * Visits the points along an arrow as drawn, until `stop` returns true: its shaft, about every 3 px, and the wings of
+ * its head. In no particular order: the head first, then the shaft from the tip back, every 8th point before the ones
+ * between (writing in the way shows up soonest).
+ */
+function eachArrowPoint(g: ArrowShape, u: number, stop: (x: number, y: number) => boolean): void {
+  const [a, c, b] = [g.from, g.ctrl, g.tip];
+  const len = Math.hypot(c[0] - a[0], c[1] - a[1]) + Math.hypot(b[0] - c[0], b[1] - c[1]);
+  const n = Math.min(200, Math.max(16, Math.ceil(len / (3 * u))));
+  for (const w of g.wings) {
+    for (let i = 0; i < 4; i++) if (stop(w[0] + ((b[0] - w[0]) * i) / 4, w[1] + ((b[1] - w[1]) * i) / 4)) return;
+  }
+  for (const k of [0, 4, 2, 6, 1, 5, 3, 7]) {
+    for (let i = n - k; i >= 0; i -= 8) {
+      const s = i / n;
+      const p = (1 - s) ** 2;
+      const q = 2 * s * (1 - s);
+      const r = s * s;
+      if (stop(p * a[0] + q * c[0] + r * b[0], p * a[1] + q * c[1] + r * b[1])) return;
+    }
+  }
+}
+
+const offBoard = (p: Pt, size: [number, number]) => p[0] < 0 || p[0] > size[0] || p[1] < 0 || p[1] > size[1];
+
+/** Whether part of an arrow leaves the board (the layer would cut its head off at the edge). */
+function leavesBoard(c: ArrowShape, size: [number, number]): boolean {
+  // The shaft stays inside the triangle of its ends and control point, the head inside its wings.
+  if ([c.from, c.ctrl, c.tip, c.wings[0], c.wings[1]].every((p) => !offBoard(p, size))) return false;
+  let off = false;
+  eachArrowPoint(c, unitOf(size), (x, y) => (off = offBoard([x, y], size)));
+  return off;
+}
+
+/**
+ * How many of an arrow's points (eachArrowPoint) are off the board or within 2 units of one of `boxes`. Counting
+ * stops at `limit` (1: is it clear at all?).
+ */
+function hitCount(c: ArrowShape, size: [number, number], boxes: readonly Box[], limit = Infinity): number {
+  const u = unitOf(size);
+  const s = 2 * u;
+  const [W, H] = size;
+  // The shaft stays inside the triangle of its ends and control point, the head inside its wings: only the boxes
+  // near those can hold one of its points (as [left, right, top, bottom] with the slack).
+  const xs = [c.from[0], c.ctrl[0], c.tip[0], c.wings[0][0], c.wings[1][0]];
+  const ys = [c.from[1], c.ctrl[1], c.tip[1], c.wings[0][1], c.wings[1][1]];
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const near: [number, number, number, number][] = [];
+  for (const b of boxes) {
+    const l = b[0] - s;
+    const r = b[0] + b[2] + s;
+    const t = b[1] - s;
+    const d = b[1] + b[3] + s;
+    if (l <= x1 && r >= x0 && t <= y1 && d >= y0) near.push([l, r, t, d]);
+  }
+  if (!near.length && x0 >= 0 && y0 >= 0 && x1 <= W && y1 <= H) return 0;
+  let n = 0;
+  eachArrowPoint(c, u, (x, y) => {
+    let hit = x < 0 || x > W || y < 0 || y > H;
+    for (let i = 0; !hit && i < near.length; i++) {
+      const e = near[i];
+      hit = x >= e[0] && x <= e[1] && y >= e[2] && y <= e[3];
+    }
+    return hit && ++n >= limit;
+  });
+  return n;
+}
+
+/**
+ * An arrow on the board that runs over other writing (`obstacles`), or lands its tip on it, goes round instead:
+ * between two lines one above the other, round their ends like sideArrow (its usual side first, bowing out less and
+ * less, then the other side), with the tip beside the target's end; else bowed further up or down between its own
+ * ends, and when none of those bows is clear, between other ends round its boxes (otherEnds). The first route clear
+ * of the writing (and on the board) wins. If none is: round the ends of stacked lines, the route over the least
+ * writing; an arrow whose tip is free and that only skims the edge of some writing, the arrow as it was; else
+ * otherEnds' choice.
+ */
+function keepOff(
+  g: ArrowGeom,
+  from: Pt,
+  size: [number, number],
+  fromBox: Box | null | undefined,
+  toBox: Box | null | undefined,
+  obstacles: readonly Box[],
+): ArrowGeom {
+  const u = unitOf(size);
+  let least = hitCount(g, size, obstacles);
+  if (!least) return g;
+  let best = g;
+  if (fromBox && toBox && stacked(fromBox, toBox)) {
+    const first = sideOf(fromBox, toBox, size);
+    for (const side of [first, first === 'right' ? 'left' : 'right'] as const) {
+      for (const k of [1, 0.7, 0.45, 0.25]) {
+        const c = sideArrow(fromBox, toBox, size, side, k);
+        const n = hitCount(c, size, obstacles);
+        if (!n) return c;
+        if (n < least) {
+          best = c;
+          least = n;
+        }
+      }
+    }
+    return best;
+  }
+  for (const k of [0.3, 0.5]) {
+    for (const down of [false, true]) {
+      const c = bowArrow(g.from, g.tip, u, k, 120, down);
+      if (!hitCount(c, size, obstacles, 1)) return c;
+    }
+  }
+  // Its tip on the writing, or running through it: other ends. Only skimming the edge of some (as the teacher's own
+  // gesture may), it keeps its ends.
+  const tipOn = obstacles.some((b) => within(g.tip, b, 2 * u));
+  if (!tipOn && deepestIn(g, u, obstacles) <= 2 * u) return g;
+  return otherEnds(g, from, size, fromBox, toBox, obstacles, least);
+}
+
+/** How far inside one of `boxes` the arrow's deepest point lies (0 or less when none is inside one). */
+function deepestIn(c: ArrowShape, u: number, boxes: readonly Box[]): number {
+  let deepest = -Infinity;
+  eachArrowPoint(c, u, (x, y) => {
+    for (const b of boxes) deepest = Math.max(deepest, Math.min(x - b[0], b[0] + b[2] - x, y - b[1], b[1] + b[3] - y));
+    return false;
+  });
+  return deepest;
+}
+
+/** Shaft shapes tried between other ends: [bow k, cap, down, penalty in units]. The usual gentle bow (bowArrow's
+ *  default) is the one to beat; a bigger bow also pays for its extra length. */
+const END_SHAPES: readonly [number, number, boolean, number][] = [
+  [0.14, 50, false, 0],
+  [0, 50, false, 3], // straight
+  [0.14, 50, true, 4],
+  [0.3, 120, false, 6],
+  [0.3, 120, true, 8],
+];
+
+/** How many routes otherEnds tries, closest first (on test-full, 99 arrows in 100 that have a clear route find it
+ *  among the first 360), and when none is clear, how many of the closest it weighs. */
+const MAX_ROUTES = 360;
+const FALLBACK_ROUTES = 60;
+
+/** A point an arrow could start or end at, and what it costs (in units) for not facing the other end. */
+interface EndPt {
+  p: Pt;
+  pen: number;
+}
+
+/**
+ * Points just outside each side of box (`gap` out): the side's middle and its two ends (a little in from the
+ * corners), each with how badly that side faces away from `toward` (0 when it faces it squarely, up to 24 units).
+ */
+function sideEnds(box: Box, gap: number, toward: Pt, u: number): EndPt[] {
+  const [x, y, w, h] = box;
+  const dx = toward[0] - (x + w / 2);
+  const dy = toward[1] - (y + h / 2);
+  const d = Math.max(1e-6, Math.hypot(dx, dy));
+  const pen = (nx: number, ny: number) => 24 * (1 - Math.max(0, (nx * dx + ny * dy) / d));
+  const along = (len: number) => {
+    const inset = Math.min(len / 4, 10 * u);
+    return [inset, len / 2, len - inset];
+  };
+  const out: EndPt[] = [];
+  for (const s of along(w)) {
+    out.push({ p: [x + s, y - gap], pen: pen(0, -1) }, { p: [x + s, y + h + gap], pen: pen(0, 1) });
+  }
+  for (const s of along(h)) {
+    out.push({ p: [x - gap, y + s], pen: pen(-1, 0) }, { p: [x + w + gap, y + s], pen: pen(1, 0) });
+  }
+  return out;
+}
+
+const dist = (p: Pt, q: Pt) => Math.hypot(q[0] - p[0], q[1] - p[1]);
+
+/**
+ * keepOff for an arrow whose boxes are not one above the other, when no bow between its own ends is clear (its tip
+ * may even sit on someone else's writing): other ends, just outside the sides of the target's box (each side's middle
+ * and ends) and of the box it comes from (likewise, or where the line from `from` to the new tip leaves it), joined
+ * by a straight shaft or a bow either way. Each route must also keep off the two boxes themselves. The clear route
+ * closest to the arrow as it was wins: short, its ends near the old ones, on the sides that face each other. If none
+ * is clear, the one over the least writing, with its tip off the writing whenever some route allows it; the arrow as
+ * it was stays unless its tip is on the writing or another route touches clearly less (a quarter less).
+ */
+function otherEnds(
+  g: ArrowGeom,
+  from: Pt,
+  size: [number, number],
+  fromBox: Box | null | undefined,
+  toBox: Box | null | undefined,
+  obstacles: readonly Box[],
+  gHits: number,
+): ArrowGeom {
+  const u = unitOf(size);
+  const free = (p: Pt) => !offBoard(p, size) && !obstacles.some((b) => within(p, b, 2 * u));
+  const tips: EndPt[] = [{ p: g.tip, pen: 0 }];
+  if (toBox) for (const e of sideEnds(toBox, 6 * u, g.from, u)) if (free(e.p)) tips.push(e);
+  const tails: EndPt[] = [{ p: g.from, pen: 0 }];
+  if (fromBox) for (const e of sideEnds(fromBox, 5 * u, g.tip, u)) if (free(e.p)) tails.push(e);
+  const aim = fromBox && inside(from, fromBox) ? fromBox : null; // the box to aim out of
+
+  const chord0 = dist(g.from, g.tip);
+  const routes: { a: Pt; c: Pt; b: Pt; cost: number }[] = [];
+  for (const t of tips) {
+    const starts = tails.slice();
+    if (aim && t !== tips[0]) {
+      const e = exitPoint(from, t.p, aim, 5 * u); // from the writing straight towards the new tip
+      if (e && free(e)) starts.push({ p: e, pen: 0 });
+    }
+    for (const s of starts) {
+      const chord = dist(s.p, t.p);
+      if (chord < 24 * u) continue; // shorter than a head and a bit of shaft
+      // longer, moved, facing away, shaped otherwise: each costs
+      const base = chord - chord0 + 0.5 * (dist(s.p, g.from) + dist(t.p, g.tip)) + (s.pen + t.pen) * u;
+      let usual = NaN; // the length of the usual gentle bow between these ends (the first shape)
+      for (const [k, cap, down, pen] of END_SHAPES) {
+        const c = bowCtrl(s.p, t.p, u, k, cap, down);
+        const len = dist(s.p, c) + dist(c, t.p);
+        if (Number.isNaN(usual)) usual = len;
+        if (s === tails[0] && t === tips[0] && k === 0.14 && !down) continue; // the arrow as it was
+        routes.push({ a: s.p, c, b: t.p, cost: base + Math.max(0, len - usual) + pen * u });
+      }
+    }
+  }
+  routes.sort((p, q) => p.cost - q.cost);
+  routes.length = Math.min(routes.length, MAX_ROUTES);
+  const boxes = [...obstacles, ...[fromBox, toBox].filter((b): b is Box => !!b)];
+  const shape = (r: (typeof routes)[number]) => arrowShape(r.a, r.c, r.b, dist(r.a, r.b), u);
+  for (const r of routes) {
+    const c = shape(r);
+    if (!hitCount(c, size, boxes, 1)) return arrowGeom(c);
+  }
+
+  // Nothing clear: the least writing, the tip off it if possible, the arrow as it was unless clearly worse. Only the
+  // routes closest to the arrow are weighed (and then the first one with its tip off the writing, if none had it).
+  const tipOn = (c: ArrowShape) => obstacles.some((b) => within(c.tip, b, 2 * u));
+  let best: ArrowShape = g;
+  let bestOn = tipOn(g);
+  let bestHits = gHits;
+  for (const [i, r] of routes.entries()) {
+    if (i >= FALLBACK_ROUTES && !bestOn) break;
+    const c = shape(r);
+    if (leavesBoard(c, size)) continue; // its head would be cut off at the edge
+    const on = tipOn(c);
+    if (on && !bestOn) continue;
+    const limit = !on && bestOn ? Infinity : best === g ? Math.ceil(0.75 * gHits) : bestHits;
+    const n = hitCount(c, size, boxes, limit);
+    if (n < limit) {
+      best = c;
+      bestOn = on;
+      bestHits = n;
+    }
+  }
+  return best === g ? g : arrowGeom(best);
+}
+
+/** Two boxes one above the other: side by side across, apart (or just touching) down. */
+export function stacked(p: Box, q: Box): boolean {
+  const across = Math.min(p[0] + p[2], q[0] + q[2]) - Math.max(p[0], q[0]);
+  const down = Math.min(p[1] + p[3], q[1] + q[3]) - Math.max(p[1], q[1]);
+  return across > 0.3 * Math.min(p[2], q[2]) && down <= 0.15 * Math.min(p[3], q[3]);
+}
+
+/**
+ * An arrow between two lines stacked close (the result under the formula it came from): from the end of one line
+ * it bows out beside them and comes back into the end of the other, like a hand-drawn ⤴. On the right, or on the
+ * left when the right has no room for it (or on `side`, bowing out k of the usual amount).
+ */
+export function sideArrow(fromBox: Box, toBox: Box, size: [number, number], side?: 'right' | 'left', k = 1): ArrowGeom {
+  const u = unitOf(size);
+  const gap = 5 * u;
+  const yA = fromBox[1] + fromBox[3] / 2;
+  const yB = toBox[1] + toBox[3] / 2;
+  const bulge = sideBulge(fromBox, toBox, u) * k;
+  const onRight = (side ?? sideOf(fromBox, toBox, size)) === 'right';
+  const a: Pt = onRight ? [fromBox[0] + fromBox[2] + gap, yA] : [fromBox[0] - gap, yA];
+  const b: Pt = onRight ? [toBox[0] + toBox[2] + gap, yB] : [toBox[0] - gap, yB];
+  const c: Pt = [onRight ? Math.max(a[0], b[0]) + bulge : Math.min(a[0], b[0]) - bulge, (yA + yB) / 2];
+  return arrowFrom(a, c, b, Math.hypot(b[0] - a[0], b[1] - a[1]), u);
+}
+
+/** How far a sideArrow bows out beside the lines. */
+function sideBulge(fromBox: Box, toBox: Box, u: number): number {
+  const dy = toBox[1] + toBox[3] / 2 - (fromBox[1] + fromBox[3] / 2);
+  return Math.min(40 * u, Math.max(16 * u, 0.6 * Math.abs(dy)));
+}
+
+/** The side a sideArrow goes round: the right, else the side with more room. */
+function sideOf(fromBox: Box, toBox: Box, size: [number, number]): 'right' | 'left' {
+  const u = unitOf(size);
+  const gap = 5 * u;
+  const bulge = sideBulge(fromBox, toBox, u);
+  const right = Math.max(fromBox[0] + fromBox[2], toBox[0] + toBox[2]) + gap + bulge;
+  const left = Math.min(fromBox[0], toBox[0]) - gap - bulge;
+  return right <= size[0] - 4 * u || size[0] - right > left ? 'right' : 'left';
+}
+
+/** A quadratic arrow a → b through control c, with its head along the curve's end tangent. */
+function arrowFrom(a: Pt, c: Pt, b: Pt, len: number, u: number): ArrowGeom {
+  return arrowGeom(arrowShape(a, c, b, len, u));
+}
+
+/** The SVG of an arrow's shape. */
+function arrowGeom(s: ArrowShape): ArrowGeom {
+  const { from: a, ctrl: c, tip: b, wings } = s;
+  return {
+    d: `M${pt(a)} Q${pt(c)} ${pt(b)}`,
+    head: `M${pt(wings[0])} L${pt(b)} L${pt(wings[1])}`,
+    tip: b,
+    from: a,
+    ctrl: c,
+    wings,
+  };
+}
+
+/** arrowFrom without the SVG (the head's length grows with len, the distance a → b). */
+function arrowShape(a: Pt, c: Pt, b: Pt, len: number, u: number): ArrowShape {
   const tx = b[0] - c[0];
   const ty = b[1] - c[1];
   const tl = Math.max(1e-6, Math.hypot(tx, ty));
@@ -408,12 +777,7 @@ export function arrowGeometry(from: Pt, to: Pt, size: [number, number], fromBox?
     const sn = Math.sin(s * ang);
     return [b[0] - hl * (ux * cs - uy * sn), b[1] - hl * (ux * sn + uy * cs)];
   };
-  return {
-    d: `M${pt(a)} Q${pt(c)} ${pt(b)}`,
-    head: `M${pt(wing(1))} L${pt(b)} L${pt(wing(-1))}`,
-    tip: b,
-    from: a,
-  };
+  return { from: a, ctrl: c, tip: b, wings: [wing(1), wing(-1)] };
 }
 
 /** The spotlight's hole: box plus ~12 px, rounded. */
@@ -466,4 +830,165 @@ export function arrowEnds(a: SlideAnnotation, fromBox?: Box | null, toBox?: Box 
     [x, y + h],
     [x + w, y],
   ];
+}
+
+// ---------------------------------------------------------------- board annotations
+
+/** A target id as a board piece id (targets are piece ids as strings); null when it is not one. */
+export function pieceIdOf(id: unknown): number | null {
+  const n = typeof id === 'number' ? id : typeof id === 'string' && /^\s*-?\d+\s*$/.test(id) ? Number(id) : NaN;
+  return Number.isInteger(n) ? n : null;
+}
+
+/** The ids of the board pieces an annotation points at. */
+export function targetPieceIds(a: SlideAnnotation): number[] {
+  return ((a.target ?? []) as unknown[]).map(pieceIdOf).filter((n): n is number => n != null);
+}
+
+/** When the writing an annotation points at starts leaving the board: the earliest removed_at among its target
+ *  pieces, null when none of them is ever erased. */
+export function targetGoneAt(a: SlideAnnotation, pieces: readonly Piece[]): number | null {
+  const ids = new Set(targetPieceIds(a));
+  let gone: number | null = null;
+  for (const p of pieces) {
+    if (!ids.has(p.id) || !fin(p.removed_at)) continue;
+    if (gone == null || p.removed_at < gone) gone = p.removed_at;
+  }
+  return gone;
+}
+
+/** When the hand moves: t_start to t_end (t_start alone when t_end is missing or earlier). */
+function gestureSpan(a: SlideAnnotation): [number, number] {
+  return [a.t_start, fin(a.t_end) ? Math.max(a.t_end, a.t_start) : a.t_start];
+}
+
+/**
+ * The box an arrow on the board points from / to for one of its targets: the piece's whole written line (`lines`:
+ * the board's lines that are one written line, see isWrittenLine), so the arrow never runs over the rest of that
+ * line, and one between two lines stacked close curves round their ends; the piece itself when it has no line, when
+ * the arrow goes between two pieces of the same line, or when the line is not finished by the end of the gesture or
+ * was erased before it.
+ */
+export function boardTargetBox(
+  a: SlideAnnotation,
+  id: string,
+  pieces: readonly Piece[],
+  lines: readonly BoardLine[] = [],
+): Box | null {
+  const n = pieceIdOf(id);
+  if (n == null) return null;
+  const [t0, t1] = gestureSpan(a);
+  const others = targetPieceIds(a).filter((m) => m !== n);
+  const line = lines.find(
+    (ln) =>
+      ln.pieces?.includes(n) &&
+      !others.some((m) => ln.pieces.includes(m)) &&
+      !(fin(ln.t_complete) && ln.t_complete > t1) &&
+      !(fin(ln.removed_at) && ln.removed_at <= t0),
+  );
+  return line?.box ?? pieces.find((p) => p.id === n)?.box ?? null;
+}
+
+/** Share of box p's area that lies inside box q. */
+function shareIn(p: Box, q: Box): number {
+  const w = Math.min(p[0] + p[2], q[0] + q[2]) - Math.max(p[0], q[0]);
+  const h = Math.min(p[1] + p[3], q[1] + q[3]) - Math.max(p[1], q[1]);
+  return w > 0 && h > 0 ? (w * h) / Math.max(1e-6, p[2] * p[3]) : 0;
+}
+
+/**
+ * The other writing on the board while the hand moves, which an arrow should keep off: pieces shown by the end of
+ * the gesture (startOf: when a piece starts showing, timing's schedule) and not erased before it, and the written
+ * lines complete by then, without the targets and their lines. Left out: anything mostly inside an end box or
+ * holding most of one, and regions (a graph, a block of working: an arrow may cross their blank space).
+ */
+export function boardObstacles(
+  a: SlideAnnotation,
+  pieces: readonly Piece[],
+  lines: readonly BoardLine[],
+  size: [number, number],
+  ends: readonly (Box | null)[],
+  startOf: (p: Piece) => number,
+): Box[] {
+  const u = unitOf(size);
+  const [t0, t1] = gestureSpan(a);
+  const ids = new Set(targetPieceIds(a));
+  const there = (start: unknown, removed: unknown) => !(fin(start) && start > t1) && !(fin(removed) && removed <= t0);
+  const boxes: Box[] = [];
+  for (const p of pieces) if (!ids.has(p.id) && there(startOf(p), p.removed_at)) boxes.push(p.box);
+  for (const ln of lines) {
+    if (!ln.pieces?.some((n) => ids.has(n)) && there(ln.t_complete, ln.removed_at)) boxes.push(ln.box);
+  }
+  return boxes.filter(
+    (b) =>
+      Array.isArray(b) &&
+      b.length >= 4 &&
+      b.every(fin) &&
+      b[3] <= REGION_MIN * u &&
+      !ends.some((e) => e && (shareIn(b, e) >= 0.5 || shareIn(e, b) >= 0.5)),
+  );
+}
+
+/**
+ * An arrow on the board: from its first target to its second (the backend's from / to; with one target, to it), each
+ * as boardTargetBox gives it, and the writing it should keep off (boardObstacles). `lines` are the written lines.
+ */
+export function boardArrowBoxes(
+  a: SlideAnnotation,
+  pieces: readonly Piece[],
+  lines: readonly BoardLine[],
+  size: [number, number],
+  startOf: (p: Piece) => number,
+): ArrowBoxes {
+  const tg = a.target ?? [];
+  const from = tg.length >= 2 ? boardTargetBox(a, tg[0], pieces, lines) : null;
+  const to = tg.length ? boardTargetBox(a, tg[tg.length >= 2 ? 1 : 0], pieces, lines) : null;
+  return { from, to, obstacles: boardObstacles(a, pieces, lines, size, [from, to], startOf) };
+}
+
+/** A hand gesture on the board is timed like one on a slide (drawn over the gesture, held HOLD s, faded over
+ *  FADE_OUT), but it fades together with its writing when that is erased before then. */
+export function boardAnnotationTiming(a: SlideAnnotation, pieces: readonly Piece[]): AnnotationTiming {
+  return annotationTiming(a, targetGoneAt(a, pieces));
+}
+
+/** Taller than this (pixels of a 960-wide image, about four lines of handwriting) a target is a region of the
+ *  board, not a line of writing. */
+const REGION_MIN = 100;
+
+/**
+ * An underline whose target is a whole region of the board (a graph with its labels, a block of working) would run
+ * across the middle of it, through the writing: it goes under the stretch of the region the hand actually swept
+ * instead, as if the box were the line just above the sweep. When the sweep is not over the region (the hand came
+ * from the side) or there is none, it goes under the whole region (at the sweep's height it would cross the middle).
+ * Anything else is returned as it is.
+ */
+export function fitUnderline(a: SlideAnnotation, size: [number, number]): SlideAnnotation {
+  if (!drawable(a) || kindOf(a) !== 'underline' || fin(a.underline_y)) return a;
+  const u = unitOf(size);
+  const [bx, by, bw, bh] = a.box;
+  if (!(bh > REGION_MIN * u)) return a;
+  const under = { ...a, underline_y: Math.min(size[1] - 3 * u, by + bh + 5 * u) };
+  const pts = (a.path ?? []).filter((p) => Array.isArray(p) && fin(p[0]) && fin(p[1]));
+  if (pts.length < 2) return under;
+  const ys = pts.map((p) => p[1]).sort((p, q) => p - q);
+  const mid = ys[ys.length >> 1];
+  if (mid < by || mid > by + bh) return under;
+  const xs = pts.map((p) => p[0]);
+  let x0 = Math.max(bx, Math.min(...xs));
+  let x1 = Math.min(bx + bw, Math.max(...xs));
+  const minW = 24 * u;
+  if (x1 - x0 < minW) {
+    if (x1 - x0 < minW / 2) return under; // the sweep barely touches the region
+    const c = (x0 + x1) / 2;
+    x0 = Math.max(bx, c - minW / 2);
+    x1 = Math.min(bx + bw, x0 + minW);
+  }
+  const lh = 20 * u;
+  return { ...a, box: [x0, mid - lh, x1 - x0, lh] };
+}
+
+/** The board's annotations as the player draws them. */
+export function boardAnnotations(board: BoardData): SlideAnnotation[] {
+  return (board.annotations ?? []).filter(drawable).map((a) => fitUnderline(a, board.size));
 }

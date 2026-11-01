@@ -1,7 +1,7 @@
 # Demo video script (3 minutes)
 
 Use **your own recordings only**: one board lecture (ideally where you step in front of what you write,
-and erase something) and one slide lecture with a cursor or laser. Process both before filming
+point at a result with your arm stretched out, and erase something) and one slide lecture with a cursor or laser. Process both before filming
 (`python -m app.server`, drop the files), so the player opens instantly; show the upload with a short clip.
 Record at 1920×1080, browser zoom 100%, dark theme. Close other tabs; hide the bookmarks bar.
 
@@ -13,9 +13,10 @@ Record at 1920×1080, browser zoom 100%, dark theme. Close other tabs; hide the 
 | 1:05–1:25 | Seek to a moment where you stand in front of the writing: the board already shows it, with the "was hidden" tag. | "When the teacher stands in front of what they're writing, the camera can't see it. Replay Board draws it anyway, at the moment it was actually said." |
 | 1:25–1:45 | Hover a piece (tooltip with typeset maths); click it: the video jumps to where it was explained. Toggle Typeset. | "Click any line to jump to where it was explained. Switch handwriting to typeset maths." |
 | 1:45–1:55 | Transcript highlighting word by word; click a chapter. Partial erase visible on the board. | "Every word is timed; chapters come from the lecture itself. Erasing works too." |
-| 1:55–2:25 | Slide lecture: clean slide (no cursor, webcam blanked); the cursor's wiggle becomes a calm circle; a sweep becomes an underline; an A→B move becomes an arrow; a rest becomes a spotlight. | "For slides, the restless cursor becomes calm, meaningful animations. Code tracks the pointer; Muse Spark looks at the path on the slide and what was being said, and decides what it meant." |
-| 2:25–2:40 | Hover a drawn graph → "3D" → rotate the scene. Click "Notes": the notes page, typeset, by chapter; click a time and the player jumps there. | "Drawn graphs pop out in 3D. And you get study notes, organised by chapter, with what was said for each line, one click from the moment it was explained." |
-| 2:40–2:55 | The architecture diagram from the README; the self-test result lines (72/72, 47/47). | "Under the hood: plain code measures every pixel, fast and exact; Meta models make every judgement about meaning. Generated lectures with known answers keep it honest." |
+| 1:55–2:05 | A moment where you point at a result on the board: the virtual board spotlights or underlines it while the video plays untouched. | "When the teacher points at the board, the clean board shows what they meant: SAM 3.1 follows the hand, Muse Spark decides if it was pointing and at what." |
+| 2:05–2:30 | Slide lecture: clean slide (no cursor, webcam blanked); the cursor's wiggle becomes a calm circle; a sweep becomes an underline; an A→B move becomes an arrow; a rest becomes a spotlight. | "For slides, the restless cursor becomes calm, meaningful animations. Code tracks the pointer; Muse Spark looks at the path on the slide and what was being said, and decides what it meant." |
+| 2:30–2:42 | Hover a drawn graph → "3D" → rotate the scene. Click "Notes": the notes page, typeset, by chapter; click a time and the player jumps there. | "Drawn graphs pop out in 3D. And you get study notes, organised by chapter, with what was said for each line, one click from the moment it was explained." |
+| 2:42–2:55 | The architecture diagram from the README; the self-test result lines (72/72, 47/47). | "Under the hood: plain code measures every pixel, fast and exact; Meta models make every judgement about meaning. Generated lectures with known answers keep it honest." |
 | 2:55–3:00 | Back to the board replay. | "Replay Board: every lecture, as if you had the best seat in the room." |
 
 ## Checklist before filming

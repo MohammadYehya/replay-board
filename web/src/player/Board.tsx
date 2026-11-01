@@ -2,12 +2,14 @@ import {
   forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
   type RefObject,
 } from 'react';
-import type { BoardData, Piece } from '../types';
+import type { BoardData, Piece, SlideAnnotation } from '../types';
+import { AnnotationLayer, type AnnotationLayerHandle, type Veil } from './AnnotationLayer';
 import { BoardRenderer, boardBackground, lineKey } from './boardRenderer';
+import { boardAnnotations, boardArrowBoxes, targetGoneAt, toolColour } from './slideTiming';
 import { texHtml } from './tex';
 import { cleanLatex } from './texClean';
 import { texLayouts, writtenText } from './texLayout';
-import { formatTime, seekTarget, typesetIds } from './timing';
+import { formatTime, isWrittenLine, schedule, seekTarget, typesetIds } from './timing';
 import { canPopout } from './popoutable';
 import { preloadPopout } from './popoutLoader';
 import { kindLabel, sameReading, tipTex } from './tip';
@@ -52,6 +54,14 @@ interface Candidate {
   lines: number;
   penalty: number; // multiplies the fitted size when choosing between candidates
 }
+
+/** The spotlight's veil: a soft dark veil on a light board (black would look like the lights went out), the
+ *  slides' half-black on chalk. */
+const VEIL_LIGHT: Veil = { colour: '#0f172a', opacity: 0.3 };
+const VEIL_DARK: Veil = { colour: '#000', opacity: 0.5 };
+
+/** When a piece starts showing on the board (an arrow keeps off what is there by then). */
+const pieceStart = (p: Piece) => schedule(p).start;
 
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -194,6 +204,19 @@ export const Board = memo(
     const { css: background, light } = useMemo(() => boardBackground(board), [board]);
     const defaultInk = light ? '#1f2633' : '#f1f1ea';
 
+    // The teacher's hand pointing at writing, re-drawn like the pointer gestures on slides.
+    const annRef = useRef<AnnotationLayerHandle>(null);
+    const annotations = useMemo(() => boardAnnotations(board), [board]);
+    const annColour = useCallback((a: SlideAnnotation) => toolColour(a.tool, light), [light]);
+    // An annotation fades with its writing when that is erased; an arrow points at its pieces' lines and keeps off
+    // the other writing on the board.
+    const writtenLines = useMemo(() => (board.lines ?? []).filter((ln) => isWrittenLine(ln, W)), [board, W]);
+    const annEnd = useCallback((a: SlideAnnotation) => targetGoneAt(a, board.pieces), [board]);
+    const annArrow = useCallback(
+      (a: SlideAnnotation) => boardArrowBoxes(a, board.pieces, writtenLines, board.size, pieceStart),
+      [board, writtenLines],
+    );
+
     const typesetPieces = useMemo(() => {
       const ids = typesetIds(board.pieces, W, H);
       return board.pieces.filter((p) => ids.has(p.id));
@@ -203,12 +226,14 @@ export const Board = memo(
       () =>
         (board.lines ?? [])
           .map((ln, i) => ({ ln, key: lineKey(i) }))
-          .filter(({ ln }) => ln.pieces.length >= 2 && (ln.read?.latex?.trim() || ln.read?.text?.trim()))
+          .filter(
+            ({ ln }) => ln.pieces.length >= 2 && (ln.read?.latex?.trim() || ln.read?.text?.trim()) && isWrittenLine(ln, W),
+          )
           .map(({ ln, key }) => ({
             first: ln.pieces[0],
             piece: { id: key, box: ln.box, image: '', t_seen: ln.t_complete, t_shown: ln.t_complete, read: ln.read } as Piece,
           })),
-      [board],
+      [board, W],
     );
     const hiddenPieces = useMemo(() => board.pieces.filter((p) => p.revealed && !p.pre_existing), [board]);
     const typesetRef = useRef(typeset);
@@ -339,6 +364,7 @@ export const Board = memo(
       ref,
       () => ({
         render(t: number) {
+          annRef.current?.render(t);
           const r = rendererRef.current;
           if (!r) return;
           const h = hoverRef.current;
@@ -416,6 +442,7 @@ export const Board = memo(
           (ln) =>
             ln.pieces.includes(hover.id) &&
             (ln.read?.latex?.trim() || ln.read?.text?.trim()) &&
+            isWrittenLine(ln, W) &&
             timeRef.current >= ln.t_complete,
         )
       : undefined;
@@ -492,6 +519,22 @@ export const Board = memo(
             ))}
           </div>
         </div>
+
+        {/* Pointing gestures, over the handwriting and the typeset layer alike, in board pixels. */}
+        {annotations.length > 0 && (
+          <svg className="ann-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+            <AnnotationLayer
+              ref={annRef}
+              annotations={annotations}
+              size={board.size}
+              timeRef={timeRef}
+              colourOf={annColour}
+              veil={light ? VEIL_LIGHT : VEIL_DARK}
+              endOf={annEnd}
+              arrowBoxesOf={annArrow}
+            />
+          </svg>
+        )}
 
         <div className="tag-layer" aria-hidden>
           {hiddenPieces.map((p) => {

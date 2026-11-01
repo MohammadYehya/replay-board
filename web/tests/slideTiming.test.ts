@@ -263,6 +263,38 @@ test('an arrow starts and stops where the pointer did when that is on its elemen
   assert.ok(!inside(g.from, fromBox) && !inside(g.tip, toBox));
 });
 
+test('slide arrows are drawn exactly as before the board learned to keep arrows off its writing', () => {
+  // Recorded from the player before that change: slides pass no obstacles, so nothing may move.
+  const S: [number, number] = [960, 540];
+  const arrow = ann({
+    type: 'arrow', from: [233.5, 336], to: [561, 202.5],
+    path: [[370.0, 331.7], [383.0, 325.7], [422.0, 305.7], [475.7, 276.0], [532.3, 242.7], [568.7, 219.7], [588.0, 207.0], [594.3, 202.7]],
+  });
+  const fb = [66, 324, 335, 24] as [number, number, number, number];
+  const tb = [451, 178, 220, 49] as [number, number, number, number];
+  const cases: [() => ReturnType<typeof arrowGeometry>, string, string, [number, number], [number, number]][] = [
+    [() => arrowGeometry(...arrowEnds(arrow, fb, tb, 8), S, fb, tb), 'M387.7 321.5 Q454.5 253.5 546.8 230',
+      'M530.3 226.2 L546.8 230 L534.1 241.2', [546.8469772984955, 229.99130596742788], [387.7227514760599, 321.5072450271434]],
+    [() => arrowGeometry([276.5, 334], [603.5, 197], S, [66, 318, 421, 32], [508, 168, 191, 58]), 'M319.3 316.1 Q411.7 242.9 528.7 228.3',
+      'M512.8 222.5 L528.7 228.3 L514.7 237.8', [528.747077143544, 228.31850284811765], [319.301401650453, 316.0679142932353]],
+    [() => arrowGeometry([150, 120], [150, 160], S, [100, 100, 200, 40], [100, 150, 200, 30]), 'M305 120 Q332 142.5 305 165',
+      'M315.7 162.6 L305 165 L309.3 154.9', [305, 165], [305, 120]],
+    [() => arrowGeometry([100, 100], [120, 110], S), 'M100 100 Q111.4 102.2 120 110',
+      'M116.1 99.7 L120 110 L109.4 107.1', [120, 110], [100, 100]],
+  ];
+  for (const [make, d, head, tip, from] of cases) {
+    const g = make();
+    assert.equal(g.d, d);
+    assert.equal(g.head, head);
+    assert.deepEqual(g.tip, tip);
+    assert.deepEqual(g.from, from);
+  }
+  // and with an empty or missing obstacle list, the same arrow
+  const g = arrowGeometry([276.5, 334], [603.5, 197], S, [66, 318, 421, 32], [508, 168, 191, 58]);
+  assert.deepEqual(arrowGeometry([276.5, 334], [603.5, 197], S, [66, 318, 421, 32], [508, 168, 191, 58], []), g);
+  assert.deepEqual(arrowGeometry([276.5, 334], [603.5, 197], S, [66, 318, 421, 32], [508, 168, 191, 58], null), g);
+});
+
 test('shapes: circle encloses the box, underline sits under it, spotlight hole pads it', () => {
   const pts = [...circlePath(box, [960, 540]).matchAll(/[ML]([\d.-]+) ([\d.-]+)/g)].map((m) => [+m[1], +m[2]]);
   assert.ok(pts.length > 100);

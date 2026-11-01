@@ -241,6 +241,9 @@ class HandTrack:
     def __init__(self, start: float, fps: float):
         self.start, self.fps = start, fps
         self.samples: dict[int, list[dict]] = {}  # sample index -> [{box, local, score}]
+        self.n_chunks = 0
+        self.failed = 0  # chunks whose SAM call (or video copy) failed: no hands there
+        self.error: Exception | None = None  # the last such failure
 
     def at(self, i: int) -> list[dict]:
         return self.samples.get(i, [])
@@ -251,10 +254,13 @@ class HandTrack:
 
 def track_hands(client: MetaClient, info: VideoInfo, start: float = 0.0, end: float | None = None,
                 fps: float = 3.0, width: int = 640, chunk_s: float = 120.0, min_score: float = 0.4,
-                workdir: Path | None = None, progress=None) -> HandTrack:
+                workdir: Path | None = None, progress=None, stop: threading.Event | None = None) -> HandTrack:
     """The teacher's hands with SAM 3.1 video mode on a low-fps copy, in parallel chunks.
 
-    Boxes and masks are scaled back to original video pixels. Billed per frame sent.
+    Boxes and masks are scaled back to original video pixels. Billed per frame sent. The low-fps copies are made
+    one at a time (SAM calls still overlap): this runs while the board capture needs the CPU. A chunk that fails
+    is counted in track.failed and the others still count. Once `stop` is set (the job failed), the chunks not
+    sent yet are skipped.
     """
     s, e = clip_range(info, start, end)
     w, h = scaled_size(info, width)
@@ -265,34 +271,51 @@ def track_hands(client: MetaClient, info: VideoInfo, start: float = 0.0, end: fl
         d = min(chunk_s, e - t)
         chunks.append((t, d))
         t += d
+    track.n_chunks = len(chunks)
     tmp = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="rb_hands_"))
     tmp.mkdir(parents=True, exist_ok=True)
     done = [0]
-    lock = threading.Lock()
+    lock, encoding = threading.Lock(), threading.Lock()
+
+    def stopped():
+        return stop is not None and stop.is_set()
 
     def one(i_cd):
         i, (cs, cd) = i_cd
         path = tmp / f"hand_chunk_{i:03d}.mp4"
-        _encode_chunk(info, cs, cd, fps, width, path)
-        recs = client.segment_video(path.read_bytes(), "hand", frames=int(np.ceil(cd * fps)))
-        base = int(round((cs - s) * fps))
-        out: dict[int, list[dict]] = {}
-        for r in recs:
-            if r["score"] is not None and r["score"] < min_score:
-                continue
-            x0, y0, x1, y1 = r["box"]
-            out.setdefault(base + r["frame"], []).append(
-                {"box": [x0 * k, y0 * k, x1 * k, y1 * k], "local": r["local"], "scale": k, "score": r["score"]})
+        err = None
+        try:
+            with encoding:
+                if stopped():
+                    return  # no more paid calls for a failed job
+                _encode_chunk(info, cs, cd, fps, width, path)
+            if stopped():
+                return
+            recs = client.segment_video(path.read_bytes(), "hand", frames=int(np.ceil(cd * fps)))
+            base = int(round((cs - s) * fps))
+            out: dict[int, list[dict]] = {}
+            for r in recs:
+                if r["score"] is not None and r["score"] < min_score:
+                    continue
+                x0, y0, x1, y1 = r["box"]
+                out.setdefault(base + r["frame"], []).append(
+                    {"box": [x0 * k, y0 * k, x1 * k, y1 * k], "local": r["local"], "scale": k, "score": r["score"]})
+        except Exception as exc:  # no hands in this chunk; the others still count
+            err, out = exc, {}
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
         with lock:
+            if err is not None:
+                track.failed += 1
+                track.error = err
             for f, hs in out.items():
                 track.samples.setdefault(f, []).extend(hs)
             done[0] += 1
             if progress:
                 progress(done[0] / len(chunks))
-        try:
-            path.unlink()
-        except OSError:
-            pass
 
     with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as ex:
         list(ex.map(one, enumerate(chunks)))

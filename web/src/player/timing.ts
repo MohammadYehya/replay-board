@@ -1,6 +1,6 @@
 // Pure timing rules for the player: when each piece of writing is drawn, faded, tagged and talked about,
 // plus transcript/chapter lookups. No DOM here, so `npm test` can run it with plain Node.
-import type { Chapter, Piece, Span, Word } from '../types';
+import type { BoardLine, Chapter, Piece, Span, Word } from '../types';
 
 /** Kinds that are drawings: they always stay as handwriting, even in typeset mode. */
 export const DRAWING_KINDS = new Set([
@@ -217,6 +217,21 @@ export function typesetIds(pieces: Piece[], boardW: number, boardH: number): Set
     out.add(p.id);
   }
   return out;
+}
+
+/** Taller than this (pixels of a 960-wide board, about four lines of handwriting) a "line" is not one line. */
+const LINE_MAX_H = 100;
+
+/**
+ * Whether a group of pieces from the backend is one written line, to be typeset (and read in the tooltip) whole.
+ * Pieces chained together through a big block of writing can come back as a "line" covering most of the board,
+ * with one short reading: typeset, it would replace all their writing. Its pieces are then shown on their own.
+ */
+export function isWrittenLine(line: BoardLine, boardW: number): boolean {
+  const b = line?.box;
+  if (!Array.isArray(b) || b.length < 4 || !Array.isArray(line.pieces)) return false;
+  const u = Math.max(0.25, (boardW || 960) / 960);
+  return b[3] <= LINE_MAX_H * u;
 }
 
 export function formatTime(sec: number): string {

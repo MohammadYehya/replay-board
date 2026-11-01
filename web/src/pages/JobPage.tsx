@@ -13,6 +13,7 @@ const STAGES: Record<string, [string, string]> = {
   capture: ['Capture the writing', 'stroke tracker'],
   speech: ['Transcribe the voice', 'Voice Transcribe'],
   read: ['Read the writing', 'Muse Spark'],
+  gestures: ['Find pointing gestures', 'SAM 3.1 + Muse Spark'],
   link: ['Link writing to speech', 'Muse Spark'],
   write: ['Write the replay', ''],
   align: ['Refine word times', 'MMS aligner'],
@@ -31,8 +32,8 @@ function stageList(stages: Record<string, StageStatus> | undefined): [string, St
   return [...known, ...extra].map((k) => [k, s[k]]);
 }
 
-/** Whether the classify stage found slides (its note reads "slides, ..."). */
-const isSlides = (stages: Record<string, StageStatus> | undefined) => /^slides\b/i.test(stages?.classify?.note ?? '');
+/** Whether the classify stage found slides (its note reads "a slide recording..."). */
+const isSlides = (stages: Record<string, StageStatus> | undefined) => /\bslide/i.test(stages?.classify?.note ?? '');
 
 const stageInfo = (k: string, slides: boolean): [string, string] =>
   (slides ? SLIDE_STAGES[k] : undefined) ??

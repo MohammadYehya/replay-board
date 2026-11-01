@@ -12,7 +12,7 @@ import shutil
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Callable
 
@@ -171,8 +171,12 @@ class SpeechJob:
         if self.aligned is not None and self.aligned.done():
             words, how = self.aligned.result()
             return turns, words, how
-        words = [w for t in turns for w in speech._proportional(t, t["text"].split())]
-        return turns, words, "proportional"
+        return turns, self.proportional(), "proportional"
+
+    def proportional(self) -> list[dict]:
+        """Turn-level (proportional) word times: always the same, whenever MMS finishes."""
+        pcm, turns = self.transcribed.result()
+        return [w for t in turns for w in speech._proportional(t, t["text"].split())]
 
     def final(self):
         pcm, turns = self.transcribed.result()
@@ -232,8 +236,9 @@ def hexcolor(bgr) -> str:
 def run(video: str | Path, job_dir: Path | None = None, start: float | None = None, end: float | None = None,
         use_sam: bool = True, width: int = 800, log: Callable[[str], None] = print,
         on_status: Callable[[dict], None] | None = None, use_cache: bool = True,
-        deck: str | Path | None = None) -> Path:
-    """Process one lecture. Returns the path of replay.json."""
+        deck: str | Path | None = None, gestures: bool = True) -> Path:
+    """Process one lecture. Returns the path of replay.json. gestures=False skips the teacher's pointing on a
+    board (hand tracking and its Muse Spark calls, about half the API cost)."""
     video = Path(video)
     info = media.probe(video)
     s0, s1 = media.clip_range(info, start, end)
@@ -247,7 +252,7 @@ def run(video: str | Path, job_dir: Path | None = None, start: float | None = No
             shutil.copy2(deck, job_dir / "deck.pdf")
     status = Status(job_dir, on_status)
     try:
-        out = _run(info, s0, s1, job_dir, status, use_sam, width, log, use_cache)
+        out = _run(info, s0, s1, job_dir, status, use_sam, width, log, use_cache, gestures)
         status.finish()
         return out
     except Exception as e:  # report one line; keep the traceback in the job folder
@@ -258,7 +263,7 @@ def run(video: str | Path, job_dir: Path | None = None, start: float | None = No
 
 
 def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Status, use_sam: bool,
-         width: int, log, use_cache: bool = True) -> Path:
+         width: int, log, use_cache: bool = True, gestures: bool = True) -> Path:
     t_all = time.perf_counter()
     status.start("probe")
     if s1 - s0 < 1.0:
@@ -284,7 +289,17 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     log(f"classify: {kind}")
     if kind.get("type") == "slides":
         return _run_slides(info, s0, s1, job_dir, status, client, kind, speech_job, lecture, pool, t_all, log)
+    stop = threading.Event()  # set when the board path fails: the hand tracking then sends no more SAM calls
+    try:
+        return _run_board(info, s0, s1, job_dir, status, client, kind, speech_job, lecture, pool, t_all, log,
+                          use_sam, width, gestures, stop)
+    except BaseException:
+        stop.set()
+        raise
 
+
+def _run_board(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, kind: dict, speech_job, lecture: Path,
+               pool, t_all: float, log, use_sam: bool, width: int, gestures: bool, stop: threading.Event) -> Path:
     status.start("board")
     corners, board_info = None, None
     if use_sam:
@@ -313,9 +328,18 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
                 status.done("people", f"teacher tracked in {len(person.frames)} of {person.n} moments")
 
         people_done.add_done_callback(people_finished)
-        # The teacher's hands, for pointing gestures (SAM 3.1 video mode, in the background too).
+        # The teacher's hands, for pointing gestures (SAM 3.1 video mode, in the background too). They are needed
+        # only after reading, so they start once the person chunks are back: their video copies would otherwise
+        # take the CPU from the person chunks that capture is waiting for.
         from .core.sam import track_hands
-        hands_job = pool.submit(track_hands, client, info, s0, s1, workdir=job_dir / "tmp")
+
+        def hands_after_people():
+            wait([people_done])
+            if stop.is_set():
+                return None
+            return track_hands(client, info, s0, s1, workdir=job_dir / "tmp", stop=stop)
+
+        hands_job = pool.submit(hands_after_people) if gestures else None
     else:
         status.skip("people", "SAM off")
 
@@ -381,16 +405,11 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
 
     annotations = []
     if hands_job is not None:
-        status.start("gestures", "pointing at the board")
-        try:
-            annotations = _board_gestures(client, info, board, pieces, reads, person, hands_job.result(),
-                                          speech_job, status, log)
-            status.done("gestures", f"{len(annotations)} pointing gestures redrawn")
-        except MetaAPIError as e:
-            log(f"gestures: skipped ({e})")
-            status.skip("gestures", "hand tracking failed")
+        annotations = _gestures(hands_job, lambda hands: _board_gestures(client, info, board, pieces, reads, person,
+                                                                         hands, speech_job, status, log),
+                                status, job_dir, log)
     else:
-        status.skip("gestures", "SAM off")
+        status.skip("gestures", "SAM off" if not use_sam else "turned off")
 
     elements = []
     for p in pieces:
@@ -445,16 +464,51 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     return _finish_with_speech(speech_job, link_and_write, job_dir, pool, log)
 
 
-def _board_gestures(client, info, board, pieces, reads, person, hands, speech_job, status, log) -> list[dict]:
-    """Pointing gestures on a filmed board: code finds them, Muse Spark decides what each one means."""
+def _gestures(hands_job, find, status: Status, job_dir: Path, log) -> list[dict]:
+    """The optional pointing stage on a board: whatever goes wrong, the lecture carries on without it.
+    find(hands) -> (annotations, gestures not judged, gestures not narrowed)."""
+    status.start("gestures", "pointing at the board")
+    try:
+        hands = hands_job.result()
+        if hands is None or (hands.failed and hands.failed >= hands.n_chunks):
+            log(f"gestures: skipped, hand tracking failed ({hands.error if hands is not None else 'stopped'})")
+            status.skip("gestures", "skipped: hand tracking failed in every SAM chunk")
+            return []
+        annotations, unjudged, whole = find(hands)
+    except Exception as e:  # an optional stage never fails the lecture
+        try:
+            (job_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        except OSError:
+            pass
+        log(f"gestures: skipped ({plain_error(e)})")
+        status.skip("gestures", f"skipped: {plain_error(e)}")
+        return []
+    note = f"{len(annotations)} pointing gestures redrawn"
+    if unjudged:
+        note += f", {unjudged} could not be judged"
+    if whole:
+        note += f", {whole} shown whole (the part meant is unknown)"
+    if hands.failed:
+        note += f"; hands not tracked in {hands.failed} of {hands.n_chunks} SAM chunks"
+    status.done("gestures", note)
+    return annotations
+
+
+def _board_gestures(client, info, board, pieces, reads, person, hands, speech_job, status, log):
+    """Pointing gestures on a filmed board: code finds them, Muse Spark decides what each one means.
+
+    Returns (annotations, gestures not judged, gestures not narrowed): a failed call loses only its own gesture.
+    """
     from .core import board_gestures as bg
     from .core.board import BoardGeometry
 
+    s = board.width / 800  # pixel sizes are set for an 800 px board
     geom = BoardGeometry(info, board.corners, board.width, 1280)
-    episodes = bg.episodes(bg.pointing_samples(hands, person, board, geom, info), hands.fps)
+    episodes = bg.episodes(bg.pointing_samples(hands, person, board, geom, info), hands.fps, scale=s)
     if not episodes:
-        return []
-    _, words, _ = speech_job.first()
+        return [], 0, 0
+    # Proportional times, not whatever alignment has reached by now: the same prompts (and cache hits) every run.
+    words = speech_job.proportional()
     by_id = {p["id"]: p for p in pieces}
 
     def elements_at(t):
@@ -468,43 +522,77 @@ def _board_gestures(client, info, board, pieces, reads, person, hands, speech_jo
                             "box": p["image_box"]})
         return out
 
-    def one(g):
-        t = (g["t_start"] + g["t_end"]) / 2
-        frame = media.grab_frame(info, t, 960)
-        k = frame.shape[1] / info.width
-        fpath = [[float(x) * k, float(y) * k] for x, y in geom.board_to_video(g["path"])]
-        said = _words_between(words, g["t_start"] - 1.5, g["t_end"] + 1.5)
-        els = elements_at(g["t_end"])
-        m = understand.board_gesture_meaning(client, frame, board.image_at(g["t_end"]), g, els, said, fpath)
-        return g, els, m
+    # A piece much taller than a line of writing is a block (often everything already on the board when the
+    # recording starts): a gesture on it may be about one line or term only.
+    heights = sorted(p["image_box"][3] for p in pieces if reads.get(p["id"], {}).get("kind") in bg.NARROW_KINDS)
+    line_h = heights[len(heights) // 2] if heights else 18 * s
 
-    out = []
+    def own_ink(pid, t):
+        ink = board.ink_at(t).reshape(-1)
+        own = np.zeros_like(ink)
+        own[board.add_idx[(board.add_piece == pid) & (board.add_t <= t)]] = True
+        return (ink & own).reshape(board.height, board.width)
+
+    def part_of(g, m, pid, said):
+        """Box of the part of a big block the gesture was about, or None for the whole target."""
+        p = by_id[int(pid)]
+        r = reads.get(p["id"], {})
+        if r.get("kind") not in bg.NARROW_KINDS or p["image_box"][3] <= 2.2 * line_h:
+            return None
+        img = board.image_at(g["t_end"])
+        region = bg.zoom_region(p["image_box"], g["path"], board.width, board.height)
+        part = understand.board_gesture_part(client, img, region, g["path"], m, r.get("text", ""), said)
+        return bg.tighten(own_ink(p["id"], g["t_end"]), part, scale=s) if part else None
+
+    def one(g):
+        """(gesture, type, target ids, meaning, part box, what failed)"""
+        els = elements_at(g["t_end"])
+        said = _words_between(words, g["t_start"] - 1.5, g["t_end"] + 1.5)
+        try:
+            t = (g["t_start"] + g["t_end"]) / 2
+            frame = media.grab_frame(info, t, 960)
+            k = frame.shape[1] / info.width
+            fpath = [[float(x) * k, float(y) * k] for x, y in geom.board_to_video(g["path"])]
+            m = understand.board_gesture_meaning(client, frame, board.image_at(g["t_end"]), g, els, said, fpath)
+        except Exception as e:  # loses this gesture only
+            log(f"gestures: the one at {g['t_start']:.1f}s could not be judged ({e})")
+            return g, "none", [], {}, None, "meaning"
+        kind, target = bg.clean_target(m.get("type") or "none", m.get("target"), [e["id"] for e in els])
+        if kind == "arrow":  # Spark's two ends must fit where the hand went
+            kind, target = bg.check_arrow(g["path"], target, [by_id[int(x)]["image_box"] for x in target], s)
+        part = None
+        if kind not in ("none", "arrow") and len(target) == 1:
+            try:
+                part = part_of(g, {**m, "type": kind}, target[0], said)
+            except Exception as e:  # the whole target, then
+                log(f"gestures: the part meant at {g['t_start']:.1f}s is unknown ({e})")
+                return g, kind, target, m, None, "part"
+        return g, kind, target, m, part, None
+
+    out, unjudged, whole = [], 0, 0
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for k, (g, els, m) in enumerate(ex.map(one, episodes)):
+        for k, (g, kind, target, m, part, failed) in enumerate(ex.map(one, episodes)):
             status.progress("gestures", (k + 1) / len(episodes))
-            kind = m.get("type", "none")
-            ids = {e["id"] for e in els}
-            target = [x for x in m.get("target", []) if x in ids]
+            unjudged += failed == "meaning"
+            whole += failed == "part"
             if kind == "none" or not target:
                 continue
             boxes = [by_id[int(x)]["image_box"] for x in target]
-            box = boxes[0]
-            fr = to = None
-            if kind == "arrow" and len(boxes) >= 2:
-                a, b = boxes[0], boxes[1]
+            box, fr, to = boxes[0], None, None
+            if kind == "arrow":
+                a, b = boxes
                 fr = [a[0] + a[2] / 2, a[1] + a[3] / 2]
                 to = [b[0] + b[2] / 2, b[1] + b[3] / 2]
-            elif kind == "arrow":
-                kind = "spotlight"  # an arrow needs two ends
-            if kind != "arrow" and len(boxes) > 1:  # several targets: one box round them all
-                x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
-                x1, y1 = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
-                box = [x0, y0, x1 - x0, y1 - y0]
+            elif part:  # a big block: just the part the teacher meant
+                box = part
+            elif len(boxes) > 1:  # several targets: one box round them all
+                box = bg.union_box(boxes)
             out.append({"type": kind, "tool": "hand", "t_start": g["t_start"], "t_end": g["t_end"], "target": target,
                         "box": [round(float(v), 1) for v in box], "from": fr, "to": to, "why": m.get("why", ""),
                         "guess": g["type"], "path": g["path"]})
-    log(f"gestures: {len(episodes)} candidates, {len(out)} kept by Muse Spark")
-    return out
+    log(f"gestures: {len(episodes)} candidates, {len(out)} kept by Muse Spark"
+        + (f", {unjudged} not judged" if unjudged else ""))
+    return out, unjudged, whole
 
 
 def _words_between(words: list[dict], a: float, b: float) -> str:
@@ -517,6 +605,7 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
 
     status.skip("board", "slides")
     status.skip("people", "slides")
+    status.skip("gestures", "slides: the pointer's gestures are read with the slides")
     status.start("capture", "slide analysis")
     speech_job.cpu_free.clear()
     try:
@@ -609,7 +698,9 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
             if m.get("type", "none") == "none":
                 continue
             ids = {e["id"]: e for e in elements.get(st.id, [])}
-            target = [x for x in m.get("target", []) if x in ids]
+            target = list(dict.fromkeys(x for x in m.get("target", []) if x in ids))
+            if m["type"] == "arrow":
+                target = target[:2]  # from, to: the two ends the player draws between
             box = g["box"]
             if target and m["type"] in ("spotlight", "underline"):
                 box = ids[target[0]]["box"]

@@ -59,6 +59,8 @@ export interface BoardData {
   pieces: Piece[];
   lines?: BoardLine[];
   erases?: Erase[];
+  /** The teacher's hand pointing at writing (tool "hand"), in board pixels; targets are piece ids. */
+  annotations?: SlideAnnotation[];
   t_start?: number;
 }
 
@@ -87,7 +89,7 @@ export type AnnotationType = 'spotlight' | 'circle' | 'underline' | 'arrow' | 'p
 
 export interface SlideAnnotation {
   type: AnnotationType | string;
-  tool: string; // cursor | laser
+  tool: string; // cursor | laser (slides) | hand (board)
   t_start: number;
   t_end: number;
   target?: string[];
@@ -96,7 +98,7 @@ export interface SlideAnnotation {
   to?: [number, number] | null;
   why?: string;
   guess?: string;
-  state?: number; // id of the slide state it belongs to
+  state?: number; // id of the slide state it belongs to (slides only)
   path?: [number, number][];
   underline_y?: number | null;
 }

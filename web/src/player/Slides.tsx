@@ -1,19 +1,19 @@
 // The slide view: the clean slide of the state shown at t (crossfading through each change), an SVG layer that
-// re-draws the teacher's pointer gestures as calm annotations, and invisible hit boxes on the slide's elements.
-// Everything moves with the shared clock (render(t) is called every frame by the player), never with CSS
-// timers, so scrubbing lands on exactly the right frame. The original video is never touched.
+// re-draws the teacher's pointer gestures as calm annotations (AnnotationLayer), and invisible hit boxes on the
+// slide's elements. Everything moves with the shared clock (render(t) is called every frame by the player), never
+// with CSS timers, so scrubbing lands on exactly the right frame. The original video is never touched.
 import {
-  forwardRef, memo, useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
+  forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
   type RefObject,
 } from 'react';
 import { jobFileUrl } from '../api';
 import type { PointerSample, SlideAnnotation, SlideElement, SlidesData, SlideState } from '../types';
+import { AnnotationLayer, type AnnotationLayerHandle } from './AnnotationLayer';
 import {
-  annotationAlpha, annotationTiming, arrowEnds, arrowGeometry, arrowHeadAt, circlePath, crossfadeAt, drawProgress,
-  elementSeekTime, isLightColour, kindOf, pickElement, pointerAt, pulseRect, pulseRings, slideEndAt, sortStates, spotlightHole,
-  stateIndexAt, strokeOf, toolColour, underlinePath, underlineY, unitOf, PULSE_RINGS, type AnnotationTiming, type Kind, type Pt,
-  type Rect,
+  crossfadeAt, elementSeekTime, isLightColour, pickElement, pointerAt, slideEndAt, sortStates, stateIndexAt, toolColour,
+  unitOf,
 } from './slideTiming';
+import { n1, op, setAttr } from './svgAttrs';
 import { formatTime, talkingAt } from './timing';
 import { kindLabel, sameReading, tipTex } from './tip';
 
@@ -33,78 +33,18 @@ interface Props {
   onTogglePlay(): void;
 }
 
-interface Prepared {
-  a: SlideAnnotation;
-  kind: Kind;
-  tm: AnnotationTiming;
-  colour: string;
-  d?: string; // circle, underline, arrow shaft
-  head?: string; // arrowhead wings
-  tip?: Pt;
-  hole?: Rect; // spotlight
-}
-
-interface AnnDom {
-  g: SVGGElement;
-  paths: SVGPathElement[]; // progressively drawn strokes (glow + line)
-  head: SVGGElement | null;
-  rings: SVGRectElement[];
-}
-
 const EMPTY: SlideElement[] = [];
+const NO_ANNOTATIONS: SlideAnnotation[] = [];
 const TALK_FILL_LIGHT = 'rgb(255, 207, 51)';
 const TALK_FILL_DARK = 'rgb(255, 214, 92)';
+/** Amber for the mouse cursor, red for the laser pointer. */
+const slideColour = (a: SlideAnnotation) => toolColour(a.tool);
 
-/** Write an attribute only when its value changes: the clock calls render every frame. */
-const attrMemo = new WeakMap<Element, Map<string, string>>();
-function setAttr(el: Element | null | undefined, name: string, value: string) {
-  if (!el) return;
-  let m = attrMemo.get(el);
-  if (!m) attrMemo.set(el, (m = new Map()));
-  if (m.get(name) === value) return;
-  m.set(name, value);
-  el.setAttribute(name, value);
-}
-const op = (v: number) => (v <= 0.001 ? '0' : v >= 0.999 ? '1' : v.toFixed(3));
-const n1 = (v: number) => (Math.round(v * 10) / 10).toString();
-
-function prepare(slides: SlidesData, states: SlideState[]): Prepared[] {
-  const size = slides.size;
-  const indexOf = new Map(states.map((s, i) => [s.id, i]));
-  const out: Prepared[] = [];
-  for (const a of slides.annotations ?? []) {
-    if (!a || !Array.isArray(a.box) || a.box.length < 4 || !Number.isFinite(a.t_start)) continue;
-    const kind = kindOf(a);
-    const si = a.state != null ? (indexOf.get(a.state) ?? -1) : -1;
-    const st = si >= 0 ? states[si] : undefined;
-    const p: Prepared = { a, kind, tm: annotationTiming(a, slideEndAt(states, si)), colour: toolColour(a.tool) };
-    if (kind === 'circle') p.d = circlePath(a.box, size, a.path);
-    else if (kind === 'underline') p.d = underlinePath(a.box, size, underlineY(a, size));
-    else if (kind === 'spotlight') p.hole = spotlightHole(a.box, size);
-    else if (kind === 'arrow') {
-      const els = st?.elements ?? [];
-      const boxOf = (id: string | undefined) => (id ? (els.find((e) => e.id === id)?.box ?? null) : null);
-      const tg = a.target ?? [];
-      const fromBox = tg.length >= 2 ? boxOf(tg[0]) : null;
-      const toBox = boxOf(tg[tg.length - 1]);
-      const [from, to] = arrowEnds(a, fromBox, toBox, 8 * unitOf(size));
-      const g = arrowGeometry(from, to, size, fromBox, toBox);
-      p.d = g.d;
-      p.head = g.head;
-      p.tip = g.tip;
-    }
-    out.push(p);
-  }
-  return out;
-}
-
-/** Drives the slide images and the SVG layer for a time t. React builds the elements; this only sets
- *  attributes on them, and only the ones that changed. */
+/** Drives the slide images, the highlighter and the pointer dot for a time t (the annotations have their own
+ *  layer). React builds the elements; this only sets attributes on them, and only the ones that changed. */
 class SlideAnimator {
   states: SlideState[] = [];
-  prepared: Prepared[] = [];
   samples: PointerSample[] = [];
-  size: [number, number] = [960, 540];
   light = true;
   showPointer = false;
   /** The elements of the state React is showing, by id (for the "talked about" highlight). */
@@ -113,9 +53,6 @@ class SlideAnimator {
   dirty = true;
 
   private imgs = new Map<number, HTMLImageElement>();
-  private anns = new Map<number, AnnDom>();
-  private holes = new Map<number, SVGRectElement>();
-  private dim: SVGGElement | null = null;
   private talk = new Map<string, SVGRectElement>();
   private pointer: SVGGElement | null = null;
   private pointerFill: SVGElement[] = [];
@@ -127,18 +64,6 @@ class SlideAnimator {
   collect(root: HTMLElement) {
     this.imgs.clear();
     root.querySelectorAll<HTMLImageElement>('img[data-state]').forEach((el) => this.imgs.set(Number(el.dataset.state), el));
-    this.anns.clear();
-    root.querySelectorAll<SVGGElement>('g[data-ann]').forEach((g) => {
-      this.anns.set(Number(g.dataset.ann), {
-        g,
-        paths: Array.from(g.querySelectorAll<SVGPathElement>('path[data-draw]')),
-        head: g.querySelector<SVGGElement>('g[data-head]'),
-        rings: Array.from(g.querySelectorAll<SVGRectElement>('rect[data-ring]')),
-      });
-    });
-    this.holes.clear();
-    root.querySelectorAll<SVGRectElement>('rect[data-hole]').forEach((el) => this.holes.set(Number(el.dataset.hole), el));
-    this.dim = root.querySelector<SVGGElement>('g[data-dim]');
     this.talk.clear();
     root.querySelectorAll<SVGRectElement>('rect[data-talk]').forEach((el) => this.talk.set(el.dataset.talk ?? '', el));
     this.pointer = root.querySelector<SVGGElement>('g[data-pointer]');
@@ -151,7 +76,7 @@ class SlideAnimator {
     if (!this.dirty && t === this.lastT) return;
     this.dirty = false;
     this.lastT = t;
-    const { states, size } = this;
+    const { states } = this;
 
     // Slide image: the current state, crossfading from the previous one during its change window.
     const idx = stateIndexAt(states, t);
@@ -169,74 +94,6 @@ class SlideAnimator {
     for (const i of this.shownImgs) if (!want.has(i)) setAttr(this.imgs.get(i), 'style', 'opacity:0');
     for (const [i, o] of want) setAttr(this.imgs.get(i), 'style', `opacity:${op(o)}`);
     this.shownImgs = new Set(want.keys());
-
-    // Annotations.
-    const sw = strokeOf(size);
-    let spotMax = 0;
-    const spots: [number, number][] = [];
-    this.prepared.forEach((p, i) => {
-      const alpha = annotationAlpha(p.tm, t);
-      if (p.kind === 'spotlight') {
-        if (alpha > 0.001) {
-          spots.push([i, alpha]);
-          spotMax = Math.max(spotMax, alpha);
-        } else setAttr(this.holes.get(i), 'opacity', '0');
-        return;
-      }
-      const dom = this.anns.get(i);
-      if (!dom) return;
-      if (alpha <= 0.001) {
-        setAttr(dom.g, 'display', 'none');
-        return;
-      }
-      if (p.kind === 'pulse') {
-        setAttr(dom.g, 'display', 'inline');
-        setAttr(dom.g, 'opacity', op(alpha));
-        pulseRings(p.tm, t).forEach((r, j) => {
-          const el = dom.rings[j];
-          if (!el) return;
-          if (r.alpha <= 0.002) {
-            setAttr(el, 'opacity', '0');
-            return;
-          }
-          const rc = pulseRect(p.a.box, size, r.k);
-          setAttr(el, 'x', n1(rc.x));
-          setAttr(el, 'y', n1(rc.y));
-          setAttr(el, 'width', n1(rc.w));
-          setAttr(el, 'height', n1(rc.h));
-          setAttr(el, 'rx', n1(rc.r));
-          setAttr(el, 'stroke-width', (sw * (1 - 0.45 * r.k)).toFixed(2));
-          setAttr(el, 'opacity', op(r.alpha));
-        });
-        return;
-      }
-      const progress = drawProgress(p.tm, t);
-      if (progress <= 0.0005) {
-        setAttr(dom.g, 'display', 'none'); // nothing drawn yet: a round cap alone would show as a dot
-        return;
-      }
-      setAttr(dom.g, 'display', 'inline');
-      setAttr(dom.g, 'opacity', op(alpha));
-      const off = (1 - progress).toFixed(4);
-      for (const path of dom.paths) setAttr(path, 'stroke-dashoffset', off);
-      if (dom.head && p.tip) {
-        const k = arrowHeadAt(p.tm, t);
-        const s = 0.55 + 0.45 * k;
-        const [x, y] = p.tip;
-        setAttr(dom.head, 'opacity', op(k));
-        setAttr(dom.head, 'transform', `translate(${n1(x)} ${n1(y)}) scale(${s.toFixed(3)}) translate(${n1(-x)} ${n1(-y)})`);
-      }
-    });
-
-    // Spotlight: one dimming layer with a soft hole per active spotlight (a fading one closes its hole).
-    if (this.dim) {
-      if (spotMax <= 0.001) setAttr(this.dim, 'display', 'none');
-      else {
-        setAttr(this.dim, 'display', 'inline');
-        setAttr(this.dim, 'opacity', op(spotMax));
-      }
-    }
-    for (const [i, a] of spots) setAttr(this.holes.get(i), 'opacity', op(a / spotMax));
 
     // Highlighter behind what is being talked about.
     const strength = this.light ? 0.42 : 0.24;
@@ -260,61 +117,32 @@ class SlideAnimator {
   }
 }
 
-/** One annotation's SVG, built once; SlideAnimator animates it. */
-const AnnotationShape = memo(function AnnotationShape(props: {
-  p: Prepared;
-  i: number;
-  sw: number;
-  size: [number, number];
-}) {
-  const { p, i, sw, size } = props;
-  if (p.kind === 'spotlight') return null; // drawn by the shared dimming layer
-  const common = { fill: 'none', stroke: p.colour, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
-  if (p.kind === 'pulse') {
-    const base = pulseRect(p.a.box, size, 0); // a faint glow where the rings start
-    return (
-      <g data-ann={i} display="none" opacity={0}>
-        <rect x={base.x} y={base.y} width={base.w} height={base.h} rx={base.r} fill={p.colour} fillOpacity={0.12} />
-        {Array.from({ length: PULSE_RINGS }, (_, j) => (
-          <rect key={j} data-ring={j} {...common} strokeWidth={sw} opacity={0} />
-        ))}
-      </g>
-    );
-  }
-  // circle, underline, arrow: a soft glow under a crisp line, both drawn with stroke-dashoffset (pathLength 1)
-  const drawn = { pathLength: 1, strokeDasharray: '1 1', strokeDashoffset: 1 };
-  return (
-    <g data-ann={i} display="none" opacity={0}>
-      <path data-draw="" d={p.d} {...common} {...drawn} strokeWidth={sw * 2.8} strokeOpacity={0.2} />
-      <path data-draw="" d={p.d} {...common} {...drawn} strokeWidth={sw} />
-      {p.head && (
-        <g data-head="" opacity={0}>
-          <path d={p.head} {...common} strokeWidth={sw * 2.8} strokeOpacity={0.2} />
-          <path d={p.head} {...common} strokeWidth={sw} />
-        </g>
-      )}
-    </g>
-  );
-});
-
 // Memoised: the player re-renders on every spoken word, the slides only need to when their props change.
 export const Slides = memo(
   forwardRef<SlidesHandle, Props>(function Slides(props, ref) {
     const { jobId, slides, timeRef, clipStart, playing, showPointer, onSeek, onTogglePlay } = props;
     const [W, H] = slides.size;
     const u = unitOf(slides.size);
-    const sw = strokeOf(slides.size);
-    const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
-    const blurId = `rb-blur-${uid}`;
-    const maskId = `rb-spot-${uid}`;
     const stageRef = useRef<HTMLDivElement>(null);
     const clipRef = useRef<HTMLDivElement>(null);
     const tipRef = useRef<HTMLDivElement>(null);
+    const annRef = useRef<AnnotationLayerHandle>(null);
     const pointerRef = useRef({ x: 0, y: 0 }); // last mouse position in stage CSS pixels
     const [anim] = useState(() => new SlideAnimator());
 
     const states = useMemo(() => sortStates(slides.states ?? []), [slides]);
-    const prepared = useMemo(() => prepare(slides, states), [slides, states]);
+    const annotations = slides.annotations ?? NO_ANNOTATIONS;
+    // An annotation never outlives its slide, and an arrow points at its slide's elements.
+    const stateIndex = useMemo(() => new Map(states.map((s, i) => [s.id, i])), [states]);
+    const annSlide = useCallback(
+      (a: SlideAnnotation) => (a.state != null ? (stateIndex.get(a.state) ?? -1) : -1),
+      [stateIndex],
+    );
+    const annEnd = useCallback((a: SlideAnnotation) => slideEndAt(states, annSlide(a)), [states, annSlide]);
+    const annBox = useCallback(
+      (a: SlideAnnotation, id: string) => states[annSlide(a)]?.elements?.find((e) => e.id === id)?.box ?? null,
+      [states, annSlide],
+    );
     const samples = useMemo(
       () => (slides.pointer ?? []).filter((s) => Array.isArray(s) && Number.isFinite(s[0])).slice().sort((a, b) => a[0] - b[0]),
       [slides],
@@ -331,9 +159,7 @@ export const Slides = memo(
     const [tipPos, setTipPos] = useState<{ left: number; top: number; below: boolean } | null>(null);
 
     anim.states = states;
-    anim.prepared = prepared;
     anim.samples = samples;
-    anim.size = slides.size;
     anim.light = light;
     anim.onState = setStateIdx;
     if (anim.showPointer !== showPointer) {
@@ -379,7 +205,16 @@ export const Slides = memo(
       return () => ro.disconnect();
     }, []);
 
-    useImperativeHandle(ref, () => ({ render: (t: number) => anim.render(t) }), [anim]);
+    useImperativeHandle(
+      ref,
+      () => ({
+        render(t: number) {
+          anim.render(t);
+          annRef.current?.render(t);
+        },
+      }),
+      [anim],
+    );
 
     const pick = useCallback(
       (clientX: number, clientY: number): SlideElement | null => {
@@ -426,7 +261,6 @@ export const Slides = memo(
       onTogglePlay();
     };
 
-    const spots = prepared.map((p, i) => [p, i] as const).filter(([p]) => p.kind === 'spotlight');
     const tipLatex = hover?.latex?.trim() ?? '';
     const tipHtml = useMemo(() => tipTex(tipLatex), [tipLatex]);
     const rawText = hover?.text?.trim() ?? '';
@@ -466,29 +300,6 @@ export const Slides = memo(
           )}
 
           <svg className="slide-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-            <defs>
-              <filter id={blurId} filterUnits="userSpaceOnUse" x={0} y={0} width={W} height={H}>
-                <feGaussianBlur stdDeviation={9 * u} />
-              </filter>
-              <mask id={maskId} maskUnits="userSpaceOnUse" x={0} y={0} width={W} height={H}>
-                <rect width={W} height={H} fill="#fff" />
-                {spots.map(([p, i]) => (
-                  <rect
-                    key={i}
-                    data-hole={i}
-                    x={p.hole!.x}
-                    y={p.hole!.y}
-                    width={p.hole!.w}
-                    height={p.hole!.h}
-                    rx={p.hole!.r}
-                    fill="#000"
-                    opacity={0}
-                    filter={`url(#${blurId})`}
-                  />
-                ))}
-              </mask>
-            </defs>
-
             <g className={`talk ${light ? 'on-light' : 'on-dark'}`}>
               {elements.map((el) => {
                 const [x, y, w, h] = el.box;
@@ -508,29 +319,30 @@ export const Slides = memo(
               })}
             </g>
 
-            {spots.length > 0 && (
-              <g data-dim="" display="none" opacity={0}>
-                <rect width={W} height={H} fill="#000" fillOpacity={0.5} mask={`url(#${maskId})`} />
-              </g>
-            )}
-
-            {hover && (
-              <rect
-                x={hover.box[0] - 5 * u}
-                y={hover.box[1] - 4 * u}
-                width={hover.box[2] + 10 * u}
-                height={hover.box[3] + 8 * u}
-                rx={6 * u}
-                fill={hoverFill}
-                stroke={hoverStroke}
-                strokeWidth={1.5}
-                vectorEffect="non-scaling-stroke"
-              />
-            )}
-
-            {prepared.map((p, i) => (
-              <AnnotationShape key={i} p={p} i={i} sw={sw} size={slides.size} />
-            ))}
+            <AnnotationLayer
+              ref={annRef}
+              annotations={annotations}
+              size={slides.size}
+              timeRef={timeRef}
+              colourOf={slideColour}
+              endOf={annEnd}
+              boxOf={annBox}
+            >
+              {/* the hover box sits above the spotlight's veil and below the annotations */}
+              {hover && (
+                <rect
+                  x={hover.box[0] - 5 * u}
+                  y={hover.box[1] - 4 * u}
+                  width={hover.box[2] + 10 * u}
+                  height={hover.box[3] + 8 * u}
+                  rx={6 * u}
+                  fill={hoverFill}
+                  stroke={hoverStroke}
+                  strokeWidth={1.5}
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
+            </AnnotationLayer>
 
             <g data-pointer="" display="none" opacity={0}>
               <circle data-fill="" r={10 * u} opacity={0.22} />

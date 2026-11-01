@@ -3,7 +3,7 @@
 import { jobFileUrl } from '../api';
 import type { BoardData, BoardLine, Piece } from '../types';
 import { FrameCache, goneCount, loadSprite, type Sprite } from './sprites';
-import { alphaAt, progressAt, schedule, stepFor, tagAt, talkingAt, typesetIds, type Schedule } from './timing';
+import { alphaAt, isWrittenLine, progressAt, schedule, stepFor, tagAt, talkingAt, typesetIds, type Schedule } from './timing';
 
 interface Entry {
   piece: Piece;
@@ -128,7 +128,7 @@ export class BoardRenderer {
     for (const e of this.entries) this.byId.set(e.piece.id, e);
     (board.lines ?? []).forEach((line, i) => {
       const members = line.pieces.map((id) => this.byId.get(id)).filter((m): m is Entry => !!m);
-      if (members.length < 2 || !(line.read?.latex?.trim() || line.read?.text?.trim())) return;
+      if (members.length < 2 || !(line.read?.latex?.trim() || line.read?.text?.trim()) || !isWrittenLine(line, this.W)) return;
       const le: LineEntry = { line, key: lineKey(i), members, ok: true, w: 0 };
       this.lines.push(le);
       this.lineByKey.set(le.key, le);

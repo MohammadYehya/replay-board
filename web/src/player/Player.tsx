@@ -3,6 +3,7 @@ import { getJob, getReplay, jobFileUrl } from '../api';
 import type { Piece, Replay } from '../types';
 import { Board, type BoardHandle } from './Board';
 import { Slides, type SlidesHandle } from './Slides';
+import { drawable } from './slideTiming';
 import { activeWord, chapterAt, formatTime, groupWords, lastStartedWord, seekTarget, turnsFromWords } from './timing';
 import { LazyPopout, PopoutFallback } from './popoutLoader';
 import { Chapters, Transcript } from './Transcript';
@@ -299,6 +300,7 @@ export function Player({
   const partial = clipStart > 0.5 || clipEnd < replay.video.duration - 0.5;
   const pieces = board?.pieces ?? [];
   const hiddenCount = pieces.filter((p) => p.revealed && !p.pre_existing).length;
+  const gestureCount = (board?.annotations ?? []).filter(drawable).length; // the hand pointing at writing, as drawn
   const slideStates = slides?.states ?? [];
   const slideCount = slideStates.filter((s) => s.kind !== 'addition').length || slideStates.length;
   const buildSteps = slideStates.length - slideCount;
@@ -392,6 +394,8 @@ export function Player({
                   <span className="panel-note">
                     {pieces.length} {pieces.length === 1 ? 'piece' : 'pieces'} of writing
                     {hiddenCount > 0 && ` · ${hiddenCount} written while hidden`}
+                    {gestureCount > 0 &&
+                      ` · ${gestureCount} pointing ${gestureCount === 1 ? 'gesture' : 'gestures'}`}
                   </span>
                   <div className="segmented" role="group" aria-label="Board style">
                     <button aria-pressed={!typeset} className={!typeset ? 'on' : ''} onClick={() => setTypeset(false)}>
