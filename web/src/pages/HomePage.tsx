@@ -70,12 +70,13 @@ function JobList() {
                         ? 'Ready'
                         : j.state;
             const cls = label === 'Ready' ? 'ok' : label === 'Failed' ? 'bad' : label === 'Processing' ? 'busy' : 'idle';
-            const showId = !!j.name && j.name !== j.id;
+            const sub = j.detail || (j.name && j.name !== j.id ? j.id : '');
+            const showId = !!sub;
             return (
               <li key={j.id}>
                 <a href={`#/job/${encodeURIComponent(j.id)}`} className={showId ? '' : 'single'}>
                   <span className="job-name">{j.name || j.id}</span>
-                  {showId && <span className="job-id">{j.id}</span>}
+                  {showId && <span className="job-id">{sub}</span>}
                   <span className={`pill ${cls}`}>{label}</span>
                 </a>
                 {j.state === 'failed' && j.error && (

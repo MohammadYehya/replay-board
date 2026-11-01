@@ -188,6 +188,12 @@ def _write_replay(job_dir: Path, replay: dict):
     tmp.write_text(json.dumps(replay, ensure_ascii=False, indent=1), encoding="utf-8")
     if not replace_file(tmp, path, tries=200):
         raise JobError("could not save replay.json: the file is locked by another program")
+    # A few facts for the lecture list, so it never has to read a big replay.
+    v = replay.get("video", {})
+    summary = {"subject": replay.get("subject", ""), "type": replay.get("type", ""),
+               "seconds": round(float(v.get("end", v.get("duration", 0))) - float(v.get("start", 0)), 1),
+               "source": v.get("source", "")}
+    (job_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
 
 
 def _finish_with_speech(speech_job: SpeechJob, link_and_write, job_dir: Path, pool, log) -> Path:
@@ -390,7 +396,8 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
         replay = {
             "version": 1,
             "video": {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width,
-                      "height": info.height, "start": round(s0, 3), "end": round(s1, 3)},
+                      "height": info.height, "start": round(s0, 3), "end": round(s1, 3),
+                      "source": info.path.name},
             "type": "board",
             "subject": kind.get("subject", ""),
             "board": {
@@ -560,7 +567,8 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
         replay = {
             "version": 1,
             "video": {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width,
-                      "height": info.height, "start": round(s0, 3), "end": round(s1, 3)},
+                      "height": info.height, "start": round(s0, 3), "end": round(s1, 3),
+                      "source": info.path.name},
             "type": "slides",
             "subject": kind.get("subject", ""),
             "slides": {"size": [res.width, res.height], "background": hexcolor(res.background), "live": res.live,

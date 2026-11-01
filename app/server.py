@@ -51,6 +51,13 @@ def _job_dir(job_id: str) -> Path:
     return d
 
 
+def _duration(seconds) -> str:
+    if not seconds:
+        return ""
+    t = int(round(float(seconds)))
+    return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
 def _read_json(p: Path, tries: int = 20) -> dict:
     # The pipeline replaces these files atomically, but Windows can refuse a read mid-replace.
     for i in range(tries):
@@ -72,8 +79,15 @@ def list_jobs():
                 continue
             st = _read_json(d / "status.json")
             rp = d / "replay.json"
+            sm = _read_json(d / "summary.json", tries=1) if (d / "summary.json").exists() else {}
+            subject = (sm.get("subject") or "").strip()
+            source = sm.get("source") or st.get("name") or ""
+            detail = " · ".join(x for x in (
+                {"board": "Board lecture", "slides": "Slide lecture"}.get(sm.get("type", ""), ""),
+                _duration(sm.get("seconds")), source) if x)
             out.append({"id": d.name, "state": st.get("state", "unknown"), "error": st.get("error"),
-                        "ready": rp.exists(), "name": (st.get("name") or d.name)})
+                        "ready": rp.exists(), "name": (subject[:1].upper() + subject[1:]) if subject else (source or d.name),
+                        "detail": detail})
     return out
 
 

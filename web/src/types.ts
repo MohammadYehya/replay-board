@@ -172,6 +172,8 @@ export interface JobSummary {
   error?: string | null;
   ready: boolean;
   name: string;
+  /** "Board lecture · 7:58 · lecture.mp4", when the job has a summary. */
+  detail?: string;
 }
 
 // 3D pop-out scene made by Muse Spark for one board piece (app/popout.py, SCENE_SCHEMA and clean_scene).
