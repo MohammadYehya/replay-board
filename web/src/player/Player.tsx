@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { getJob, getReplay, jobFileUrl } from '../api';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { getJob, getReplay, jobFileUrl, notesUrl } from '../api';
 import type { Piece, Replay } from '../types';
 import { Board, type BoardHandle } from './Board';
 import { Slides, type SlidesHandle } from './Slides';
 import { activeWord, chapterAt, formatTime, groupWords, lastStartedWord, seekTarget, turnsFromWords } from './timing';
+import { LazyPopout, PopoutFallback } from './popoutLoader';
 import { Chapters, Transcript } from './Transcript';
 
 const SKIP = 5;
@@ -31,6 +32,7 @@ function Shortcuts({ onClose, mode }: { onClose(): void; mode: 'board' | 'slides
           [['←', '→'], 'Back / forward 5 s'],
           [['T'], 'Handwriting / typeset'],
           [['Click writing'], 'Jump to where it is explained'],
+          [['Hover a graph'], 'View it in 3D (3D button)'],
           [['Click board'], 'Play / pause'],
           [['Click a word'], 'Jump to that word'],
         ];
@@ -96,6 +98,9 @@ export function Player({
   const [showKeys, setShowKeys] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);
+  const [popout, setPopout] = useState<Piece | null>(null);
+  const popoutOpen = useRef(false);
+  popoutOpen.current = !!popout;
   const [videoAspect, setVideoAspect] = useState(
     replay.video.width && replay.video.height ? replay.video.width / replay.video.height : 16 / 9,
   );
@@ -223,6 +228,12 @@ export function Player({
   const seekWord = useCallback((t: number) => seek(t), [seek]);
   const seekChapter = useCallback((t: number) => seek(t, true), [seek]);
   const seekAndPlay = useCallback((t: number) => seek(t, true), [seek]);
+  // The 3D view is explored with the lecture paused; it does not resume by itself.
+  const openPopout = useCallback((p: Piece) => {
+    videoRef.current?.pause();
+    setPopout(p);
+  }, []);
+  const closePopout = useCallback(() => setPopout(null), []);
 
   // Keyboard: space, arrows, t (board), p (slides). Ignored while typing in a field.
   const modeRef = useRef(mode);
@@ -234,6 +245,7 @@ export function Player({
       return !!h && (h.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(h.tagName));
     };
     const down = (e: KeyboardEvent) => {
+      if (popoutOpen.current) return; // the 3D view has the keyboard (Esc closes it)
       if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
       const v = videoRef.current;
       if (!v) return;
@@ -305,6 +317,24 @@ export function Player({
         <div className="topbar-actions">
           <a className="ghost-btn" href="#/">
             All lectures
+          </a>
+          <a
+            className="ghost-btn notes-btn"
+            href={notesUrl(jobId)}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Study notes for this lecture (Markdown, opens in a new tab)"
+          >
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
+              <path
+                d="M4 1.8h5.2L12.5 5v9.2H4zM9 1.8V5.2h3.4M6 8h4.5M6 10.6h4.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Notes
           </a>
           <button className={`ghost-btn keys-btn ${showKeys ? 'on' : ''}`} onClick={() => setShowKeys((x) => !x)}>
             <kbd>?</kbd> Shortcuts
@@ -396,6 +426,7 @@ export function Player({
                 playing={playing}
                 onSeekPiece={seekPiece}
                 onTogglePlay={togglePlay}
+                onPopout={openPopout}
               />
             ) : slides ? (
               <Slides
@@ -474,6 +505,17 @@ export function Player({
           />
         </div>
       </main>
+
+      {popout && board && (
+        <Suspense fallback={<PopoutFallback />}>
+          <LazyPopout
+            jobId={jobId}
+            piece={popout}
+            boardColor={board.background ?? '#f4f4f2'}
+            onClose={closePopout}
+          />
+        </Suspense>
+      )}
 
       {toast && (
         <div className="toast" role="status">

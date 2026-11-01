@@ -1,4 +1,4 @@
-import type { JobStatus, JobSummary, Replay } from './types';
+import type { JobStatus, JobSummary, PopoutScene, Replay } from './types';
 
 /** URL of a file inside a job folder (video, piece images). Each path segment is encoded. */
 export function jobFileUrl(jobId: string, path: string): string {
@@ -40,6 +40,26 @@ export async function getReplay(id: string, signal?: AbortSignal): Promise<Repla
     throw new Error('The replay is being written. Trying again…');
   }
   return r;
+}
+
+/** Study notes for a job (Markdown), opened in a new tab. */
+export const notesUrl = (id: string) => `/api/jobs/${encodeURIComponent(id)}/notes.md`;
+
+/** The 3D scene Muse Spark makes for one board piece. The first call for a piece takes a few seconds (and a
+ *  model call); the server caches the answer, so later ones are instant. */
+export async function getPopout(jobId: string, pieceId: number, signal?: AbortSignal): Promise<PopoutScene> {
+  let r: Response;
+  try {
+    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/popout/${pieceId}`, { method: 'POST', signal });
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    throw new Error('Cannot reach the Replay Board server. Is `python -m app.server` running?');
+  }
+  if (!r.ok) throw new Error(await errorLine(r));
+  const scene = (await r.json()) as PopoutScene;
+  if (!scene || typeof scene !== 'object' || typeof scene.kind !== 'string')
+    throw new Error('The 3D view came back empty.');
+  return scene;
 }
 
 export interface UploadOptions {

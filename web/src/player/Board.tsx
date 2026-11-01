@@ -8,6 +8,8 @@ import { texHtml } from './tex';
 import { cleanLatex } from './texClean';
 import { texLayouts, writtenText } from './texLayout';
 import { formatTime, seekTarget, typesetIds } from './timing';
+import { canPopout } from './popoutable';
+import { preloadPopout } from './popoutLoader';
 import { kindLabel, sameReading, tipTex } from './tip';
 
 export interface BoardHandle {
@@ -23,6 +25,8 @@ interface Props {
   playing: boolean;
   onSeekPiece(p: Piece): void;
   onTogglePlay(): void;
+  /** Open the 3D pop-out for a drawn graph or a y = f(x) equation (board lectures only). */
+  onPopout?(p: Piece): void;
 }
 
 /** Largest font size (board px, at most maxFont) at which the content fits the piece's box. */
@@ -171,7 +175,7 @@ const TypesetPiece = memo(function TypesetPiece(props: {
 // Memoised: the player re-renders on every spoken word, the board only needs to when its props change.
 export const Board = memo(
   forwardRef<BoardHandle, Props>(function Board(props, ref) {
-    const { jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay } = props;
+    const { jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay, onPopout } = props;
     const [W, H] = board.size;
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const stageRef = useRef<HTMLDivElement>(null);
@@ -288,12 +292,36 @@ export const Board = memo(
       };
     }, []);
 
+    const leaveTimer = useRef<number | undefined>(undefined);
+    const cancelLeave = useCallback(() => {
+      window.clearTimeout(leaveTimer.current);
+      leaveTimer.current = undefined;
+    }, []);
+    useEffect(() => cancelLeave, [cancelLeave]);
+
     const changeHover = useCallback((p: Piece | null) => {
       if (hoverRef.current?.id === p?.id) return;
       hoverRef.current = p;
       rendererRef.current?.setHover(p?.id ?? null);
       setHover(p);
     }, []);
+
+    // A tooltip with a 3D button stays a moment after the pointer leaves its piece, so the pointer can reach it.
+    const onPopoutRef = useRef(onPopout);
+    onPopoutRef.current = onPopout;
+    const hoverTo = (p: Piece | null) => {
+      const h = hoverRef.current;
+      if (!p && h && onPopoutRef.current && canPopout(h)) {
+        if (leaveTimer.current === undefined)
+          leaveTimer.current = window.setTimeout(() => {
+            leaveTimer.current = undefined;
+            changeHover(null);
+          }, 450);
+        return;
+      }
+      cancelLeave();
+      changeHover(p);
+    };
 
     useImperativeHandle(
       ref,
@@ -355,6 +383,11 @@ export const Board = memo(
     }, [hover, cssW, W, H, typeset]);
 
     const onClick = (e: React.MouseEvent) => {
+      if (tipRef.current?.contains(e.target as Node)) {
+        // a click on the tooltip itself (not its buttons) does what clicking the piece does
+        if (hoverRef.current) onSeekPiece(hoverRef.current);
+        return;
+      }
       const p = pick(e.clientX, e.clientY);
       if (p) {
         onSeekPiece(p);
@@ -370,6 +403,18 @@ export const Board = memo(
     const rawText = hover?.read?.text?.trim() ?? '';
     const tipText = tipHtml && sameReading(rawText, tipLatex) ? '' : rawText || (tipHtml ? '' : tipLatex);
     const noSpoken = hover ? !(hover.spoken && hover.spoken.length) : false;
+    const can3d = !!onPopout && canPopout(hover);
+    useEffect(() => {
+      if (can3d) preloadPopout();
+    }, [can3d]);
+    const open3d = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      const h = hoverRef.current;
+      if (!h || !onPopout) return;
+      cancelLeave();
+      changeHover(null);
+      onPopout(h);
+    };
 
     return (
       <div
@@ -379,9 +424,13 @@ export const Board = memo(
         onPointerMove={(e) => {
           const r = stageRef.current?.getBoundingClientRect();
           if (r) pointerRef.current = { x: e.clientX - r.left, y: e.clientY - r.top };
-          changeHover(pick(e.clientX, e.clientY));
+          if (tipRef.current?.contains(e.target as Node)) {
+            cancelLeave(); // on the tooltip: keep it
+            return;
+          }
+          hoverTo(pick(e.clientX, e.clientY));
         }}
-        onPointerLeave={() => changeHover(null)}
+        onPointerLeave={() => hoverTo(null)}
         onClick={onClick}
       >
         <canvas ref={canvasRef} className="board-canvas" />
@@ -445,12 +494,17 @@ export const Board = memo(
         {hover && (
           <div
             ref={tipRef}
-            className={`board-tip ${tipPos?.below ? 'below' : ''}`}
+            className={`board-tip ${tipPos?.below ? 'below' : ''} ${can3d ? 'interactive' : ''}`}
             style={{ left: tipPos?.left ?? 0, top: tipPos?.top ?? 0, visibility: tipPos ? 'visible' : 'hidden' }}
           >
             <div className="tip-head">
               <span className="tip-kind">{kindLabel(hover.read?.kind)}</span>
               {hover.revealed && !hover.pre_existing && <span className="tip-flag">was hidden</span>}
+              {can3d && (
+                <button className="tip-3d" onClick={open3d} title="View in 3D (made by Muse Spark)">
+                  3D
+                </button>
+              )}
             </div>
             {tipHtml && <div className="tip-tex" dangerouslySetInnerHTML={{ __html: tipHtml }} />}
             {tipText && <div className={tipHtml ? 'tip-text muted' : 'tip-text'}>{tipText}</div>}
@@ -462,6 +516,21 @@ export const Board = memo(
                 ? `Already on the board · click to play from ${formatTime(tipTime)}`
                 : `Click to hear it explained · ${formatTime(tipTime)}`}
             </div>
+            {can3d && (
+              <button className="tip-view3d" onClick={open3d}>
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+                  <path
+                    d="M8 1.6l5.6 3.2v6.4L8 14.4l-5.6-3.2V4.8zM2.4 4.8L8 8l5.6-3.2M8 8v6.4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                View in 3D
+                <small>Muse Spark</small>
+              </button>
+            )}
           </div>
         )}
 

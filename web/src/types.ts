@@ -161,3 +161,33 @@ export interface JobSummary {
   ready: boolean;
   name: string;
 }
+
+// 3D pop-out scene made by Muse Spark for one board piece (app/popout.py, SCENE_SCHEMA and clean_scene).
+// Expressions are in x, y, t and are evaluated by player/expr.ts. Every field is checked again before use.
+export interface PopoutAxis {
+  min: number;
+  max: number;
+  label?: string;
+}
+
+export interface PopoutScene {
+  kind: 'plot2d' | 'surface' | 'curve3d' | 'solids' | 'none' | string;
+  title?: string;
+  explain?: string;
+  x?: PopoutAxis;
+  y?: PopoutAxis;
+  z?: PopoutAxis;
+  /** plot2d: y = f(x); surface: z = f(x, y). */
+  functions?: { expr: string; color?: string; label?: string }[];
+  /** curve3d: x(t), y(t), z(t). */
+  curves?: { x: string; y: string; z: string; t_min?: number; t_max?: number; color?: string; label?: string }[];
+  solids?: {
+    shape: string; // box | sphere | cylinder | cone | torus | plane | arrow
+    center: number[];
+    size: number[];
+    rotation?: number[]; // degrees about x, y, z
+    color?: string;
+    label?: string;
+  }[];
+  points?: { at: number[]; label?: string }[];
+}

@@ -98,8 +98,10 @@ Open http://127.0.0.1:8000, drop a lecture video, and watch the stages; the play
 
 Or from the command line (writes `data\jobs\<name>-<hash>\replay.json`):
 ```powershell
-.venv\Scripts\python -m app.process my-lecture.mp4 [--start 60] [--end 600]
+.venv\Scripts\python -m app.process my-lecture.mp4 [--start 60] [--end 600] [--deck slides.pdf]
 ```
+For a slide lecture you can add the PDF deck: Muse Spark then reads the crisp pages, and a page replaces the
+video's slide wherever they match exactly (build steps and pen ink keep the video's image).
 
 Tests:
 ```powershell
