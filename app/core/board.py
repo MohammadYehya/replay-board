@@ -274,10 +274,14 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     mode = mode or detected_mode
 
     k_close = _ellipse(p.close_size * s)
+    k_close_800 = _ellipse(p.close_size)
+    # Coarse ("in front") masks: at 800 px scale when analysing wider than 800.
+    W8, H8 = (800, max(8, int(round(H / s)))) if s > 1.05 else (W, H)
+    sc = 1.0 if s > 1.05 else s
+    k_dark_c, k_thick_c, k_person_c = _ellipse(p.dark_dilate * sc), _ellipse(p.thick_dilate * sc), _ellipse(p.person_dilate * sc)
+    k_max = np.ones((max(1, int(np.ceil(s))),) * 2, np.uint8)  # keep thin thick-marks when shrinking
+    geom8 = BoardGeometry(info, corners, W8, p.decode_width) if s > 1.05 else geom
     k_drift = _ellipse(2 * p.drift_r * s + 1)
-    k_dark = _ellipse(p.dark_dilate * s)
-    k_thick = _ellipse(p.thick_dilate * s)
-    k_person = _ellipse(p.person_dilate * s)
     k_group = _ellipse(p.group_dilate * s)
     k_touch = _ellipse(2 * p.touch_r * s + 1)
     margin = max(1, int(round(p.border_frac * W)))
@@ -350,28 +354,42 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             grey = cv2.min(cv2.min(b, g), r)
         else:
             grey = cv2.bitwise_not(cv2.max(cv2.max(b, g), r))
-        closed = cv2.morphologyEx(grey, cv2.MORPH_CLOSE, k_close)
+        coarse = s > 1.05
+        if coarse:
+            # The closing only estimates the clean board behind thin strokes, and the "in front"
+            # masks are coarse: at wider analysis sizes compute them at the 800 px scale (a
+            # fraction of the cost at 1200) and scale them back. Ink itself stays full size.
+            small = cv2.resize(grey, (W8, H8), interpolation=cv2.INTER_AREA)
+            closed_s = cv2.morphologyEx(small, cv2.MORPH_CLOSE, k_close_800)
+            closed = cv2.max(cv2.resize(closed_s, (W, H), interpolation=cv2.INTER_LINEAR), grey)  # never darker
+        else:
+            closed_s = closed = cv2.morphologyEx(grey, cv2.MORPH_CLOSE, k_close)
         contrast = closed.astype(np.int16) - grey.astype(np.int16)
         contrast[:margin] = 0; contrast[-margin:] = 0; contrast[:, :margin] = 0; contrast[:, -margin:] = 0
         ink = contrast > p.ink_thr
         faint = contrast > p.keep_thr
 
         # What's in front of the board: the person mask, then large dark things, then too-thick ink.
-        closed_f = closed.astype(np.float32)
+        closed_f = closed_s.astype(np.float32)
         if bg_ref is None:
             bg_ref = closed_f.copy()
         else:
             np.maximum(closed_f, bg_ref - p.bg_decay, out=bg_ref)
-        front = cv2.dilate(((bg_ref - closed_f) > p.dark_thr).astype(np.uint8), k_dark) > 0
+        front = cv2.dilate(((bg_ref - closed_f) > p.dark_thr).astype(np.uint8), k_dark_c)
         dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 3)
-        thick = dist > (p.max_stroke * s) / 2
+        thick = (dist > (p.max_stroke * s) / 2).astype(np.uint8)
         if thick.any():
-            front |= cv2.dilate(thick.astype(np.uint8), k_thick) > 0
+            if coarse:
+                thick = cv2.resize(cv2.dilate(thick, k_max), (W8, H8), interpolation=cv2.INTER_NEAREST)
+            front = cv2.max(front, cv2.dilate(thick, k_thick_c))
         if person_mask is not None:
             pm = person_mask(t)
             if pm is not None:
-                front |= cv2.dilate(geom.warp_mask(pm).astype(np.uint8), k_person) > 0
-        visible = ~front
+                pw = (geom8 if coarse else geom).warp_mask(pm).astype(np.uint8)
+                front = cv2.max(front, cv2.dilate(pw, k_person_c))
+        if coarse:
+            front = cv2.resize(front, (W, H), interpolation=cv2.INTER_NEAREST)
+        visible = front == 0
 
         # Drift tolerance: accepted pixels stay ink while faint ink lies within ~2 px.
         near = cv2.dilate(faint.astype(np.uint8), k_drift) > 0
