@@ -10,7 +10,9 @@ def test_board_notes_group_by_chapter_and_skip_unread():
         "board": {"pieces": [
             {"t_seen": 12.0, "read": {"kind": "equation", "text": "log 8 = 3", "latex": "\log_2 8 = 3"},
              "spoken": [{"start": 10.0, "end": 11.0}]},
-            {"t_seen": 70.0, "read": {"kind": "graph", "text": "graph of y = ln x", "latex": ""}, "spoken": []},
+            {"t_seen": 70.0, "read": {"kind": "graph", "text": "graph of y = ln x", "latex": ""},
+             "spoken": [{"start": 71.0, "end": 73.0}]},
+            {"t_seen": 75.0, "read": {"kind": "arrow", "text": "arrow pointing left", "latex": ""}, "spoken": []},
             {"t_seen": 80.0, "read": {"kind": "other", "text": "unreadable", "latex": ""}, "spoken": []},
             {"t_seen": 0.0, "pre_existing": True, "read": {"kind": "text", "text": "old", "latex": ""}, "spoken": []},
         ]},
@@ -21,6 +23,7 @@ def test_board_notes_group_by_chapter_and_skip_unread():
     assert "**0:10** $\log_2 8 = 3$" in intro and "so log" in intro
     assert "*graph of y = ln x*" in rules
     assert "unreadable" not in md and "old" not in md
+    assert "arrow pointing left" not in md  # a drawing nobody talked about
 
 
 def test_slide_notes_drop_repeats_from_build_steps():

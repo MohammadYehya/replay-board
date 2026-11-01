@@ -145,7 +145,7 @@ class SpeechJob:
             st.skip("align", "no sound track")
             return None, []
         turns = speech.transcribe(pcm, self.client, progress=lambda f: st.progress("speech", f))
-        st.done("speech", f"{len(turns)} turns")
+        st.done("speech", f"{len(turns)} spoken passages")
         self.aligned = self.pool.submit(self._align, pcm, [dict(t) for t in turns])
         for t in turns:
             t["start"] = round(t["start"] + s0, 3)
@@ -160,7 +160,7 @@ class SpeechJob:
         for w in words:
             w["s"] = round(w["s"] + self.s0, 3)
             w["e"] = round(w["e"] + self.s0, 3)
-        st.done("align", f"{len(words)} words, timing: {how}")
+        st.done("align", f"{len(words)} words timed" + ("" if how == "mms" else " (approximately)"))
         return words, how
 
     def first(self):
@@ -219,6 +219,11 @@ def _link_or_copy(src: Path, dst: Path):
         shutil.copy2(src, dst)
 
 
+def _clock(seconds: float) -> str:
+    t = int(round(seconds))
+    return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
 def hexcolor(bgr) -> str:
     b, g, r = (int(v) for v in bgr)
     return f"#{r:02x}{g:02x}{b:02x}"
@@ -260,7 +265,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
         raise JobError("the clip is shorter than 1 second")
     lecture = job_dir / ("lecture" + (info.path.suffix.lower() or ".mp4"))
     _link_or_copy(info.path, lecture)
-    status.done("probe", f"{info.width}x{info.height}, {s1 - s0:.0f}s")
+    status.done("probe", f"{info.width}×{info.height}, {_clock(s1 - s0)} long" + ("" if info.has_audio else ", no sound"))
     log(f"video: {info.path.name}, {info.width}x{info.height}, {s1 - s0:.1f}s, audio={'yes' if info.has_audio else 'no'}")
 
     client = MetaClient(use_cache=use_cache)
@@ -273,7 +278,9 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     times = [s0 + (s1 - s0) * f for f in (0.15, 0.4, 0.65, 0.9)]
     frames = [media.grab_frame(info, t, 768) for t in times]
     kind = understand.classify(client, frames)
-    status.done("classify", f"{kind.get('type')}, {kind.get('board_colour')}")
+    status.done("classify", {"board": "a filmed " + ("chalkboard" if kind.get("board_colour") == "chalk" else "whiteboard"),
+                             "slides": "a slide recording" + (" with a webcam" if kind.get("has_webcam_corner") else "")}
+                .get(kind.get("type"), "not sure: treated as a board"))
     log(f"classify: {kind}")
     if kind.get("type") == "slides":
         return _run_slides(info, s0, s1, job_dir, status, client, kind, speech_job, lecture, pool, t_all, log)
@@ -284,7 +291,8 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
         from .core.sam import find_board
         board_info = find_board(client, info, s0, s1, colour=kind.get("board_colour"))
         corners = board_info["corners"] if board_info else None
-    status.done("board", f"SAM '{board_info['prompt']}' {board_info['score']}" if board_info else "whole frame")
+    status.done("board", f"found the {board_info['prompt']} (confidence {board_info['score']:.2f})" if board_info
+                else "no board found: using the whole picture")
     log(f"board: {board_info or 'not found, using the whole frame'}")
 
     person = None
@@ -301,7 +309,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
             if failed:
                 status.done("people", f"{failed} SAM chunk(s) failed: built-in detector there")
             else:
-                status.done("people", f"person in {len(person.frames)}/{person.n} samples")
+                status.done("people", f"teacher tracked in {len(person.frames)} of {person.n} moments")
 
         people_done.add_done_callback(people_finished)
     else:
@@ -316,7 +324,9 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     finally:
         speech_job.cpu_free.set()
     pieces = board.pieces
-    status.done("capture", f"{len(pieces)} pieces, {len(board.erases)} erases, {board.stats['speed']:.1f}x real time")
+    hidden = sum(1 for p in pieces if p["revealed"])
+    status.done("capture", f"{len(pieces)} pieces of writing" + (f", {hidden} written while hidden" if hidden else "")
+                + (f", {len(board.erases)} erased" if board.erases else ""))
     log(f"capture: {len(pieces)} pieces, {len(board.erases)} erases in {board.stats['seconds']:.1f}s "
         f"({board.stats['speed']:.1f}x real time), mode {board.mode}")
 
@@ -363,7 +373,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
                                             crops=line_crops)
         for i, ln in enumerate(lines):
             ln["read"] = line_reads.get(100000 + i, {"kind": "other", "text": "", "latex": ""})
-    status.done("read", f"{len(reads)} pieces, {len(lines)} lines")
+    status.done("read", f"{len(reads)} pieces read" + (f", {len(lines)} lines" if lines else ""))
 
     elements = []
     for p in pieces:
@@ -376,7 +386,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     def link_and_write(turns, words, how):
         status.start("link")
         links = understand.link(client, elements, words, s1, kind="board") if words else {"elements": {}, "chapters": []}
-        status.done("link", f"{len(links['elements'])} linked, {len(links['chapters'])} chapters")
+        status.done("link", f"{len(links['elements'])} matched to the speech, {len(links['chapters'])} chapters")
         status.start("write")
         out_pieces = []
         for p in pieces:
@@ -434,7 +444,7 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
         res = analyse_slides(info, job_dir / "tmp", s0, s1, progress=lambda f: status.progress("capture", f))
     finally:
         speech_job.cpu_free.set()
-    status.done("capture", f"{len(res.states)} states, {len(res.gestures)} gesture guesses, "
+    status.done("capture", f"{sum(1 for st in res.states if st.kind == 'slide')} slides, {len(res.states)} steps, {len(res.gestures)} pointer moves, "
                            f"{len(res.live)} live region(s), {res.stats['speed']:.1f}x real time")
     log(f"slides: {len(res.states)} states, {len(res.gestures)} gestures, live {res.live}, {res.stats['speed']:.1f}x")
 
@@ -544,7 +554,7 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
                                 "target": target, "box": [round(float(v), 1) for v in box], "from": fr, "to": to,
                                 "why": m.get("why", ""), "guess": g["type"], "state": st.id,
                                 "path": g.get("path", [])[:200]})
-    status.done("read", f"{sum(len(v) for v in elements.values())} elements, {len(annotations)} annotations")
+    status.done("read", f"{sum(len(v) for v in elements.values())} things on the slides, {len(annotations)} gestures redrawn")
 
     link_els = [{"id": e["id"], "kind": e["kind"], "text": e["text"], "t_start": round(st.t_start, 2),
                  "t_end": round(st.t_end, 2), "slide": st.id} for st in readable for e in elements.get(st.id, [])]
@@ -552,7 +562,7 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
     def link_and_write(turns, words, how):
         status.start("link")
         links = understand.link(client, link_els, words, s1, kind="slides") if words else {"elements": {}, "chapters": []}
-        status.done("link", f"{len(links['elements'])} linked, {len(links['chapters'])} chapters")
+        status.done("link", f"{len(links['elements'])} matched to the speech, {len(links['chapters'])} chapters")
         status.start("write")
         out_states = []
         for st in res.states:
