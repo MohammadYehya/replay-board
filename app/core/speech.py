@@ -203,11 +203,17 @@ def get_aligner() -> Aligner | None:
 
 
 def align_words(pcm: np.ndarray, turns: list[dict], rate: int = RATE,
-                progress: Callable[[float], None] | None = None) -> tuple[list[dict], str]:
-    """Word times for every turn. Returns (words, method) with method "mms" or "proportional"."""
+                progress: Callable[[float], None] | None = None,
+                cpu_free: threading.Event | None = None) -> tuple[list[dict], str]:
+    """Word times for every turn. Returns (words, method) with method "mms" or "proportional".
+
+    `cpu_free`, when given, is waited on before each turn, so CPU-heavy stages can pause alignment.
+    """
     aligner = get_aligner()
     words: list[dict] = []
     for k, turn in enumerate(turns):
+        if cpu_free is not None:
+            cpu_free.wait()
         if aligner is None:
             words += _proportional(turn, turn["text"].split())
         else:

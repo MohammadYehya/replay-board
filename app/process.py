@@ -22,9 +22,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--job", default=None, help="job folder (default data/jobs/<name>-<hash>)")
     ap.add_argument("--no-sam", action="store_true", help="skip SAM (whole frame, built-in person detector)")
     ap.add_argument("--width", type=int, default=800, help="board analysis width (default 800)")
+    ap.add_argument("--no-cache", action="store_true", help="ask the models again instead of using saved answers")
     a = ap.parse_args(argv)
     try:
-        path = run(a.video, Path(a.job) if a.job else None, a.start, a.end, use_sam=not a.no_sam, width=a.width)
+        path = run(a.video, Path(a.job) if a.job else None, a.start, a.end, use_sam=not a.no_sam, width=a.width,
+                   use_cache=not a.no_cache)
         print(f"wrote {path}")
         return 0
     except (MediaError, MetaAPIError, JobError) as e:

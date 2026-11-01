@@ -128,6 +128,10 @@ class SpeechJob:
 
     def __init__(self, info, s0: float, s1: float, client: MetaClient, status: "Status"):
         self.info, self.s0, self.s1, self.client, self.status = info, s0, s1, client, status
+        # Cleared while a CPU-heavy stage (board capture, slide analysis) runs: alignment waits,
+        # so the stages on the way to the first replay get the whole CPU.
+        self.cpu_free = threading.Event()
+        self.cpu_free.set()
         self.pool = ThreadPoolExecutor(max_workers=2)
         self.aligned = None
         self.transcribed = self.pool.submit(self._transcribe)
@@ -151,7 +155,8 @@ class SpeechJob:
     def _align(self, pcm, turns):
         st = self.status
         st.start("align", "MMS word times")
-        words, how = speech.align_words(pcm, turns, progress=lambda f: st.progress("align", f))
+        words, how = speech.align_words(pcm, turns, progress=lambda f: st.progress("align", f),
+                                        cpu_free=self.cpu_free)
         for w in words:
             w["s"] = round(w["s"] + self.s0, 3)
             w["e"] = round(w["e"] + self.s0, 3)
@@ -215,7 +220,7 @@ def hexcolor(bgr) -> str:
 
 def run(video: str | Path, job_dir: Path | None = None, start: float | None = None, end: float | None = None,
         use_sam: bool = True, width: int = 800, log: Callable[[str], None] = print,
-        on_status: Callable[[dict], None] | None = None) -> Path:
+        on_status: Callable[[dict], None] | None = None, use_cache: bool = True) -> Path:
     """Process one lecture. Returns the path of replay.json."""
     video = Path(video)
     info = media.probe(video)
@@ -224,7 +229,7 @@ def run(video: str | Path, job_dir: Path | None = None, start: float | None = No
     job_dir.mkdir(parents=True, exist_ok=True)
     status = Status(job_dir, on_status)
     try:
-        out = _run(info, s0, s1, job_dir, status, use_sam, width, log)
+        out = _run(info, s0, s1, job_dir, status, use_sam, width, log, use_cache)
         status.finish()
         return out
     except Exception as e:  # report one line; keep the traceback in the job folder
@@ -235,7 +240,7 @@ def run(video: str | Path, job_dir: Path | None = None, start: float | None = No
 
 
 def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Status, use_sam: bool,
-         width: int, log) -> Path:
+         width: int, log, use_cache: bool = True) -> Path:
     t_all = time.perf_counter()
     status.start("probe")
     if s1 - s0 < 1.0:
@@ -245,7 +250,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     status.done("probe", f"{info.width}x{info.height}, {s1 - s0:.0f}s")
     log(f"video: {info.path.name}, {info.width}x{info.height}, {s1 - s0:.1f}s, audio={'yes' if info.has_audio else 'no'}")
 
-    client = MetaClient()
+    client = MetaClient(use_cache=use_cache)
     pool = ThreadPoolExecutor(max_workers=3)
 
     # Speech runs alongside everything else.
@@ -273,20 +278,30 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     if use_sam:
         from .core.sam import track_people
         status.start("people")
-        try:
-            person = track_people(client, info, s0, s1, workdir=job_dir / "tmp",
-                                  progress=lambda f: status.progress("people", f))
-            status.done("people", f"person in {len(person.frames)}/{person.n} samples")
-        except MetaAPIError as e:
-            log(f"people: SAM video failed ({e}); using the built-in detector")
-            status.skip("people", "SAM failed: built-in detector only")
+        # SAM chunks come back in the background, in time order; capture starts at once and
+        # waits only when it needs a chunk that isn't back yet.
+        person, people_done = track_people(client, info, s0, s1, workdir=job_dir / "tmp", background=True,
+                                           progress=lambda f: status.progress("people", f))
+
+        def people_finished(fut):
+            failed = fut.result()
+            if failed:
+                status.done("people", f"{failed} SAM chunk(s) failed: built-in detector there")
+            else:
+                status.done("people", f"person in {len(person.frames)}/{person.n} samples")
+
+        people_done.add_done_callback(people_finished)
     else:
         status.skip("people", "SAM off")
 
     status.start("capture")
     mode = "chalk" if kind.get("board_colour") == "chalk" else ("white" if kind.get("board_colour") == "white" else None)
-    board = capture_board(info, corners=corners, person_mask=person, params=BoardParams(width=width),
-                          start=s0, end=s1, progress=lambda f: status.progress("capture", f), mode=mode)
+    speech_job.cpu_free.clear()
+    try:
+        board = capture_board(info, corners=corners, person_mask=person, params=BoardParams(width=width),
+                              start=s0, end=s1, progress=lambda f: status.progress("capture", f), mode=mode)
+    finally:
+        speech_job.cpu_free.set()
     pieces = board.pieces
     status.done("capture", f"{len(pieces)} pieces, {len(board.erases)} erases, {board.stats['speed']:.1f}x real time")
     log(f"capture: {len(pieces)} pieces, {len(board.erases)} erases in {board.stats['seconds']:.1f}s "
@@ -384,7 +399,11 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
     status.skip("board", "slides")
     status.skip("people", "slides")
     status.start("capture", "slide analysis")
-    res = analyse_slides(info, job_dir / "tmp", s0, s1, progress=lambda f: status.progress("capture", f))
+    speech_job.cpu_free.clear()
+    try:
+        res = analyse_slides(info, job_dir / "tmp", s0, s1, progress=lambda f: status.progress("capture", f))
+    finally:
+        speech_job.cpu_free.set()
     status.done("capture", f"{len(res.states)} states, {len(res.gestures)} gesture guesses, "
                            f"{len(res.live)} live region(s), {res.stats['speed']:.1f}x real time")
     log(f"slides: {len(res.states)} states, {len(res.gestures)} gestures, live {res.live}, {res.stats['speed']:.1f}x")

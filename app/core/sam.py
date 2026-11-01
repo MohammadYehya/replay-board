@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -84,13 +86,29 @@ def find_board(client: MetaClient, info: VideoInfo, start: float = 0.0, end: flo
 
 
 class PersonTrack:
-    """Person masks sampled at `fps`, stored small and bit-packed. Call with a time to get a mask."""
+    """Person masks sampled at `fps`, stored small and bit-packed. Call with a time to get a mask.
+
+    The masks may still be arriving (SAM chunks run in the background): asking for a time whose
+    chunk isn't back yet waits for it, so board capture can start before SAM has finished.
+    """
 
     def __init__(self, start: float, fps: float, size: tuple[int, int]):
         self.start, self.fps = start, fps
         self.h, self.w = size
         self.frames: dict[int, np.ndarray] = {}  # sample index -> packed bits
         self.n = 0
+        self.chunks: list[tuple[int, int, threading.Event]] = []  # (first sample, end sample, ready)
+        self.failed = 0
+        self.waited = 0.0
+
+    def _wait_for(self, i: int) -> None:
+        for a, b, ready in self.chunks:
+            if a <= i < b:
+                if not ready.is_set():
+                    t0 = time.perf_counter()
+                    ready.wait(timeout=900)
+                    self.waited += time.perf_counter() - t0
+                return
 
     def put(self, index: int, mask: np.ndarray) -> None:
         if mask.shape != (self.h, self.w):
@@ -111,6 +129,7 @@ class PersonTrack:
         i0 = int(np.floor(x + 1e-6))
         out = None
         for i in {i0, i0 + 1} if x - i0 > 1e-3 else {i0}:
+            self._wait_for(i)
             m = self._get(i)
             if m is not None:
                 out = m if out is None else (out | m)
@@ -134,10 +153,15 @@ def _encode_chunk(info: VideoInfo, start: float, dur: float, fps: float, width: 
 
 
 def track_people(client: MetaClient, info: VideoInfo, start: float = 0.0, end: float | None = None,
-                 fps: float = 2.0, width: int = 640, store_width: int = 384, chunk_s: float = 240.0,
+                 fps: float = 2.0, width: int = 640, store_width: int = 384, chunk_s: float = 120.0,
                  prompt: str = "person", min_score: float = 0.3, workdir: Path | None = None,
-                 progress=None) -> PersonTrack:
-    """SAM 3.1 video mode on a low-fps copy, in parallel chunks. Billed per frame sent."""
+                 progress=None, background: bool = False):
+    """SAM 3.1 video mode on a low-fps copy, in parallel chunks (in time order). Billed per frame sent.
+
+    With background=True, returns (track, future) at once: the track's masks fill in as chunks come
+    back, and asking it for a time waits for that chunk. The future's result is the number of
+    chunks that failed.
+    """
     s, e = clip_range(info, start, end)
     w, h = scaled_size(info, width)
     sw, sh = scaled_size(info, store_width)
@@ -152,9 +176,26 @@ def track_people(client: MetaClient, info: VideoInfo, start: float = 0.0, end: f
     tmp = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="rb_sam_"))
     tmp.mkdir(parents=True, exist_ok=True)
     done = [0]
+    for cs, cd in chunks:
+        a = int(round((cs - s) * fps))
+        track.chunks.append((a, a + int(np.ceil(cd * fps)) + 1, threading.Event()))
 
     def one(i_cd):
         i, (cs, cd) = i_cd
+        try:
+            return _one(i, cs, cd)
+        except Exception:
+            track.failed += 1
+            if not background:
+                raise
+            return 0
+        finally:
+            track.chunks[i][2].set()
+            done[0] += 1
+            if progress:
+                progress(done[0] / len(chunks))
+
+    def _one(i, cs, cd):
         path = tmp / f"sam_chunk_{i:03d}.mp4"
         _encode_chunk(info, cs, cd, fps, width, path)
         data = path.read_bytes()
@@ -172,11 +213,23 @@ def track_people(client: MetaClient, info: VideoInfo, start: float = 0.0, end: f
             path.unlink()
         except OSError:
             pass
-        done[0] += 1
-        if progress:
-            progress(done[0] / len(chunks))
         return len(by_frame)
 
-    with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as ex:
-        list(ex.map(one, enumerate(chunks)))
+    ex = ThreadPoolExecutor(max_workers=min(6, len(chunks)))
+    futures = [ex.submit(one, ic) for ic in enumerate(chunks)]  # submitted in time order
+    ex.shutdown(wait=False)
+    if background:
+        from concurrent.futures import Future
+
+        result: Future = Future()
+
+        def finish():
+            for f in futures:
+                f.exception()
+            result.set_result(track.failed)
+
+        threading.Thread(target=finish, daemon=True).start()
+        return track, result
+    for f in futures:
+        f.result()
     return track

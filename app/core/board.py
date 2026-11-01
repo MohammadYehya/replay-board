@@ -231,6 +231,12 @@ class BoardResult:
         return bgra, omap, [int(x0), int(y0), int(x1 - x0), int(y1 - y0)], gmap, [round(lo, 2), round(hi, 2)]
 
 
+def _roi(ys: np.ndarray, xs: np.ndarray, pad: int, H: int, W: int) -> tuple[int, int, int, int]:
+    """Bounding box of some pixels grown by `pad`, clipped: work on this instead of the whole board."""
+    return (max(0, int(ys.min()) - pad), min(H, int(ys.max()) + pad + 1),
+            max(0, int(xs.min()) - pad), min(W, int(xs.max()) + pad + 1))
+
+
 def _middle(gray: np.ndarray) -> np.ndarray:
     h, w = gray.shape
     return gray[h // 4: h - h // 4, w // 4: w - w // 4]
@@ -387,9 +393,11 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             accepted[gone] = False
             piece_img[gone] = 0
             cur_add[gone] = -1
-            # erase components
-            n, lab, stats, _ = cv2.connectedComponentsWithStats(cv2.dilate(gone.astype(np.uint8), k_group), connectivity=8)
-            labs = lab[ys, xs]
+            # erase components (in the region around the removed pixels only)
+            ry0, ry1, rx0, rx1 = _roi(ys, xs, k_group.shape[0], H, W)
+            sub = gone[ry0:ry1, rx0:rx1].astype(np.uint8)
+            n, lab, stats, _ = cv2.connectedComponentsWithStats(cv2.dilate(sub, k_group), connectivity=8)
+            labs = lab[ys - ry0, xs - rx0]
             for c in range(1, n):
                 sel = labs == c
                 cnt = int(sel.sum())
@@ -430,16 +438,20 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             # Drift: ink within ~2 px of accepted ink. Decided per component below: a component
             # that is mostly such ink is drift and joins its owners; otherwise it is new writing
             # (new writing that merely touches old writing must not be swallowed by it).
+            # Work in the region around the new pixels (padded by the largest kernel used below).
+            ry0, ry1, rx0, rx1 = _roi(ys, xs, max(k_group.shape[0], k_touch.shape[0]) + 2, H, W)
+            ly, lx = ys - ry0, xs - rx0
+            pimg = piece_img[ry0:ry1, rx0:rx1]
             owner = np.zeros(nnew, np.int64)
             if not pre_window and accepted.any():
-                owner = cv2.dilate(piece_img, k_drift)[ys, xs].astype(np.int64)
+                owner = cv2.dilate(pimg, k_drift)[ly, lx].astype(np.int64)
             if True:
-                rmask = np.zeros((H, W), np.uint8)
-                rmask[ys, xs] = 1
+                rmask = np.zeros(pimg.shape, np.uint8)
+                rmask[ly, lx] = 1
                 dil = cv2.dilate(rmask, k_group)
                 n, lab, stats, _ = cv2.connectedComponentsWithStats(dil, connectivity=8)
                 ri = np.arange(nnew)
-                labs = lab[ys, xs]
+                labs = lab[ly, lx]
                 order = np.argsort(labs, kind="stable")
                 labs_sorted = labs[order]
                 bounds = np.searchsorted(labs_sorted, np.arange(1, n + 1))
@@ -460,7 +472,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                     wa = float(np.median(last_clean[cy, cx]))
                     target = 0
                     bx, by, bw, bh = stats[c, :4]
-                    under = piece_img[by:by + bh, bx:bx + bw][lab[by:by + bh, bx:bx + bw] == c]
+                    under = pimg[by:by + bh, bx:bx + bw][lab[by:by + bh, bx:bx + bw] == c]
                     under = under[under > 0].astype(np.int64)
                     if pre_window:
                         # Writing already there: group by touching ink only, so a full board
@@ -472,8 +484,8 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                     if not target and not pre_window and members.size < min_px:
                         # Small bits join a piece whose ink they touch, however old.
                         if touch_img is None:
-                            touch_img = cv2.dilate(piece_img, k_touch)
-                        near = touch_img[cy, cx].astype(np.int64)
+                            touch_img = cv2.dilate(pimg, k_touch)
+                        near = touch_img[cy - ry0, cx - rx0].astype(np.int64)
                         if (near > 0).any():
                             target = int(np.bincount(near[near > 0]).argmax())
                             if t - pieces[target].last_update > p.join_recent:
