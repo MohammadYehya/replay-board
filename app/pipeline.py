@@ -26,7 +26,7 @@ from .core.meta_api import MetaAPIError, MetaClient
 from .core import understand
 
 JOBS = DATA_DIR / "jobs"
-STAGES = ["probe", "classify", "board", "people", "capture", "speech", "read", "link", "write", "align"]
+STAGES = ["probe", "classify", "board", "people", "capture", "speech", "read", "gestures", "link", "write", "align"]
 
 
 class JobError(Exception):
@@ -296,6 +296,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     log(f"board: {board_info or 'not found, using the whole frame'}")
 
     person = None
+    hands_job = None
     if use_sam:
         from .core.sam import track_people
         status.start("people")
@@ -312,6 +313,9 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
                 status.done("people", f"teacher tracked in {len(person.frames)} of {person.n} moments")
 
         people_done.add_done_callback(people_finished)
+        # The teacher's hands, for pointing gestures (SAM 3.1 video mode, in the background too).
+        from .core.sam import track_hands
+        hands_job = pool.submit(track_hands, client, info, s0, s1, workdir=job_dir / "tmp")
     else:
         status.skip("people", "SAM off")
 
@@ -375,6 +379,19 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
             ln["read"] = line_reads.get(100000 + i, {"kind": "other", "text": "", "latex": ""})
     status.done("read", f"{len(reads)} pieces read" + (f", {len(lines)} lines" if lines else ""))
 
+    annotations = []
+    if hands_job is not None:
+        status.start("gestures", "pointing at the board")
+        try:
+            annotations = _board_gestures(client, info, board, pieces, reads, person, hands_job.result(),
+                                          speech_job, status, log)
+            status.done("gestures", f"{len(annotations)} pointing gestures redrawn")
+        except MetaAPIError as e:
+            log(f"gestures: skipped ({e})")
+            status.skip("gestures", "hand tracking failed")
+    else:
+        status.skip("gestures", "SAM off")
+
     elements = []
     for p in pieces:
         r = reads.get(p["id"], {})
@@ -413,7 +430,7 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
             "board": {
                 "size": [board.width, board.height], "mode": board.mode, "corners": board.corners,
                 "background": hexcolor(board.background), "pieces": out_pieces, "erases": board.erases,
-                "lines": lines,
+                "lines": lines, "annotations": annotations,
                 "t_start": round(board.t_start, 2),
             },
             "transcript": {"turns": turns, "words": words, "timing": how},
@@ -426,6 +443,68 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
         log(f"wrote replay.json ({how} word times) after {replay['stats']['seconds']}s, API {client.summary()}")
 
     return _finish_with_speech(speech_job, link_and_write, job_dir, pool, log)
+
+
+def _board_gestures(client, info, board, pieces, reads, person, hands, speech_job, status, log) -> list[dict]:
+    """Pointing gestures on a filmed board: code finds them, Muse Spark decides what each one means."""
+    from .core import board_gestures as bg
+    from .core.board import BoardGeometry
+
+    geom = BoardGeometry(info, board.corners, board.width, 1280)
+    episodes = bg.episodes(bg.pointing_samples(hands, person, board, geom, info), hands.fps)
+    if not episodes:
+        return []
+    _, words, _ = speech_job.first()
+    by_id = {p["id"]: p for p in pieces}
+
+    def elements_at(t):
+        out = []
+        for p in pieces:
+            if p["pre_existing"] or p["t_seen"] - 0.5 <= t:
+                if p["removed_at"] is not None and p["removed_at"] <= t:
+                    continue
+                r = reads.get(p["id"], {})
+                out.append({"id": str(p["id"]), "kind": r.get("kind", ""), "text": r.get("text", ""),
+                            "box": p["image_box"]})
+        return out
+
+    def one(g):
+        t = (g["t_start"] + g["t_end"]) / 2
+        frame = media.grab_frame(info, t, 960)
+        k = frame.shape[1] / info.width
+        fpath = [[float(x) * k, float(y) * k] for x, y in geom.board_to_video(g["path"])]
+        said = _words_between(words, g["t_start"] - 1.5, g["t_end"] + 1.5)
+        els = elements_at(g["t_end"])
+        m = understand.board_gesture_meaning(client, frame, board.image_at(g["t_end"]), g, els, said, fpath)
+        return g, els, m
+
+    out = []
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for k, (g, els, m) in enumerate(ex.map(one, episodes)):
+            status.progress("gestures", (k + 1) / len(episodes))
+            kind = m.get("type", "none")
+            ids = {e["id"] for e in els}
+            target = [x for x in m.get("target", []) if x in ids]
+            if kind == "none" or not target:
+                continue
+            boxes = [by_id[int(x)]["image_box"] for x in target]
+            box = boxes[0]
+            fr = to = None
+            if kind == "arrow" and len(boxes) >= 2:
+                a, b = boxes[0], boxes[1]
+                fr = [a[0] + a[2] / 2, a[1] + a[3] / 2]
+                to = [b[0] + b[2] / 2, b[1] + b[3] / 2]
+            elif kind == "arrow":
+                kind = "spotlight"  # an arrow needs two ends
+            if kind != "arrow" and len(boxes) > 1:  # several targets: one box round them all
+                x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+                x1, y1 = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
+                box = [x0, y0, x1 - x0, y1 - y0]
+            out.append({"type": kind, "tool": "hand", "t_start": g["t_start"], "t_end": g["t_end"], "target": target,
+                        "box": [round(float(v), 1) for v in box], "from": fr, "to": to, "why": m.get("why", ""),
+                        "guess": g["type"], "path": g["path"]})
+    log(f"gestures: {len(episodes)} candidates, {len(out)} kept by Muse Spark")
+    return out
 
 
 def _words_between(words: list[dict], a: float, b: float) -> str:

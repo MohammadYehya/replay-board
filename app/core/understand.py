@@ -283,6 +283,37 @@ def gesture_meaning(client: MetaClient, slide: np.ndarray, gesture: dict, elemen
                       schema=GESTURE_SCHEMA, reasoning="low")
 
 
+def board_gesture_meaning(client: MetaClient, frame: np.ndarray, board_img: np.ndarray, gesture: dict,
+                          elements: list[dict], words: str, frame_path: list | None = None) -> dict:
+    """What a hand gesture on a filmed board means, or "none" when the teacher is just talking with their hands.
+
+    `frame`: the video frame (with the hand's path drawn on it); `board_img`: the clean rebuilt board with the
+    same path in board coordinates; `elements`: the writing on the board then (id, kind, text, box).
+    """
+    els = "\n".join(json.dumps({"id": e["id"], "kind": e["kind"], "text": e["text"][:80], "box": e["box"]},
+                               ensure_ascii=False) for e in elements)
+    prompt = (
+        "These two images are the same moment of a filmed board lecture. Image 1 is the camera's frame; image 2 is "
+        "a clean copy of the board. The magenta line in both is the path of the teacher's hand over the board "
+        "(dot = start, arrowhead = end).\n"
+        "First decide: is the teacher deliberately pointing at writing on the board (finger, hand or marker on or "
+        "right next to it, e.g. 'this term here', 'look at this')? Open-handed gestures while talking, waving, "
+        "writing, or reaching for the eraser are NOT pointing: answer type 'none'.\n"
+        "If they are pointing, how should it be replayed on the clean board?\n"
+        "- spotlight: resting on one thing to draw attention to it;\n- circle: circling something;\n"
+        "- underline: sweeping under a line of writing;\n"
+        "- arrow: moving from one thing to another to connect them (targets: from, to);\n"
+        "- pulse: a quick tap or emphasis on a small thing.\n"
+        f"The code's geometric guess is '{gesture['type']}' (a hint, may be wrong). "
+        f"Words spoken meanwhile: \"{words or '(none)'}\".\n"
+        "target: the ids of the writing meant (1, or 2 for an arrow). why: one short sentence.\n\n"
+        "WRITING ON THE BOARD (boxes are [x, y, w, h] in image 2 pixels):\n" + els)
+    img1 = draw_path(frame, frame_path or [])
+    img2 = draw_path(board_img, gesture.get("path") or [])
+    return client.ask(prompt, [image_part(img1, max_side=1280), image_part(img2, fmt=".png")],
+                      schema=GESTURE_SCHEMA, reasoning="low")
+
+
 # ---------------------------------------------------------------- linking
 
 LINK_SCHEMA = {
