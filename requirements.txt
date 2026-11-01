@@ -11,3 +11,4 @@ torch>=2.4,<2.9
 torchaudio>=2.4,<2.9
 pytest>=8
 meta-sam-parser>=0.1.0,<0.2
+numba>=0.60  # fast SAM mask decoding (app/core/sam_codec.py)

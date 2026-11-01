@@ -28,6 +28,7 @@ from ..config import Settings, load_settings
 
 RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529}
 RETRY_BUDGET_S = 60.0
+MIN_NETWORK_TRIES = 3  # timeouts and dropped connections are retried at least this many times
 
 # USD, from dev.meta.ai/docs/pricing-rate-limits (checked 2026-11-01): per million tokens
 # (input, cached input, output), per audio minute, or per image. Unknown models report cost None.
@@ -36,7 +37,7 @@ PRICES: dict[str, dict[str, float]] = {
     "muse-spark-1.3": _SPARK, "muse-spark-1.2": _SPARK, "muse-spark-1.1": _SPARK,
     "muse-wonder-1.0": {"input": 4.00, "cached": 0.20, "output": 20.00},
     "muse-voice-transcribe-1.0": {"per_minute": 0.18 / 60},
-    "sam-3.1": {"per_image": 2.50 / 1000},
+    "sam-3.1": {"per_image": 2.50 / 1000, "per_video_frame": 0.20 / 1000},
 }
 
 
@@ -199,7 +200,11 @@ class MetaClient:
             ra = _retry_after(resp) if resp is not None else None
             if ra is not None:
                 wait = max(wait, ra)
-            if time.monotonic() + wait > deadline:
+            # The budget bounds waiting, not slow attempts: a timed-out call still gets retried.
+            now = time.monotonic()
+            if resp is None and attempt < MIN_NETWORK_TRIES:
+                deadline = max(deadline, now + wait)
+            if now + wait > deadline:
                 self._record(CallRecord(endpoint, model, status, latency, False, attempt, {}, None, key))
                 raise MetaAPIError(f"{endpoint} ({model}) failed after {attempt} tries: {last_err}")
             time.sleep(wait)
@@ -280,6 +285,26 @@ class MetaClient:
                 "metadata": metadata or {"include_confidence": "true", "mask_encoding": "one_bit"}}
         return self._send("/responses", model, {"body": body}, lambda: self.http.post("/responses", json=body),
                           lambda d: PRICES.get(model, {}).get("per_image"))
+
+    def segment_video(self, video: bytes, text: str, *, model: str | None = None, frames: int = 0,
+                      timeout: float = 900.0) -> list[dict]:
+        """SAM 3.1 on a whole MP4 (sent inline, at most 50 MB): records for every frame.
+
+        Billed per frame of the uploaded clip, so send a low-fps copy.
+        """
+        model = model or self.settings.model_sam
+        if len(video) > 48_000_000:
+            raise MetaAPIError("video for SAM is over the 50 MB inline limit; send a smaller copy")
+        url = "data:video/mp4;base64," + base64.b64encode(video).decode("ascii")
+        body = {"model": model, "stream": False,
+                "input": [{"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": text}, {"type": "input_video", "video_url": url}]}],
+                "metadata": {"include_confidence": "true", "mask_encoding": "one_bit"}}
+        per_frame = PRICES.get(model, {}).get("per_video_frame", 0.0)
+        reply = self._send("/responses", model, {"text": text, "video_sha256": _hash_bytes(video)},
+                           lambda: self.http.post("/responses", json=body, timeout=timeout),
+                           lambda d: max(50, frames) * per_frame if per_frame else None)
+        return parse_sam_records(response_text(reply), "video")
 
     def segment(self, image: Any, text: str, *, model: str | None = None, min_score: float = 0.0) -> list[dict]:
         """SAM 3.1 objects for a noun phrase: [{id, box:[x0,y0,x1,y1] (half-open, image px), score, mask}].
@@ -363,34 +388,67 @@ def response_text(reply: dict) -> str:
     return "".join(parts)
 
 
-def parse_sam_output(text: str, size: tuple[int, int], min_score: float = 0.0) -> list[dict]:
-    """Parse SAM 3.1 special-token output with Meta's meta-sam-parser into full-image masks."""
-    from meta_sam_parser import CompletedOutcome, decode_mask_to_raster, image_segmentation_format
+def parse_sam_records(text: str, media: str = "image") -> list[dict]:
+    """SAM 3.1 special-token output -> [{frame, id, score, box:[l,t,r,b] half-open, local: bool HxW}].
 
-    h, w = size
-    parser = image_segmentation_format().create_parser()
+    Each mask covers only its box. Uses the fast decoder in sam_codec when its first mask matches
+    Meta's meta-sam-parser exactly; otherwise parses everything with meta-sam-parser.
+    """
+    from meta_sam_parser import (CompletedOutcome, SegmentationMask, decode_mask_to_raster,
+                                 image_segmentation_format, video_segmentation_format)
+
+    from .sam_codec import fast_records
+
+    try:
+        fast = fast_records(text)
+    except Exception:
+        fast = None
+    if fast is not None:
+        if not fast:
+            return []
+        payload, w, h = fast[0]["_payload"]
+        ref = np.frombuffer(decode_mask_to_raster(SegmentationMask("one_bit", payload, w, h)), np.uint8)
+        if np.array_equal(ref.reshape(h, w).astype(bool), fast[0]["local"]):
+            for r in fast:
+                r.pop("_payload", None)
+            return fast
+
+    fmt = video_segmentation_format() if media == "video" else image_segmentation_format()
+    parser = fmt.create_parser()
     parser.push(text)
     result = parser.finish(CompletedOutcome()).result
-    boxes = {r.object_id: r for r in result.records if r.kind == "box"}
     out = []
     for r in result.records:
         if r.kind != "mask":
             continue
-        score = r.confidence if r.confidence is not None else (boxes.get(r.object_id).confidence
-                                                              if r.object_id in boxes else None)
-        if score is not None and score < min_score:
-            continue
         m = r.mask
         local = np.frombuffer(decode_mask_to_raster(m), np.uint8).reshape(m.height, m.width).astype(bool)
-        full = np.zeros((h, w), bool)
-        x0, y0 = int(np.floor(r.bounds.left)), int(np.floor(r.bounds.top))
-        # The mask raster covers the box; clip to the image.
-        ys0, xs0 = max(0, y0), max(0, x0)
-        ys1, xs1 = min(h, y0 + m.height), min(w, x0 + m.width)
-        if ys1 > ys0 and xs1 > xs0:
-            full[ys0:ys1, xs0:xs1] = local[ys0 - y0: ys1 - y0, xs0 - x0: xs1 - x0]
-        out.append({"id": r.object_id, "score": score,
-                    "box": [r.bounds.left, r.bounds.top, r.bounds.right, r.bounds.bottom], "mask": full})
+        out.append({"frame": r.frame.frame_index if r.frame is not None else 0, "id": r.object_id,
+                    "score": r.confidence,
+                    "box": [r.bounds.left, r.bounds.top, r.bounds.right, r.bounds.bottom], "local": local})
+    return out
+
+
+def paste_mask(rec: dict, size: tuple[int, int], out: np.ndarray | None = None) -> np.ndarray:
+    """OR a record's box-local mask into a full (h, w) boolean image."""
+    h, w = size
+    full = np.zeros((h, w), bool) if out is None else out
+    local = rec["local"]
+    x0, y0 = int(np.floor(rec["box"][0])), int(np.floor(rec["box"][1]))
+    ys0, xs0 = max(0, y0), max(0, x0)
+    ys1, xs1 = min(h, y0 + local.shape[0]), min(w, x0 + local.shape[1])
+    if ys1 > ys0 and xs1 > xs0:
+        full[ys0:ys1, xs0:xs1] |= local[ys0 - y0: ys1 - y0, xs0 - x0: xs1 - x0]
+    return full
+
+
+def parse_sam_output(text: str, size: tuple[int, int], min_score: float = 0.0) -> list[dict]:
+    """Image output -> [{id, score, box, mask (full-image bool)}], best first."""
+    out = []
+    for r in parse_sam_records(text, "image"):
+        if r["score"] is not None and r["score"] < min_score:
+            continue
+        out.append({"id": r["id"], "score": r["score"], "box": r["box"], "mask": paste_mask(r, size)})
     out.sort(key=lambda o: -(o["score"] if o["score"] is not None else 0))
     return out
 

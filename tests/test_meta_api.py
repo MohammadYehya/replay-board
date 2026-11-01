@@ -112,3 +112,17 @@ def test_env_file_encodings(tmp_path, encoding, bom):
     p.write_bytes(bom + 'MODEL_API_KEY="LLM_1_abc"\n# c\nMODEL_SPARK=muse-spark-1.2\n'.encode(encoding))
     env = read_env_file(p)
     assert env["MODEL_API_KEY"] == "LLM_1_abc" and env["MODEL_SPARK"] == "muse-spark-1.2"
+
+
+def test_timeout_is_retried_even_past_the_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(meta_api, "RETRY_BUDGET_S", 0.0)
+    hits = []
+
+    def handler(req):
+        hits.append(1)
+        if len(hits) == 1:
+            raise httpx.ReadTimeout("slow", request=req)
+        return httpx.Response(200, json=chat_reply("ok"))
+
+    c = make_client(tmp_path, handler)
+    assert c.ask("hi") == "ok" and len(hits) == 2

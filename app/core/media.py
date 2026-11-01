@@ -125,7 +125,7 @@ def iter_frames(info: VideoInfo, fps: float, width: int, start: float = 0.0,
     w, h = scaled_size(info, width)
     args = [_tool("ffmpeg"), "-v", "error", "-nostdin", "-ss", f"{s:.3f}", "-i", str(info.path),
             "-t", f"{e - s:.3f}", "-an", "-sn",
-            "-vf", f"fps={fps},scale={w}:{h}:flags=area,setsar=1",
+            "-vf", f"fps={fps}:round=up,scale={w}:{h}:flags=area,setsar=1",
             "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=w * h * 3 * 4)
     err_chunks: list[bytes] = []
