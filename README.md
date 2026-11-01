@@ -120,8 +120,10 @@ data/           videos, job folders and the model cache (never committed)
 ```
 
 ## Also in the box
-- **Study notes**: `GET /api/jobs/<id>/notes.md` (and the player's Notes button): every piece of writing or slide
-  element by chapter, as LaTeX, with when it was explained and what was said.
+- **Study notes**: the player's Notes page lists every line of writing (or slide element) by chapter, typeset with
+  KaTeX, with what was said; each time links back to that moment in the player. Download as Markdown or print.
+- **Typeset by line**: a line written in bursts (several pieces) is read by Muse Spark as one line and typeset whole
+  once it is finished; until then its pieces draw one by one, in time.
 - **3D pop-out** (stretch): for a drawn graph, surface or solid, Muse Spark returns a small JSON scene that the
   player renders with three.js. The scene is pure data: maths expressions are checked against a whitelist on
   the server and evaluated by the player's own parser, never as code.

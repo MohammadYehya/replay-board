@@ -410,9 +410,19 @@ export const Board = memo(
     };
 
     const tipTime = hover ? seekTarget(hover, clipStart) : 0;
-    const tipLatex = hover?.read?.latex?.trim() ?? '';
+    // A fragment of a line that is finished by now reads as its whole line ("#1." -> "A = (1+1)^1 = 2").
+    const hoverLine = hover
+      ? (board.lines ?? []).find(
+          (ln) =>
+            ln.pieces.includes(hover.id) &&
+            (ln.read?.latex?.trim() || ln.read?.text?.trim()) &&
+            timeRef.current >= ln.t_complete,
+        )
+      : undefined;
+    const tipRead = hoverLine?.read ?? hover?.read;
+    const tipLatex = tipRead?.latex?.trim() ?? '';
     const tipHtml = useMemo(() => tipTex(tipLatex), [tipLatex]);
-    const rawText = hover?.read?.text?.trim() ?? '';
+    const rawText = tipRead?.text?.trim() ?? '';
     const tipText = tipHtml && sameReading(rawText, tipLatex) ? '' : rawText || (tipHtml ? '' : tipLatex);
     const noSpoken = hover ? !(hover.spoken && hover.spoken.length) : false;
     const can3d = !!onPopout && canPopout(hover);
@@ -523,7 +533,7 @@ export const Board = memo(
             style={{ left: tipPos?.left ?? 0, top: tipPos?.top ?? 0, visibility: tipPos ? 'visible' : 'hidden' }}
           >
             <div className="tip-head">
-              <span className="tip-kind">{kindLabel(hover.read?.kind)}</span>
+              <span className="tip-kind">{kindLabel(tipRead?.kind)}</span>
               {hover.revealed && !hover.pre_existing && <span className="tip-flag">was hidden</span>}
               {can3d && (
                 <button className="tip-3d" onClick={open3d} title="View in 3D (made by Muse Spark)">
