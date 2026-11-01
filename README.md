@@ -67,6 +67,19 @@ python -m tests.selftest_board    ->  72/72 checks (6 variants)
 python -m tests.selftest_slides   ->  47/47 checks (4 variants)
 ```
 
+### What it costs and how long it takes
+Measured on an 8-minute 1080p board lecture, nothing cached, on a 4-core laptop:
+
+| | |
+|---|---|
+| Meta model calls | 19 (Muse Spark 9, SAM 3.1 7, Voice Transcribe 3) |
+| API cost | $0.38 (SAM person masks $0.19) |
+| First replay ready | 4.8 min |
+| Word times refined (MMS) | 7.4 min (the replay is rewritten in place; the player picks it up) |
+| Board capture alone | 4–12× real time, depending on what else the machine is doing |
+
+Re-running a lecture is free: every model answer is cached.
+
 ## Run it (Windows, PowerShell)
 
 Needs Python 3.10–3.13, ffmpeg on PATH, Node 20+, and a Meta Model API key.
@@ -103,6 +116,19 @@ web/            player: React + Vite + TypeScript + KaTeX
 tests/          generated-lecture self-tests and unit tests
 data/           videos, job folders and the model cache (never committed)
 ```
+
+## Also in the box
+- **Study notes**: `GET /api/jobs/<id>/notes.md` (and the player's Notes button): every piece of writing or slide
+  element by chapter, as LaTeX, with when it was explained and what was said.
+- **3D pop-out** (stretch): for a drawn graph, surface or solid, Muse Spark returns a small JSON scene that the
+  player renders with three.js. The scene is pure data: maths expressions are checked against a whitelist on
+  the server and evaluated by the player's own parser, never as code.
+
+## Limits
+- The camera must stay still (a tripod or a fixed classroom camera). Panning or zooming cameras are not handled.
+- MMS word alignment runs on the CPU at 1–3× real time; for long lectures the replay appears first with
+  turn-level word times and is refined in place.
+- Handwriting reading is as good as the frame: very small or blurry writing may be read partly.
 
 ## Privacy and video rules
 The original video is never altered: no outlining, blurring or removing the teacher. Videos and anything
