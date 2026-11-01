@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("video")
     ap.add_argument("--start", type=float, default=None, help="start time in seconds")
     ap.add_argument("--end", type=float, default=None, help="end time in seconds")
-    ap.add_argument("--deck", default=None, help="PDF of the slides (slide lectures, milestone 3)")
+    ap.add_argument("--deck", default=None, help="PDF of the slides, for slide lectures (optional)")
     ap.add_argument("--job", default=None, help="job folder (default data/jobs/<name>-<hash>)")
     ap.add_argument("--no-sam", action="store_true", help="skip SAM (whole frame, built-in person detector)")
     ap.add_argument("--width", type=int, default=800, help="board analysis width (default 800)")
@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     try:
         path = run(a.video, Path(a.job) if a.job else None, a.start, a.end, use_sam=not a.no_sam, width=a.width,
-                   use_cache=not a.no_cache)
+                   use_cache=not a.no_cache, deck=a.deck)
         print(f"wrote {path}")
         return 0
     except (MediaError, MetaAPIError, JobError) as e:

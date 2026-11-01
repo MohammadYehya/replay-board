@@ -220,13 +220,20 @@ def hexcolor(bgr) -> str:
 
 def run(video: str | Path, job_dir: Path | None = None, start: float | None = None, end: float | None = None,
         use_sam: bool = True, width: int = 800, log: Callable[[str], None] = print,
-        on_status: Callable[[dict], None] | None = None, use_cache: bool = True) -> Path:
+        on_status: Callable[[dict], None] | None = None, use_cache: bool = True,
+        deck: str | Path | None = None) -> Path:
     """Process one lecture. Returns the path of replay.json."""
     video = Path(video)
     info = media.probe(video)
     s0, s1 = media.clip_range(info, start, end)
     job_dir = Path(job_dir) if job_dir else JOBS / job_id_for(video, start, end)
     job_dir.mkdir(parents=True, exist_ok=True)
+    if deck is not None:
+        deck = Path(deck)
+        if not deck.is_file():
+            raise JobError(f"slide deck not found: {deck}")
+        if deck.resolve() != (job_dir / "deck.pdf").resolve():
+            shutil.copy2(deck, job_dir / "deck.pdf")
     status = Status(job_dir, on_status)
     try:
         out = _run(info, s0, s1, job_dir, status, use_sam, width, log, use_cache)
@@ -411,6 +418,21 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
     (job_dir / "slides").mkdir(exist_ok=True)
     status.start("read")
     readable = [st for st in res.states if st.image is not None and not st.blank]
+
+    # Optional PDF deck: read the crisp page; show it where it matches the screen exactly.
+    deck_pages, matches, video_img = [], {}, {}
+    if (job_dir / "deck.pdf").exists():
+        from .core.deck import match_pages, render_pages, same_content
+        deck_pages = render_pages(job_dir / "deck.pdf", width=1920)
+        matches = match_pages(res.states, deck_pages, res.live)
+        for st in readable:
+            video_img[st.id] = st.image
+            if st.id in matches:
+                H, W = st.image.shape[:2]
+                page = cv2.resize(deck_pages[matches[st.id][0]], (W, H), interpolation=cv2.INTER_AREA)
+                if same_content(st.image, page, res.background, res.live):
+                    st.image = page
+        log(f"deck: {len(deck_pages)} pages, {len(matches)}/{len(readable)} slide states matched")
     for st in res.states:
         if st.image is not None:
             media.imwrite(job_dir / "slides" / f"{st.id:03d}.png", st.image)
@@ -418,7 +440,20 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
     from .core.slides import content_mask, snap_box, word_at
 
     def read_one(st):
-        els = understand.read_slide(client, st.image, kind.get("subject", ""))
+        H, W = st.image.shape[:2]
+        if st.id in matches:
+            from .core.deck import visible_on
+            page_hi = deck_pages[matches[st.id][0]]
+            els = understand.read_slide(client, page_hi, kind.get("subject", ""))
+            kx, ky = W / page_hi.shape[1], H / page_hi.shape[0]
+            page = cv2.resize(page_hi, (W, H), interpolation=cv2.INTER_AREA)
+            for e in els:
+                e["box"] = [round(e["box"][0] * kx), round(e["box"][1] * ky), max(1, round(e["box"][2] * kx)),
+                            max(1, round(e["box"][3] * ky))]
+            # A build step: keep only what is already on screen.
+            els = [e for e in els if visible_on(video_img[st.id], e["box"], res.background, res.live, page)]
+        else:
+            els = understand.read_slide(client, st.image, kind.get("subject", ""))
         ink = content_mask(st.image, res.background, res.live)
         for i, e in enumerate(els):
             e["id"] = f"s{st.id}e{i + 1}"
@@ -504,6 +539,7 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
                 els.append({**e, "spoken": understand.snap_to_words(lk.get("spoken", []), words)})
             out_states.append({"id": st.id, "kind": st.kind, "t_start": round(st.t_start, 2), "t_end": round(st.t_end, 2),
                                "t_change": round(st.t_change, 2), "blank": st.blank,
+                           "deck_page": (matches[st.id][0] + 1) if st.id in matches else None,
                                "image": f"slides/{st.id:03d}.png" if st.image is not None else None, "elements": els})
         replay = {
             "version": 1,
