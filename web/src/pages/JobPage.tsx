@@ -11,10 +11,17 @@ const STAGES: Record<string, [string, string]> = {
   board: ['Find the board', 'SAM 3.1'],
   people: ['Find the teacher', 'SAM 3.1'],
   capture: ['Capture the writing', 'stroke tracker'],
-  speech: ['Transcribe the voice', 'Voice Transcribe + MMS'],
+  speech: ['Transcribe the voice', 'Voice Transcribe'],
   read: ['Read the writing', 'Muse Spark'],
   link: ['Link writing to speech', 'Muse Spark'],
   write: ['Write the replay', ''],
+  align: ['Refine word times', 'MMS aligner'],
+};
+// The same stages for a slide lecture.
+const SLIDE_STAGES: Record<string, [string, string]> = {
+  capture: ['Find slide changes and the pointer', 'slide tracker'],
+  read: ['Read the slides and gestures', 'Muse Spark'],
+  link: ['Link slides to speech', 'Muse Spark'],
 };
 
 function stageList(stages: Record<string, StageStatus> | undefined): [string, StageStatus][] {
@@ -24,7 +31,12 @@ function stageList(stages: Record<string, StageStatus> | undefined): [string, St
   return [...known, ...extra].map((k) => [k, s[k]]);
 }
 
-const title = (k: string) => STAGES[k]?.[0] ?? k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, ' ');
+/** Whether the classify stage found slides (its note reads "slides, ..."). */
+const isSlides = (stages: Record<string, StageStatus> | undefined) => /^slides\b/i.test(stages?.classify?.note ?? '');
+
+const stageInfo = (k: string, slides: boolean): [string, string] =>
+  (slides ? SLIDE_STAGES[k] : undefined) ??
+  STAGES[k] ?? [k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, ' '), ''];
 
 function StageIcon({ state, failed }: { state: string; failed: boolean }) {
   if (state === 'done')
@@ -64,6 +76,7 @@ function JobProgress({ status, error, missing }: { status: JobStatus | null; err
   }, []);
   const failed = status?.state === 'failed';
   const stages = stageList(status?.stages);
+  const slides = isSlides(status?.stages);
   const doneCount = stages.reduce(
     (acc, [, s]) => acc + (s.state === 'done' || s.state === 'skipped' ? 1 : s.state === 'running' ? (s.progress ?? 0) : 0),
     0,
@@ -107,7 +120,7 @@ function JobProgress({ status, error, missing }: { status: JobStatus | null; err
                 <p className="muted">
                   {failed
                     ? 'Processing stopped.'
-                    : 'Meta models read the board and the voice; the replay opens as soon as it is ready.'}
+                    : `Meta models read the ${slides ? 'slides' : 'board'} and the voice; the replay opens as soon as it is ready.`}
                 </p>
               )}
             </div>
@@ -123,14 +136,14 @@ function JobProgress({ status, error, missing }: { status: JobStatus | null; err
           {stages.length > 0 ? (
             <ol className="stages">
               {stages.map(([key, s]) => {
-                const by = STAGES[key]?.[1];
+                const [name, by] = stageInfo(key, slides);
                 const pct = s.state === 'done' ? 1 : Math.max(0, Math.min(1, s.progress ?? 0));
                 return (
                   <li key={key} className={`stage ${s.state} ${failed && s.state === 'running' ? 'stopped' : ''}`}>
                     <StageIcon state={s.state} failed={failed} />
                     <div className="stage-body">
                       <div className="stage-line">
-                        <span className="stage-name">{title(key)}</span>
+                        <span className="stage-name">{name}</span>
                         {by && <span className="stage-by">{by}</span>}
                         <span className="stage-secs">
                           {s.seconds != null ? `${s.seconds < 10 ? s.seconds.toFixed(1) : Math.round(s.seconds)} s` : ''}
@@ -192,10 +205,18 @@ export function JobPage({ jobId }: { jobId: string }) {
           if (++afterFail > 4) return;
           wait = 2000;
         }
-        if (st.ready && (st.state === 'done' || st.state === 'unknown')) {
-          const r = await getReplay(jobId, ctrl.signal);
-          if (!stopped) setReplay(r);
-          return;
+        // Open the player as soon as a replay exists, even while the job still refines it (word times): the
+        // player watches the job itself and swaps in the rewritten replay.
+        if (st.ready) {
+          try {
+            const r = await getReplay(jobId, ctrl.signal);
+            if (!stopped) setReplay(r);
+            return;
+          } catch (e) {
+            if (stopped || (e as Error).name === 'AbortError') return;
+            if (st.state === 'done') throw e; // nothing will fix it by waiting
+            // being replaced right now: look again in a moment
+          }
         }
         if (st.state === 'done') {
           setError('Processing finished but no replay was written.');
@@ -221,6 +242,9 @@ export function JobPage({ jobId }: { jobId: string }) {
     };
   }, [jobId]);
 
-  if (replay) return <Player key={jobId} jobId={jobId} replay={replay} name={status?.name} />;
+  if (replay) {
+    const running = status ? status.state === 'running' || status.state === 'queued' : undefined;
+    return <Player key={jobId} jobId={jobId} replay={replay} name={status?.name} running={running} />;
+  }
   return <JobProgress status={status} error={error} missing={missing} />;
 }

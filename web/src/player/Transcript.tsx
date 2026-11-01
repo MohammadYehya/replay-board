@@ -56,9 +56,11 @@ export function Transcript(props: {
   upTo: number;
   currentTurn: number;
   timing?: string;
+  /** True while the backend still refines the word times (the player swaps in the new ones when they land). */
+  refining?: boolean;
   onSeek(t: number): void;
 }) {
-  const { turns, words, groups, wordTurn, active, upTo, currentTurn, timing, onSeek } = props;
+  const { turns, words, groups, wordTurn, active, upTo, currentTurn, timing, refining, onSeek } = props;
   const boxRef = useRef<HTMLDivElement>(null);
   const [detached, setDetached] = useState(false);
   const idleTimer = useRef<number | undefined>(undefined);
@@ -132,8 +134,16 @@ export function Transcript(props: {
     <section className="panel transcript-panel">
       <header className="panel-head">
         <h2>Transcript</h2>
-        {timing && timing !== 'none' && words.length > 0 && (
-          <span className="panel-note">{timing === 'mms' ? 'word timing: MMS aligner' : `timing: ${timing}`}</span>
+        {refining && words.length > 0 ? (
+          <span className="panel-note refining" role="status">
+            refining word times…
+          </span>
+        ) : (
+          timing &&
+          timing !== 'none' &&
+          words.length > 0 && (
+            <span className="panel-note">{timing === 'mms' ? 'word timing: MMS aligner' : `timing: ${timing}`}</span>
+          )
         )}
       </header>
       <div

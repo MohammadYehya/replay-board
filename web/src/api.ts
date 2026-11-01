@@ -33,8 +33,14 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
 export const listJobs = (signal?: AbortSignal) => getJson<JobSummary[]>('/api/jobs', signal);
 export const getJob = (id: string, signal?: AbortSignal) =>
   getJson<JobStatus>(`/api/jobs/${encodeURIComponent(id)}`, signal);
-export const getReplay = (id: string, signal?: AbortSignal) =>
-  getJson<Replay>(`/api/jobs/${encodeURIComponent(id)}/replay.json`, signal);
+/** The replay, or an error while it cannot be read whole (the server answers {} while the file is replaced). */
+export async function getReplay(id: string, signal?: AbortSignal): Promise<Replay> {
+  const r = await getJson<Replay>(`/api/jobs/${encodeURIComponent(id)}/replay.json`, signal);
+  if (!r || typeof r !== 'object' || !r.video || typeof r.video.file !== 'string') {
+    throw new Error('The replay is being written. Trying again…');
+  }
+  return r;
+}
 
 export interface UploadOptions {
   start?: number;

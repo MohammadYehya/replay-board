@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { jobFileUrl } from '../api';
+import { getJob, getReplay, jobFileUrl } from '../api';
 import type { Piece, Replay } from '../types';
 import { Board, type BoardHandle } from './Board';
+import { Slides, type SlidesHandle } from './Slides';
 import { activeWord, chapterAt, formatTime, groupWords, lastStartedWord, seekTarget, turnsFromWords } from './timing';
 import { Chapters, Transcript } from './Transcript';
 
 const SKIP = 5;
 
-function Shortcuts({ onClose }: { onClose(): void }) {
+function Shortcuts({ onClose, mode }: { onClose(): void; mode: 'board' | 'slides' | 'none' }) {
   useEffect(() => {
     const close = (e: MouseEvent) => {
       if (!(e.target as HTMLElement).closest('.shortcuts, .keys-btn')) onClose();
@@ -15,14 +16,24 @@ function Shortcuts({ onClose }: { onClose(): void }) {
     window.addEventListener('mousedown', close);
     return () => window.removeEventListener('mousedown', close);
   }, [onClose]);
-  const rows: [string[], string][] = [
-    [['Space'], 'Play / pause'],
-    [['←', '→'], 'Back / forward 5 s'],
-    [['T'], 'Handwriting / typeset'],
-    [['Click writing'], 'Jump to where it is explained'],
-    [['Click board'], 'Play / pause'],
-    [['Click a word'], 'Jump to that word'],
-  ];
+  const rows: [string[], string][] =
+    mode === 'slides'
+      ? [
+          [['Space'], 'Play / pause'],
+          [['←', '→'], 'Back / forward 5 s'],
+          [['P'], "Show the teacher's pointer"],
+          [['Click slide text'], 'Jump to where it is explained'],
+          [['Click slide'], 'Play / pause'],
+          [['Click a word'], 'Jump to that word'],
+        ]
+      : [
+          [['Space'], 'Play / pause'],
+          [['←', '→'], 'Back / forward 5 s'],
+          [['T'], 'Handwriting / typeset'],
+          [['Click writing'], 'Jump to where it is explained'],
+          [['Click board'], 'Play / pause'],
+          [['Click a word'], 'Jump to that word'],
+        ];
   return (
     <div className="shortcuts" role="dialog" aria-label="Keyboard shortcuts">
       <h3>Shortcuts</h3>
@@ -48,13 +59,35 @@ function Shortcuts({ onClose }: { onClose(): void }) {
   );
 }
 
-export function Player({ jobId, replay, name }: { jobId: string; replay: Replay; name?: string }) {
+export function Player({
+  jobId,
+  replay: first,
+  name,
+  running,
+}: {
+  jobId: string;
+  replay: Replay;
+  name?: string;
+  /** Whether the job was still running when the replay was loaded (false: its word times are final). */
+  running?: boolean;
+}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const boardRef = useRef<BoardHandle>(null);
+  const slidesRef = useRef<SlidesHandle>(null);
+  // The replay can be swapped for a rewritten one (refined word times) while it plays; the video is never reset.
+  const [replay, setReplay] = useState(first);
+  // Proportional word times are refined only while the job runs; a finished job keeps the ones it has.
+  const refinable = (r: Replay) => r.transcript?.timing === 'proportional' && running !== false;
+  const [refining, setRefining] = useState(() => refinable(first));
+  useEffect(() => {
+    setReplay(first);
+    setRefining(refinable(first));
+  }, [first]); // `running` describes the job when this replay was loaded
   const clipStart = replay.video.start ?? 0;
   const clipEnd = replay.video.end ?? replay.video.duration;
   const timeRef = useRef<number>(clipStart);
   const [typeset, setTypeset] = useState(false);
+  const [showPointer, setShowPointer] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [active, setActive] = useState(-1);
   const [upTo, setUpTo] = useState(-1);
@@ -87,6 +120,45 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
   }, [groups, words]);
   const chapters = useMemo(() => (replay.chapters ?? []).slice().sort((a, b) => a.t - b.t), [replay]);
   const board = replay.board;
+  const slides = board ? undefined : replay.slides;
+  const mode = board ? 'board' : slides ? 'slides' : 'none';
+
+  // The first version of a replay has proportional word times while MMS still aligns them: watch the job and
+  // swap in the rewritten replay (transcript, spoken ranges, chapters, redraw times) as soon as it lands.
+  useEffect(() => {
+    if (!refining) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const ctrl = new AbortController();
+    const poll = async () => {
+      try {
+        const st = await getJob(jobId, ctrl.signal);
+        if (stopped) return;
+        const align = st.stages?.align?.state;
+        const ended = st.state !== 'running' && st.state !== 'queued';
+        if (ended || align === 'done' || align === 'skipped') {
+          const next = await getReplay(jobId, ctrl.signal);
+          if (stopped) return;
+          // The aligner finishes a moment before the replay is rewritten: wait for the new file unless the job ended.
+          if (next.transcript?.timing !== 'proportional' || ended) {
+            setReplay(next);
+            setRefining(false);
+            return;
+          }
+        }
+      } catch (e) {
+        if (stopped || (e as Error).name === 'AbortError') return;
+        // the server may be restarting, or the file is being replaced: try again
+      }
+      timer = window.setTimeout(poll, 4000);
+    };
+    timer = window.setTimeout(poll, 4000);
+    return () => {
+      stopped = true;
+      ctrl.abort();
+      window.clearTimeout(timer);
+    };
+  }, [jobId, refining]);
 
   // One clock: the video's currentTime drives the board and the transcript, even while paused or scrubbing.
   useEffect(() => {
@@ -108,6 +180,7 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
         prev = t;
         timeRef.current = t;
         boardRef.current?.render(t);
+        slidesRef.current?.render(t);
         const up = lastStartedWord(words, t);
         const act = activeWord(words, t);
         let tu = up >= 0 ? wordTurn[up] : -1;
@@ -149,8 +222,11 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
   const seekPiece = useCallback((p: Piece) => seek(seekTarget(p, clipStart), true), [seek, clipStart]);
   const seekWord = useCallback((t: number) => seek(t), [seek]);
   const seekChapter = useCallback((t: number) => seek(t, true), [seek]);
+  const seekAndPlay = useCallback((t: number) => seek(t, true), [seek]);
 
-  // Keyboard: space, arrows, t. Ignored while typing in a field.
+  // Keyboard: space, arrows, t (board), p (slides). Ignored while typing in a field.
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   useEffect(() => {
     let swallowSpaceUp = false;
     const typing = (el: EventTarget | null) => {
@@ -167,7 +243,8 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
         swallowSpaceUp = true;
       } else if (e.key === 'ArrowLeft') seek(v.currentTime - SKIP);
       else if (e.key === 'ArrowRight') seek(v.currentTime + SKIP);
-      else if (e.key === 't' || e.key === 'T') setTypeset((x) => !x);
+      else if ((e.key === 't' || e.key === 'T') && modeRef.current === 'board') setTypeset((x) => !x);
+      else if ((e.key === 'p' || e.key === 'P') && modeRef.current === 'slides') setShowPointer((x) => !x);
       else if (e.key === '?') setShowKeys((x) => !x);
       else if (e.key === 'Escape') setShowKeys(false);
       else handled = false;
@@ -197,10 +274,15 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
     if (clipStart > 0.05 && v.currentTime < clipStart) v.currentTime = clipStart;
   };
 
-  const boardAspect = board ? board.size[0] / board.size[1] : 16 / 9;
+  const viewSize = board?.size ?? slides?.size;
+  const boardAspect = viewSize && viewSize[0] > 0 && viewSize[1] > 0 ? viewSize[0] / viewSize[1] : 16 / 9;
   const partial = clipStart > 0.5 || clipEnd < replay.video.duration - 0.5;
   const pieces = board?.pieces ?? [];
   const hiddenCount = pieces.filter((p) => p.revealed && !p.pre_existing).length;
+  const slideStates = slides?.states ?? [];
+  const slideCount = slideStates.filter((s) => s.kind !== 'addition').length || slideStates.length;
+  const buildSteps = slideStates.length - slideCount;
+  const annotationCount = slides?.annotations?.length ?? 0;
   const api = replay.stats?.api;
   const subject = replay.subject?.trim();
   const rowStyle = {
@@ -227,7 +309,7 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
           <button className={`ghost-btn keys-btn ${showKeys ? 'on' : ''}`} onClick={() => setShowKeys((x) => !x)}>
             <kbd>?</kbd> Shortcuts
           </button>
-          {showKeys && <Shortcuts onClose={() => setShowKeys(false)} />}
+          {showKeys && <Shortcuts mode={mode} onClose={() => setShowKeys(false)} />}
         </div>
       </header>
 
@@ -238,7 +320,8 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
               <h2>Lecture</h2>
               <span className="panel-note">
                 original video, untouched
-                {partial && ` · board covers ${formatTime(clipStart)}–${formatTime(clipEnd)}`}
+                {partial &&
+                  ` · ${slides ? 'slides cover' : 'board covers'} ${formatTime(clipStart)}–${formatTime(clipEnd)}`}
               </span>
             </header>
             <div className="video-frame" style={{ aspectRatio: `${videoAspect}` }}>
@@ -284,6 +367,23 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
                   </div>
                 </>
               )}
+              {slides && (
+                <>
+                  <span className="panel-note">
+                    {slideCount} {slideCount === 1 ? 'slide' : 'slides'} · {annotationCount}{' '}
+                    {annotationCount === 1 ? 'annotation' : 'annotations'}
+                  </span>
+                  <button
+                    className={`pointer-toggle ${showPointer ? 'on' : ''}`}
+                    aria-pressed={showPointer}
+                    title="Show where the teacher's pointer was (P)"
+                    onClick={() => setShowPointer((x) => !x)}
+                  >
+                    <span className="dot" aria-hidden />
+                    Pointer
+                  </button>
+                </>
+              )}
             </header>
             {board ? (
               <Board
@@ -297,11 +397,21 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
                 onSeekPiece={seekPiece}
                 onTogglePlay={togglePlay}
               />
+            ) : slides ? (
+              <Slides
+                ref={slidesRef}
+                jobId={jobId}
+                slides={slides}
+                timeRef={timeRef}
+                clipStart={clipStart}
+                playing={playing}
+                showPointer={showPointer}
+                onSeek={seekAndPlay}
+                onTogglePlay={togglePlay}
+              />
             ) : (
               <div className="board-missing">
-                {replay.type === 'slides'
-                  ? 'This is a slide recording. The slide view is not built yet.'
-                  : 'This replay has no board.'}
+                {replay.type === 'slides' ? 'No slides were found in this recording.' : 'This replay has no board.'}
               </div>
             )}
           </section>
@@ -319,6 +429,17 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
                         , <b>{hiddenCount}</b> uncovered from behind the teacher
                       </>
                     ) : null}
+                  </li>
+                )}
+                {slides && (
+                  <li>
+                    <b>{slideCount}</b> {slideCount === 1 ? 'slide' : 'slides'}
+                    {buildSteps > 0 && (
+                      <>
+                        , <b>{buildSteps}</b> build {buildSteps === 1 ? 'step' : 'steps'}
+                      </>
+                    )}{' '}
+                    · <b>{annotationCount}</b> pointer {annotationCount === 1 ? 'gesture' : 'gestures'} redrawn
                   </li>
                 )}
                 <li>
@@ -348,6 +469,7 @@ export function Player({ jobId, replay, name }: { jobId: string; replay: Replay;
             upTo={upTo}
             currentTurn={turnIdx}
             timing={replay.transcript?.timing}
+            refining={refining}
             onSeek={seekWord}
           />
         </div>

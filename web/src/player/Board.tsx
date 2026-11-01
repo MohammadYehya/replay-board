@@ -6,8 +6,9 @@ import type { BoardData, Piece } from '../types';
 import { BoardRenderer, boardBackground } from './boardRenderer';
 import { texHtml } from './tex';
 import { cleanLatex } from './texClean';
-import { clauses, texLayouts, writtenText } from './texLayout';
+import { texLayouts, writtenText } from './texLayout';
 import { formatTime, seekTarget, typesetIds } from './timing';
+import { kindLabel, sameReading, tipTex } from './tip';
 
 export interface BoardHandle {
   render(t: number): void;
@@ -22,18 +23,6 @@ interface Props {
   playing: boolean;
   onSeekPiece(p: Piece): void;
   onTogglePlay(): void;
-}
-
-const kindLabel = (k: string | undefined) => (k ? k.charAt(0).toUpperCase() + k.slice(1) : 'Writing');
-
-/** True when the plain text only repeats the LaTeX, e.g. "A = P(1+r)^n" and "A=P(1+r)^n". */
-function sameReading(text: string, latex: string) {
-  const norm = (s: string) =>
-    s
-      .replace(/\\(left|right|tfrac|dfrac|frac|quad|qquad|cdot|,|;|!)/g, '')
-      .replace(/[\s{}\\]/g, '')
-      .toLowerCase();
-  return norm(text) === norm(latex);
 }
 
 /** Largest font size (board px, at most maxFont) at which the content fits the piece's box. */
@@ -99,17 +88,6 @@ function alignContinuations(inner: HTMLElement) {
       if (!rel) anchor = 0;
     } else line.style.paddingLeft = `${(anchor / size).toFixed(3)}em`;
   }
-}
-
-/** The reading for the tooltip: short LaTeX on one display line; long LaTeX as a paragraph of its clauses that
- *  wraps between clauses and after relations, so nothing is cut off at the tooltip's edge. */
-function tipTex(latex: string): string | null {
-  if (!latex) return null;
-  const clean = cleanLatex(latex);
-  if (clean.length <= 34) return texHtml(clean, true);
-  const parts = clauses(clean).map((c) => texHtml(c));
-  if (!parts.length || parts.some((x) => x == null)) return texHtml(clean, true);
-  return `<div class="tip-line">${parts.join(' ')}</div>`;
 }
 
 const TypesetPiece = memo(function TypesetPiece(props: {
@@ -229,9 +207,23 @@ export const Board = memo(
       [legible],
     );
 
+    // The renderer (with its loaded sprites and frame cache) is rebuilt only when the board's writing changes.
+    // A replay rewritten with refined word times keeps the same pieces and only moves when they are talked
+    // about and redrawn: that is handed to the live renderer below instead.
+    const latestBoard = useRef(board);
+    latestBoard.current = board;
+    const structure = useMemo(
+      () =>
+        [jobId, W, H, board.mode ?? '', board.background ?? '']
+          .concat(board.pieces.map((p) => `${p.id}:${p.image}:${p.order ?? ''}:${p.gone ?? ''}:${p.box.join(',')}`))
+          .join('|'),
+      [board, jobId, W, H],
+    );
+
     useLayoutEffect(() => {
       const canvas = canvasRef.current;
       if (!canvas) return;
+      const board = latestBoard.current;
       const r = new BoardRenderer(canvas, board, jobId);
       r.typesetEls = typesetEls;
       r.tagEls = tagEls;
@@ -246,7 +238,19 @@ export const Board = memo(
         r.destroy();
         rendererRef.current = null;
       };
-    }, [board, jobId, typesetEls, tagEls, timeRef, legible]);
+    }, [structure, typesetEls, tagEls, timeRef, legible]); // `structure` stands for board and jobId
+
+    // New timing for the same pieces (spoken ranges, redraw times): reschedule without reloading anything.
+    useEffect(() => {
+      rendererRef.current?.setPieces(board.pieces);
+      rendererRef.current?.render(timeRef.current ?? 0);
+      const h = hoverRef.current;
+      const fresh = h ? board.pieces.find((p) => p.id === h.id) : undefined;
+      if (h && fresh && fresh !== h) {
+        hoverRef.current = fresh;
+        setHover(fresh);
+      }
+    }, [board, timeRef]);
 
     useEffect(() => {
       rendererRef.current?.setTypeset(typeset);

@@ -1,6 +1,6 @@
 // Pure timing rules for the player: when each piece of writing is drawn, faded, tagged and talked about,
 // plus transcript/chapter lookups. No DOM here, so `npm test` can run it with plain Node.
-import type { Chapter, Piece, Word } from '../types';
+import type { Chapter, Piece, Span, Word } from '../types';
 
 /** Kinds that are drawings: they always stay as handwriting, even in typeset mode. */
 export const DRAWING_KINDS = new Set([
@@ -98,8 +98,8 @@ export function seekTarget(p: Piece, clipStart = 0): number {
   return Math.max(clipStart, (num(p.t_seen) ?? 0) - 1);
 }
 
-/** 0..1: how strongly the piece is "being talked about" at t (soft 0.3 s edges). */
-export function talkingAt(p: Piece, t: number): number {
+/** 0..1: how strongly a piece (or slide element) is "being talked about" at t (soft 0.3 s edges). */
+export function talkingAt(p: { spoken?: Span[] }, t: number): number {
   let best = 0;
   for (const sp of p.spoken ?? []) {
     if (t < sp.start - 0.3 || t > sp.end + 0.3) continue;

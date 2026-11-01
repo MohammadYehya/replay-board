@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
+import cv2
 import numpy as np
 
 from .config import DATA_DIR
@@ -312,6 +313,8 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
     # Sharp crops from the video itself (the 800 px board is too coarse for small handwriting).
     try:
         crops = understand.hires_crops(info, board.corners, board, pieces, person, t_end=s1)
+        for pid, img in crops.items():  # kept for the 3D pop-out
+            media.imwrite(job_dir / "crops" / f"{pid:03d}.jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
     except Exception as e:  # reading still works from the rebuilt board
         log(f"read: sharp crops failed ({e}); reading from the rebuilt board")
         crops = {}
@@ -393,10 +396,15 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
         if st.image is not None:
             media.imwrite(job_dir / "slides" / f"{st.id:03d}.png", st.image)
 
+    from .core.slides import content_mask, snap_box, word_at
+
     def read_one(st):
         els = understand.read_slide(client, st.image, kind.get("subject", ""))
+        ink = content_mask(st.image, res.background, res.live)
         for i, e in enumerate(els):
             e["id"] = f"s{st.id}e{i + 1}"
+            # The model's boxes can be a line off: snap them onto the slide's real ink.
+            e["box"] = snap_box(e["box"], ink, e.get("kind", "text"))
         return st.id, els
 
     elements: dict[int, list] = {}
@@ -415,6 +423,8 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
         return res.states[-1] if res.states else None
 
     cands = [g for g in res.gestures if not (g["type"] == "hover" and g.get("parked")) and g["type"] != "move"]
+
+    inks = {st.id: content_mask(st.image, res.background, res.live) for st in readable}
 
     def mean_one(g):
         st = state_of(g["t_start"])
@@ -435,8 +445,19 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
             ids = {e["id"]: e for e in elements.get(st.id, [])}
             target = [x for x in m.get("target", []) if x in ids]
             box = g["box"]
-            if target and m["type"] in ("spotlight", "circle", "pulse", "underline"):
+            if target and m["type"] in ("spotlight", "underline"):
                 box = ids[target[0]]["box"]
+            elif target and m["type"] in ("circle", "pulse"):
+                # A circle or a wiggle round one word of a long line: the part of the element inside
+                # the gesture, tightened to the ink; else the gesture's own extent.
+                el, gb = ids[target[0]]["box"], g["box"]
+                ix0, iy0 = max(el[0], gb[0]), max(el[1], gb[1])
+                ix1, iy1 = min(el[0] + el[2], gb[0] + gb[2]), min(el[1] + el[3], gb[1] + gb[3])
+                if ix1 - ix0 > 4 and iy1 - iy0 > 4:
+                    box = snap_box([ix0, iy0, ix1 - ix0, iy1 - iy0], inks[st.id], "figure")
+                elif gb[2] <= 4 or gb[3] <= 4:
+                    # A rest or a tap: the word under the pointer, else the element.
+                    box = word_at(inks[st.id], gb[0] + gb[2] / 2, gb[1] + gb[3] / 2) or el
             fr, to = g.get("from"), g.get("to")
             if m["type"] == "arrow" and len(target) >= 2:
                 a, b = ids[target[0]]["box"], ids[target[1]]["box"]

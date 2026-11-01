@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "test": "node --test tests/timing.test.ts tests/texLayout.test.ts"
+    "test": "node --test tests/timing.test.ts tests/texLayout.test.ts tests/slideTiming.test.ts"
   },
   "dependencies": {
     "katex": "^0.16.22",

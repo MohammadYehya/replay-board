@@ -50,6 +50,57 @@ export interface BoardData {
   t_start?: number;
 }
 
+export interface SlideElement {
+  id: string;
+  kind: string;
+  text: string;
+  latex: string;
+  box: Box; // slide image pixels
+  spoken?: Span[];
+}
+
+export interface SlideState {
+  id: number;
+  kind: string; // slide | addition
+  t_start: number;
+  t_end: number;
+  /** When the change to this state began (the crossfade runs from t_change to t_start). */
+  t_change?: number;
+  blank?: boolean;
+  image: string | null;
+  elements?: SlideElement[];
+}
+
+export type AnnotationType = 'spotlight' | 'circle' | 'underline' | 'arrow' | 'pulse';
+
+export interface SlideAnnotation {
+  type: AnnotationType | string;
+  tool: string; // cursor | laser
+  t_start: number;
+  t_end: number;
+  target?: string[];
+  box: Box;
+  from?: [number, number] | null;
+  to?: [number, number] | null;
+  why?: string;
+  guess?: string;
+  state?: number; // id of the slide state it belongs to
+  path?: [number, number][];
+  underline_y?: number | null;
+}
+
+/** [t, "c" (cursor) | "l" (laser), x, y] in slide image pixels. */
+export type PointerSample = [number, string, number, number];
+
+export interface SlidesData {
+  size: [number, number];
+  background?: string;
+  live?: Box[];
+  states: SlideState[];
+  annotations?: SlideAnnotation[];
+  pointer?: PointerSample[];
+}
+
 export interface Word {
   w: string;
   s: number;
@@ -79,7 +130,7 @@ export interface Replay {
   type: string;
   subject?: string;
   board?: BoardData;
-  slides?: unknown;
+  slides?: SlidesData;
   transcript?: { turns?: Turn[]; words?: Word[]; timing?: string };
   chapters?: Chapter[];
   stats?: ReplayStats;

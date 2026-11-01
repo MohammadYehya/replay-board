@@ -174,6 +174,22 @@ export class BoardRenderer {
     }
   }
 
+  /** Same pieces, new timing (a replay rewritten with refined word times): reschedule them, keep the sprites. */
+  setPieces(pieces: Piece[]) {
+    let changed = false;
+    for (const p of pieces) {
+      const e = this.byId.get(p.id);
+      if (!e || e.piece === p) continue;
+      e.piece = p;
+      e.sched = schedule(p);
+      changed = true;
+    }
+    if (changed) {
+      this.entries.sort((a, b) => a.sched.start - b.sched.start);
+      this.dirty = true;
+    }
+  }
+
   inkOf(id: number): string | null {
     return this.byId.get(id)?.sprite?.ink ?? null;
   }

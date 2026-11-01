@@ -901,6 +901,97 @@ def snap_underline(g: dict, text_mask: np.ndarray, p: SlideParams) -> dict:
     return g
 
 
+# ------------------------------------------------------------------ element boxes
+
+TEXT_KINDS = {"title", "heading", "text", "bullet", "equation", "label", "code"}
+
+
+def content_mask(img: np.ndarray, bg_colour, live: list | None = None, thr: float = 40) -> np.ndarray:
+    m = _absdiff_max(img, np.full_like(img, bg_colour)) > thr
+    for x, y, w, h in live or []:
+        m[y:y + h, x:x + w] = False
+    return m
+
+
+def snap_box(box: list, content: np.ndarray, kind: str = "text", s: float = 1.0) -> list:
+    """Move a model's rough element box onto the real ink of the slide.
+
+    Ink is grouped into words/lines; the line that best overlaps the box (allowing for the box
+    being off by up to ~a line height) is chosen, plus its other parts within the box's width.
+    Drawings (figures, charts) are tightened to the ink inside a slightly grown box.
+    """
+    H, W = content.shape
+    x, y, w, h = (int(round(v)) for v in box)
+    if w <= 1 or h <= 1:
+        return box
+    gy, gx = int(max(30 * s, 0.8 * h)), int(40 * s)
+    ex0, ey0, ex1, ey1 = max(0, x - gx), max(0, y - gy), min(W, x + w + gx), min(H, y + h + gy)
+    win = content[ey0:ey1, ex0:ex1]
+    if not win.any():
+        return box
+    if kind not in TEXT_KINDS:
+        ys, xs = np.nonzero(content[max(0, y - 10):min(H, y + h + 10), max(0, x - 10):min(W, x + w + 10)])
+        if ys.size == 0:
+            return box
+        x0, y0 = max(0, x - 10), max(0, y - 10)
+        return [int(x0 + xs.min()), int(y0 + ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)]
+    lines = cv2.dilate(win.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(18 * s)), 3)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(lines, connectivity=8)
+    best, best_score = None, 0.0
+    cy = y + h / 2
+    for i in range(1, n):
+        cx0, cy0, cw, ch, _ = st[i]
+        cx0 += ex0
+        cy0 += ey0
+        ox = max(0, min(x + w, cx0 + cw) - max(x, cx0))
+        if ox <= 0:
+            continue
+        score = ox / max(w, cw) * math.exp(-abs((cy0 + ch / 2) - cy) / max(8.0, h)) * min(1.0, ch / max(1.0, 0.4 * h))
+        if score > best_score:
+            best, best_score = i, score
+    if best is None or best_score < 0.15:
+        return box
+    by0, bh = st[best, 1], st[best, 3]
+    keep = [best]
+    for i in range(1, n):
+        if i == best:
+            continue
+        cx0, cy0, cw, ch, _ = st[i]
+        same_line = min(by0 + bh, cy0 + ch) - max(by0, cy0) > 0.5 * min(bh, ch)
+        inside = cx0 + ex0 >= x - gx and cx0 + ex0 + cw <= x + w + gx
+        if same_line and inside:
+            keep.append(i)
+    m = np.isin(lab, keep) & win
+    ys, xs = np.nonzero(m)
+    if ys.size == 0:
+        return box
+    return [int(ex0 + xs.min()), int(ey0 + ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)]
+
+
+def word_at(content: np.ndarray, x: float, y: float, s: float = 1.0) -> list | None:
+    """Box of the word under (or nearest within ~20 px of) a point; None on empty space."""
+    H, W = content.shape
+    r = int(60 * s)
+    x0, y0, x1, y1 = max(0, int(x) - r), max(0, int(y) - r), min(W, int(x) + r), min(H, int(y) + r)
+    win = content[y0:y1, x0:x1]
+    if not win.any():
+        return None
+    words = cv2.dilate(win.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(7 * s)), 3)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(words, connectivity=8)
+    best, best_d = None, 20 * s
+    for i in range(1, n):
+        cx0, cy0, cw, ch, _ = st[i]
+        dx = max(cx0 - (x - x0), 0, (x - x0) - (cx0 + cw))
+        dy = max(cy0 - (y - y0), 0, (y - y0) - (cy0 + ch))
+        d = math.hypot(dx, dy)
+        if d <= best_d:
+            best, best_d = i, d
+    if best is None:
+        return None
+    ys, xs = np.nonzero((lab == best) & win)
+    return [int(x0 + xs.min()), int(y0 + ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)]
+
+
 # ------------------------------------------------------------------ driver
 
 def analyse_slides(info: VideoInfo, workdir: Path, start: float = 0.0, end: float | None = None,

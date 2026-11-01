@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import time
 import queue
 import re
 import threading
@@ -49,11 +50,16 @@ def _job_dir(job_id: str) -> Path:
     return d
 
 
-def _read_json(p: Path) -> dict:
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+def _read_json(p: Path, tries: int = 20) -> dict:
+    # The pipeline replaces these files atomically, but Windows can refuse a read mid-replace.
+    for i in range(tries):
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            if not p.exists():
+                return {}
+            time.sleep(0.05)
+    return {}
 
 
 @app.get("/api/jobs")
@@ -107,7 +113,42 @@ def job_replay(job_id: str):
     p = _job_dir(job_id) / "replay.json"
     if not p.exists():
         raise HTTPException(404, "not processed yet")
-    return JSONResponse(_read_json(p))
+    data = _read_json(p)
+    if not data:
+        raise HTTPException(503, "replay.json is being written; try again")
+    return JSONResponse(data)
+
+
+@app.get("/api/jobs/{job_id}/notes.md")
+def job_notes(job_id: str):
+    from fastapi.responses import PlainTextResponse
+
+    from .notes import build_notes
+
+    p = _job_dir(job_id) / "replay.json"
+    if not p.exists():
+        raise HTTPException(404, "not processed yet")
+    md = build_notes(_read_json(p))
+    return PlainTextResponse(md, media_type="text/markdown; charset=utf-8",
+                             headers={"Content-Disposition": f'inline; filename="{job_id}-notes.md"'})
+
+
+@app.post("/api/jobs/{job_id}/popout/{piece_id}")
+def job_popout(job_id: str, piece_id: int):
+    """3D scene for one drawn piece (Muse Spark), made on demand and cached in the job folder."""
+    from .core.meta_api import MetaAPIError, MetaClient
+    from .popout import make_scene
+
+    d = _job_dir(job_id)
+    replay = _read_json(d / "replay.json")
+    if replay.get("type") != "board":
+        raise HTTPException(404, "3D pop-out is for board lectures")
+    try:
+        return make_scene(MetaClient(), d, replay, piece_id)
+    except KeyError:
+        raise HTTPException(404, "no such piece") from None
+    except MetaAPIError as e:
+        raise HTTPException(502, str(e)) from None
 
 
 @app.get("/api/jobs/{job_id}/files/{path:path}")
