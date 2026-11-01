@@ -1,0 +1,28 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# videos, job folders, model-answer cache: everything made from videos
+data/
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.wav
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# web
+web/node_modules/
+web/dist/
+
+# editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
