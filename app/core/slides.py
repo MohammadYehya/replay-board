@@ -129,8 +129,14 @@ class SlidesResult:
 # ------------------------------------------------------------------ working copy
 
 def make_working_copy(info: VideoInfo, out: Path, start: float, end: float, p: SlideParams) -> Path:
-    """Cut, 12 fps, 960 px wide, x264 crf 12 yuv444p. Every later pass reads this."""
-    if out.exists() and out.stat().st_size > 0:
+    """Cut, 12 fps, 960 px wide, x264 crf 12 yuv444p. Every later pass reads this.
+
+    Reused only if made from the same file (path, size, date), range and settings.
+    """
+    st = info.path.stat()
+    key = f"{info.path.resolve()}|{st.st_size}|{st.st_mtime_ns}|{start:.3f}|{end:.3f}|{p.width}|{p.work_fps}"
+    key_file = out.with_suffix(".key")
+    if out.exists() and out.stat().st_size > 0 and key_file.exists() and key_file.read_text(encoding="utf-8") == key:
         return out
     w = p.width
     h = max(2, int(round(w * info.height / info.width / 2)) * 2)
@@ -143,6 +149,7 @@ def make_working_copy(info: VideoInfo, out: Path, start: float, end: float, p: S
         err = res.stderr.decode("utf-8", "replace").strip().splitlines()
         raise MediaError(f"could not make the working copy: {err[-1] if err else 'ffmpeg error'}")
     tmp.replace(out)
+    key_file.write_text(key, encoding="utf-8")
     return out
 
 

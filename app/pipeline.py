@@ -309,8 +309,14 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
         p["draw"] = draw
 
     status.start("read")
+    # Sharp crops from the video itself (the 800 px board is too coarse for small handwriting).
+    try:
+        crops = understand.hires_crops(info, board.corners, board, pieces, person, t_end=s1)
+    except Exception as e:  # reading still works from the rebuilt board
+        log(f"read: sharp crops failed ({e}); reading from the rebuilt board")
+        crops = {}
     reads = understand.read_pieces(client, board, everything, pieces, subject=kind.get("subject", ""),
-                                   progress=lambda f: status.progress("read", f))
+                                   progress=lambda f: status.progress("read", f), crops=crops)
     status.done("read", f"{len(reads)} read")
 
     elements = []

@@ -388,6 +388,9 @@ def response_text(reply: dict) -> str:
     return "".join(parts)
 
 
+_FAST_VERIFIED = False
+
+
 def parse_sam_records(text: str, media: str = "image") -> list[dict]:
     """SAM 3.1 special-token output -> [{frame, id, score, box:[l,t,r,b] half-open, local: bool HxW}].
 
@@ -406,9 +409,16 @@ def parse_sam_records(text: str, media: str = "image") -> list[dict]:
     if fast is not None:
         if not fast:
             return []
-        payload, w, h = fast[0]["_payload"]
-        ref = np.frombuffer(decode_mask_to_raster(SegmentationMask("one_bit", payload, w, h)), np.uint8)
-        if np.array_equal(ref.reshape(h, w).astype(bool), fast[0]["local"]):
+        global _FAST_VERIFIED
+        ok = _FAST_VERIFIED
+        if not ok:
+            # Check the smallest mask against Meta's decoder (pure Python, ~5 us per pixel); once it
+            # matches, this process trusts the fast decoder (tests check it bit for bit).
+            small = min(fast, key=lambda r: r["local"].size)
+            payload, w, h = small["_payload"]
+            ref = np.frombuffer(decode_mask_to_raster(SegmentationMask("one_bit", payload, w, h)), np.uint8)
+            ok = _FAST_VERIFIED = bool(np.array_equal(ref.reshape(h, w).astype(bool), small["local"]))
+        if ok:
             for r in fast:
                 r.pop("_payload", None)
             return fast

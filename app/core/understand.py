@@ -68,9 +68,11 @@ def piece_crop(board_img: np.ndarray, own: np.ndarray, box: list, margin: float 
     m = int(max(24, margin * max(w, h)))
     x0, y0, x1, y1 = max(0, x - m), max(0, y - m), min(W, x + w + m), min(H, y + h + m)
     crop = board_img[y0:y1, x0:x1].astype(np.float32)
-    bg = np.median(board_img.reshape(-1, 3), axis=0)
-    faded = bg + (crop - bg) * 0.25
     mine = own[y0:y1, x0:x1]
+    # Fade toward the local board colour (lighting varies across a filmed board).
+    rest = crop[~mine] if (~mine).any() else crop.reshape(-1, 3)
+    bg = np.median(rest.reshape(-1, 3), axis=0)
+    faded = bg + (crop - bg) * 0.25
     out = np.where(mine[..., None], crop, faded).clip(0, 255).astype(np.uint8)
     k = max(1.0, min_side / max(1, min(out.shape[:2])))
     k = min(k, max_side / max(out.shape[:2]))
@@ -79,9 +81,66 @@ def piece_crop(board_img: np.ndarray, own: np.ndarray, box: list, margin: float 
     return out
 
 
+def hires_crops(info, corners, board, pieces: list[dict], person=None, scale: float = 2.0, t_end: float | None = None,
+                workers: int = 4) -> dict:
+    """Sharp crops for reading: each piece from a real frame at full video resolution.
+
+    The frame is chosen after the piece is finished (and before it is erased) when the person
+    mask covers it least. Other writing around it is faded, as in piece_crop.
+    """
+    from .board import BoardGeometry
+    from .media import grab_frame
+
+    if not pieces:
+        return {}
+    W, H = board.width, board.height
+    lo = BoardGeometry(info, corners, W, 1280)
+    hi = BoardGeometry(info, corners, int(round(W * scale)), info.width)
+    k_own = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    end = t_end if t_end is not None else info.duration
+    plans = []
+    for p in pieces:
+        own = np.zeros(W * H, bool)
+        own[board.add_idx[board.add_piece == p["id"]]] = True
+        own = own.reshape(H, W)
+        if not own.any():
+            continue
+        done = p["t_shown"] if not p.get("pre_existing") else board.t_start
+        last = (p["removed_at"] - 0.4) if p.get("removed_at") else end - 0.2
+        cands = sorted({min(last, max(done + d, board.t_start)) for d in (0.8, 2.5, 6.0, 15.0)} | {last})
+        best_t, best_cov = cands[0], 2.0
+        if person is not None:
+            own_d = cv2.dilate(own.astype(np.uint8), k_own) > 0
+            for t in cands:
+                m = person(t)
+                cov = float((lo.warp_mask(m) & own_d).sum() / max(1, own_d.sum())) if m is not None else 0.0
+                if cov < best_cov - 0.02:
+                    best_t, best_cov = t, cov
+        plans.append((p, own, best_t))
+
+    def one(plan):
+        p, own, t = plan
+        try:
+            frame = hi.warp(grab_frame(info, t, info.width))
+        except Exception:
+            return p["id"], None
+        own_hi = cv2.resize(own.astype(np.uint8), (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+        own_hi = cv2.dilate(own_hi, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
+        box = [int(round(v * scale)) for v in p["box"]]
+        return p["id"], piece_crop(frame, own_hi, box, margin=0.3, min_side=140, max_side=900)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return {pid: img for pid, img in ex.map(one, plans) if img is not None}
+
+
 def read_pieces(client: MetaClient, board, board_img: np.ndarray, pieces: list[dict], subject: str = "",
-                per_call: int = 10, workers: int = 6, progress: Callable[[float], None] | None = None) -> dict:
-    """{piece id: {kind, text, latex}} read by Muse Spark, several pieces per call, calls in parallel."""
+                per_call: int = 10, workers: int = 6, progress: Callable[[float], None] | None = None,
+                crops: dict | None = None) -> dict:
+    """{piece id: {kind, text, latex}} read by Muse Spark, several pieces per call, calls in parallel.
+
+    `crops` (piece id -> image) are used when given (sharp crops from the video); otherwise each
+    piece is cut from the rebuilt board.
+    """
     if not pieces:
         return {}
     W = board.width
@@ -93,17 +152,26 @@ def read_pieces(client: MetaClient, board, board_img: np.ndarray, pieces: list[d
         parts = [text_part(
             "You are reading handwriting on a lecture whiteboard/chalkboard"
             + (f" (topic: {subject})" if subject else "") + ". The first image is the whole board for context. "
-            "Each following image is one piece of writing, shown in colour; nearby writing is faded and is NOT "
-            "part of the piece. For each piece give: kind; text = what it says in plain words/symbols "
-            "(empty for pure drawings); latex = LaTeX for maths (empty if not maths). Describe drawings briefly "
-            "in text (e.g. 'graph of y = ln|x|', 'arrow pointing right'). Do not guess beyond what is written."),
+            "Each following image is one piece of writing in full colour; nearby writing is faded and is NOT "
+            "part of the piece, and a hand or arm may cover a corner. For each piece give:\n"
+            "- kind;\n"
+            "- text: exactly what is written, in plain characters (e.g. 'A = (1 + 1/12)^12', '$2.61'), with no "
+            "description added ('circled', 'with underline' belong in kind, not text). For a drawing (diagram, "
+            "graph, arrow, underline, box, scribble) give a short description instead ('graph of y = ln|x|');\n"
+            "- latex: the same maths as LaTeX (no $ signs), or empty if it is not maths.\n"
+            "Use the board image to resolve unclear symbols from context (the same expression often appears "
+            "nearby). If part of it is unreadable, write what you can read; do not invent."),
             overview]
         for p in batch:
-            own = np.zeros(board_img.shape[:2], bool)
-            idx = board.add_idx[board.add_piece == p["id"]]
-            own.reshape(-1)[idx] = True
+            if crops and p["id"] in crops:
+                crop = crops[p["id"]]
+            else:
+                own = np.zeros(board_img.shape[:2], bool)
+                idx = board.add_idx[board.add_piece == p["id"]]
+                own.reshape(-1)[idx] = True
+                crop = piece_crop(board_img, own, p["box"])
             parts.append(text_part(f"Piece id {p['id']}:"))
-            parts.append(image_part(piece_crop(board_img, own, p["box"]), fmt=".png"))
+            parts.append(image_part(crop, fmt=".jpg", quality=92))
         reply = client.chat([{"role": "user", "content": parts}], schema=READ_SCHEMA, reasoning="low")
         from .meta_api import chat_text, parse_json_object
         data = parse_json_object(chat_text(reply))
