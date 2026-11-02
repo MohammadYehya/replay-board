@@ -196,7 +196,8 @@ export interface Scene3DAxis {
   label: string;
 }
 
-/** A slider the steps move ("beta" from 90 to 110 degrees). */
+/** A slider the steps move ("beta" from 90 to 110 degrees); [min, max] is also the range a student may explore
+ *  with "Try it". */
 export interface Scene3DParam {
   name: string;
   value: number;
@@ -226,17 +227,20 @@ export type Scene3DObjectType =
   | 'surface'
   | 'curve'
   | 'psurface'
-  | 'label';
+  | 'label'
+  | 'angle';
 
 /** Flat: every field is present; the unused ones are "" or []. */
 export interface Scene3DObject {
   id: string;
   type: Scene3DObjectType;
-  /** point, label: 1; segment, vector: 2 (from, to); polygon: 3..12 corners of a flat face. */
+  /** point, label: 1; segment, vector: 2 (from, to); polygon: 3..12 corners of a flat face; angle: 3 (the vertex,
+   *  then a point on each arm: the angle at the vertex between them, 0..180 degrees). */
   points: Vec3E[];
   /** box, sphere, cylinder, cone, torus. */
   center: Vec3E | [];
-  /** box [width, depth, height]; sphere [radius]; cylinder, cone [radius, height]; torus [ring radius, tube radius]. */
+  /** box [width, depth, height]; sphere [radius]; cylinder, cone [radius, height]; torus [ring radius, tube radius];
+   *  angle [] (auto: 0.3 x the shorter arm) or [radius]. */
   size: Expr[];
   /** Degrees about x, y, z ([] = none). */
   rotation: Vec3E | [];

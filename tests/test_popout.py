@@ -189,8 +189,11 @@ def test_step_references_are_repaired():
     assert len(steps) == 1
     s = steps[0]
     assert s["show"] == ["a"] and s["hide"] == ["b"] and s["highlight"] == []
-    assert s["set"] == [{"param": "theta", "to": 90}] and s["camera"] == "keep" and s["over"] == 8
+    # rules 6: a value past the param's range is kept (the range is widened to hold it: fit_range), not cut to it
+    assert s["set"] == [{"param": "theta", "to": 400}] and s["camera"] == "keep" and s["over"] == 8
     assert any("ghost" in n for n in notes)
+    steps, _ = popout.clean_steps([step("0:20", set=[{"param": "theta", "to": 1e9}])], [], params, CLIP, [])
+    assert steps[0]["set"] == [{"param": "theta", "to": popout.LIMIT}]
 
 
 def test_params_are_checked():
@@ -204,7 +207,8 @@ def test_params_are_checked():
         {"name": "flat", "value": 3, "min": 3, "max": 3, "label": "", "unit": "kg"},
     ], notes)
     assert [p["name"] for p in ps] == ["beta", "flat"]
-    assert ps[0] == {"name": "beta", "value": 120, "min": 60, "max": 120, "label": "β", "unit": "deg"}
+    # rules 6: the range is what a student explores, so it is widened to hold the value instead of moving the value
+    assert ps[0] == {"name": "beta", "value": 200, "min": 60, "max": 200, "label": "β", "unit": "deg"}
     assert ps[1]["min"] < ps[1]["value"] < ps[1]["max"] and ps[1]["unit"] == ""
     assert len(popout.clean_params([{"name": f"p{i}", "value": 0, "min": 0, "max": 1, "label": "", "unit": ""}
                                     for i in range(12)], [])) == popout.MAX_PARAMS
@@ -327,15 +331,20 @@ def test_the_view_is_never_empty_before_the_first_step():
     shown = {i for s in scene["steps"] for i in s["show"]}
     assert [o["id"] for o in scene["objects"] if o["id"] not in shown] == ["a"]
     # an object hidden before the step that shows it is left alone (it would vanish for good otherwise)
+    scene = popout.clean_scene(answer(objects[:2], [step("0:20", hide=["a"], highlight=["b"]),
+                                                    step("0:30", show=["a"])]),
+                               piece=1, pieces=[1], version="v", clip=CLIP)
+    assert scene["steps"][1]["show"] == ["a"]
+    # rules 6: alone, that hide changes nothing (a is not shown yet), so its step goes, and a is there from the start
     scene = popout.clean_scene(answer(objects[:1], [step("0:20", hide=["a"]), step("0:30", show=["a"])]), piece=1,
                                pieces=[1], version="v", clip=CLIP)
-    assert scene["steps"][1]["show"] == ["a"]
-    # shown twice, then hidden: there from the start, glowing where it was shown, and still hidden at the end
+    assert [(s["show"], s["highlight"], s["hide"]) for s in scene["steps"]] == [([], ["a"], [])]
+    # shown twice, then hidden: there from the start, glowing where it was first shown, and still hidden at the end
+    # (rules 6: the second show changed nothing, a was there already, so that step goes)
     scene = popout.clean_scene(answer(objects[:1], [step("0:20", caption="", show=["a"]),
                                                     step("0:30", caption="", show=["a"]), step("0:40", hide=["a"])]),
                                piece=1, pieces=[1], version="v", clip=CLIP)
-    assert [(s["show"], s["highlight"], s["hide"]) for s in scene["steps"]] == [([], ["a"], []), ([], ["a"], []),
-                                                                                ([], [], ["a"])]
+    assert [(s["show"], s["highlight"], s["hide"]) for s in scene["steps"]] == [([], ["a"], []), ([], [], ["a"])]
 
 
 def test_every_state_of_the_final_steps_is_checked():
@@ -849,3 +858,566 @@ def test_a_param_named_like_a_variable_is_renamed_not_dropped():
     scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP)
     by = {o["id"]: o for o in scene["objects"]}
     assert by["dot"]["points"] == [["p_x", "0", "0"]] and by["g"]["expr"] == "x^2"
+
+
+# ---------- rules 6: angle objects, explorable ranges, steps that change something, captions that point ----------
+def angle(oid, pts, size=(), label="", **kw):
+    return obj(oid, "angle", points=[list(p) for p in pts], size=list(size), label=label, **kw)
+
+
+def measured(scene, oid, finals=True):
+    """An angle object's measured value (degrees) at the start and after each step that moves something."""
+    o = next(o for o in scene["objects"] if o["id"] == oid)
+    shape = popout.Shape(o, popout._names(scene), scene["axes"])
+    envs = popout._envs(scene, popout.param_states(scene["params"], scene["steps"], finals=finals))
+    return [None if (a := shape.angle_at(env)) is None else round(a, 6) for env in envs]
+
+
+CELL = [{"name": "a", "value": 3, "min": 1, "max": 6, "label": "a", "unit": ""},
+        {"name": "c", "value": 4, "min": 1, "max": 6, "label": "c", "unit": ""},
+        {"name": "beta", "value": 90, "min": 60, "max": 120, "label": "beta", "unit": "deg"}]
+CELL_DEFS = [{"name": "cx", "expr": "c*cos(beta*deg)"}, {"name": "cz", "expr": "c*sin(beta*deg)"}]
+
+
+def cell(steps, extra=()):
+    edge_a = obj("edge_a", "segment", points=[["0", "0", "0"], ["a", "0", "0"]], label="a")
+    edge_c = obj("edge_c", "segment", points=[["0", "0", "0"], ["cx", "0", "cz"]], label="c")
+    beta = angle("beta_angle", [["0", "0", "0"], ["a", "0", "0"], ["cx", "0", "cz"]], label="beta")
+    raw = answer([edge_a, edge_c, beta, *extra], steps, CELL)
+    raw["defs"] = CELL_DEFS
+    return raw
+
+
+def test_the_scene_format_has_angles():
+    assert "angle" in popout.TYPES and "angle" in popout.SCENE_SCHEMA["properties"]["objects"]["items"][
+        "properties"]["type"]["enum"]
+    assert popout.SCENE_RULES_VERSION == "6"
+    task = popout.SCENE_TASK
+    assert "angle: points [vertex, end1, end2]" in task and "never a curve" in task and "slider" in task
+    assert "Every length the teacher names" in task and "Every step visibly changes" in task
+
+
+def test_an_angle_follows_its_edges_and_measures_what_the_steps_say():
+    scene = popout.clean_scene(cell([step("0:20", caption="Monoclinic: beta is 75 degrees",
+                                          set=[{"param": "beta", "to": 75}]),
+                                     step("0:30", caption="tilted further", set=[{"param": "beta", "to": 105}])]),
+                               piece=1, pieces=[1], version="v", clip=CLIP)
+    (o,) = [o for o in scene["objects"] if o["type"] == "angle"]
+    assert o["points"] == [["0", "0", "0"], ["a", "0", "0"], ["cx", "0", "cz"]] and o["size"] == []
+    assert o["label"] == "beta" and set(o) == set(scene["objects"][0])  # flat, with every field
+    assert measured(scene, "beta_angle") == [90, 75, 105]
+    json.dumps(scene, allow_nan=False)
+
+
+def test_an_angle_has_three_points_and_at_most_one_radius():
+    notes = []
+    v, p, q = ["0", "0", "0"], ["1", "0", "0"], ["0", "1", "0"]
+    objs = [angle("two", [v, p]), angle("four", [v, p, q, q]), angle("bad_r", [v, p, q], size=["x"]),
+            angle("two_r", [v, p, q], size=["0.5", "2"]), angle("blank_r", [v, p, q], size=[""]),
+            angle("ok", [v, p, q], size=["0.25"]), angle("var", [v, ["t", "0", "0"], q])]
+    scene = popout.clean_scene(answer(objs, [step("0:20", highlight=["ok"])]), piece=1, pieces=[1], version="v",
+                               clip=CLIP, notes=notes)
+    by = {o["id"]: o for o in scene["objects"]}
+    assert set(by) == {"two_r", "blank_r", "ok"}
+    assert by["two_r"]["size"] == ["0.5"] and by["blank_r"]["size"] == [] and by["ok"]["size"] == ["0.25"]
+    assert any("2 points for an angle" in n for n in notes) and any("4 points for an angle" in n for n in notes)
+    assert any("only its first size kept" in n for n in notes)
+    assert any(n.startswith("object bad_r dropped") for n in notes)
+    assert any(n.startswith("object var dropped") for n in notes)  # no variables in an angle's points
+
+
+@pytest.mark.parametrize("label, name", [("beta = 75°", "beta"), ("β 75°", "β"), ("γ=120", "γ"),
+                                         ("theta: 30 degrees", "theta"), ("θ1", "θ1"), ("angle ABC", "angle ABC"),
+                                         ("alpha", "alpha"), ("= 90", ""),
+                                         # a label that is only a value would show it twice ("90° 90°")
+                                         ("90°", ""), ("120 degrees", ""), ("β = 75º", "β"), ("γ 120˚", "γ"),
+                                         ("1", "1"), ("angle 1", "angle 1")])
+def test_an_angle_label_is_its_name_without_a_value(label, name):
+    notes = []
+    o = popout.clean_object(angle("ang", [["0", "0", "0"], ["1", "0", "0"], ["0", "1", "0"]], label=label), 0,
+                            set(), notes)
+    assert o["label"] == name
+    assert any("the value taken out of its label" in n for n in notes) == (label != name)
+    # other objects keep their label as it is
+    seg = popout.clean_object(obj("s", "segment", points=[["0", "0", "0"], ["1", "0", "0"]], label="a = 3 cm"), 0,
+                              set(), [])
+    assert seg["label"] == "a = 3 cm"
+
+
+def test_an_angle_is_framed_by_its_vertex_and_radius():
+    only = angle("ang", [["1", "1", "1"], ["3", "1", "1"], ["1", "5", "1"]])  # arms 2 and 4: auto radius 0.6
+    scene = popout.clean_scene(answer([only], [step("0:20", highlight=["ang"])]), piece=1, pieces=[1], version="v",
+                               clip=CLIP)
+    assert scene["bounds"] == [[0.4, 0.4, 0.4], [1.6, 1.6, 1.6]]
+    only["size"] = ["0.5"]
+    scene = popout.clean_scene(answer([only], [step("0:20", highlight=["ang"])]), piece=1, pieces=[1], version="v",
+                               clip=CLIP)
+    assert scene["bounds"] == [[0.5, 0.5, 0.5], [1.5, 1.5, 1.5]]
+    assert measured(scene, "ang") == [90]
+
+
+@pytest.mark.parametrize("p2", [["1", "1e-8", "0"], ["-1", "1e-8", "0"], ["1", "1e-12", "0"], ["-2", "3e-9", "0"],
+                                ["0.3", "0.7", "-0.2"], ["0", "1", "0"]])
+def test_an_angle_measures_what_the_player_measures(p2):
+    # the player measures atan2(|a x b|, a.b) (angle3d.ts): acos lost every angle under about 1e-6 degrees and
+    # the same near 180
+    o = popout.clean_object(angle("ang", [["0", "0", "0"], ["1", "0", "0"], p2]), 0, set(), [])
+    a, b = np.array([1.0, 0, 0]), np.array([float(v) for v in p2])
+    want = math.degrees(math.atan2(np.linalg.norm(np.cross(a, b)), np.dot(a, b)))
+    assert popout.Shape(o, set(), {}).angle_at({}) == pytest.approx(want, rel=1e-12, abs=1e-15)
+
+
+def test_a_degenerate_angle_is_dropped_only_where_the_view_rests():
+    k = {"name": "k", "value": 1, "min": -1, "max": 1, "label": "", "unit": ""}
+    r = {"name": "r", "value": 0.5, "min": 0, "max": 1, "label": "", "unit": ""}
+    v, q = ["0", "0", "0"], ["0", "1", "0"]
+    objs = [angle("swing", [v, ["k", "0", "0"], q]),           # its arm passes through 0 half-way: allowed
+            angle("ends_flat", [v, ["k + 1", "0", "0"], q]),   # an arm of length 0 after the step: dropped
+            angle("starts_flat", [v, ["k - 1", "0", "0"], q]),  # an arm of length 0 at the start: dropped
+            angle("nan", [v, ["sqrt(k - 1.5)", "0", "0"], q]),  # not finite at the start: dropped
+            angle("no_radius", [v, ["1", "0", "0"], q], size=["r"]),  # radius 0 after the second step: dropped
+            obj("dot", "point", points=[["0", "0", "1"]])]
+    notes = []
+    scene = popout.clean_scene(answer(objs, [step("0:20", caption="swing", set=[{"param": "k", "to": -1}], over=4),
+                                             step("0:30", caption="shrink", set=[{"param": "r", "to": 0}])],
+                                      [k, r]), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert [o["id"] for o in scene["objects"]] == ["swing", "dot"]
+    assert sum("the angle is degenerate" in n for n in notes) == 4
+    assert measured(scene, "swing") == [90, 90, 90]
+    assert measured(scene, "swing", finals=False)[2] is None  # half-way through the swing, k = 0: not drawn then
+    json.dumps(scene, allow_nan=False)
+
+
+def test_params_get_a_range_to_explore():
+    notes = []
+    ps = popout.clean_params([
+        {"name": "beta", "value": 90, "min": 90, "max": 90, "label": "", "unit": "deg"},  # no range: +-30 degrees
+        {"name": "len", "value": 3, "min": 3, "max": 3, "label": "", "unit": ""},         # +-half of it
+        {"name": "zero", "value": 0, "min": 0, "max": 0, "label": "", "unit": ""},        # +-1
+        {"name": "out", "value": 7, "min": 1, "max": 6, "label": "", "unit": ""},         # widened to hold 7
+    ], notes)
+    assert [(p["min"], p["value"], p["max"]) for p in ps] == [(60, 90, 120), (1.5, 3, 4.5), (-1, 0, 1), (1, 7, 7)]
+    assert "param beta: no range to explore, so 60..120" in notes
+    assert "param out: range widened from 1..6 to 1..7 to hold its values" in notes
+    # every step's "to" is inside the range too, never cut to it: the caption says that value
+    gamma = {"name": "gamma", "value": 90, "min": 80, "max": 100, "label": "gamma", "unit": "deg"}
+    notes = []
+    scene = popout.clean_scene(answer([obj("p", "point", points=[["cos(gamma*deg)", "0", "0"]])],
+                                      [step("0:20", caption="hexagonal: gamma is 120",
+                                            set=[{"param": "gamma", "to": 120}])], [gamma]),
+                               piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    (p,) = scene["params"]
+    assert (p["min"], p["value"], p["max"]) == (80, 90, 120) and scene["steps"][0]["set"][0]["to"] == 120
+    assert "param gamma: range widened from 80..100 to 80..120 to hold its values" in notes
+
+
+def test_a_value_cut_to_the_limit_is_never_silent():
+    # a value beyond +-LIMIT is cut to it: the run log says so, never "already there" or nothing at all
+    n = {"name": "n", "value": 3e5, "min": 0, "max": 1e6, "label": "", "unit": ""}
+    notes = []
+    scene = popout.clean_scene(answer([obj("q", "point", points=[["n/1e5", "0", "0"]])],
+                                      [step("0:20", caption="n doubles", set=[{"param": "n", "to": 6e5}])], [n]),
+                               piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert scene["params"][0]["value"] == popout.LIMIT
+    assert "param n: value 300000 cut to 10000 (at most 10000 either way)" in notes
+    assert "param n: max 1e+06 cut to 10000 (at most 10000 either way)" in notes
+    assert "step: n set to 600000 cut to 10000 (at most 10000 either way)" in notes
+
+
+def test_a_step_that_changes_nothing_is_dropped():
+    k = {"name": "k", "value": 0, "min": 0, "max": 1, "label": "", "unit": ""}
+    objs = [obj(i, "point", points=[[str(n), "0", "0"]]) for n, i in enumerate("abcd")]
+    steps = [step("0:20", caption="k stays", set=[{"param": "k", "to": 0}]),   # 1: moves nothing
+             step("0:25", caption="d appears", show=["d"]),                     # 2
+             step("0:30", caption="d again", show=["d"]),                       # 3: d is there already
+             step("0:35", caption="d goes", hide=["d"]),                        # 4
+             step("0:40", caption="d gone", hide=["d"]),                        # 5: d is gone already
+             step("0:45", caption="iso", camera="iso"),                         # 6: the start camera
+             step("0:50", caption="from above", camera="top"),                  # 7
+             step("0:55", caption="above", camera="top"),                       # 8: already from above
+             step("1:00", caption="k moves", set=[{"param": "k", "to": 1}]),    # 9
+             step("1:05", caption="only words")]                                # 10
+    notes = []
+    scene = popout.clean_scene(answer(objs, steps, [k]), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert [s["caption"] for s in scene["steps"]] == ["d appears", "d goes", "from above", "k moves"]
+    assert [n for n in notes if "changes nothing" in n] == [
+        "step 1 dropped: it changes nothing on screen ('k stays')",
+        "step 3 dropped: it changes nothing on screen ('d again')",
+        "step 5 dropped: it changes nothing on screen ('d gone')",
+        "step 6 dropped: it changes nothing on screen ('iso')",
+        "step 8 dropped: it changes nothing on screen ('above')",
+        "step 10 dropped: it changes nothing on screen ('only words')"]
+    assert "step 1: set of k removed: already there" in notes
+
+
+def test_sets_that_move_nothing_are_taken_out_of_a_step():
+    raw = cell([step("0:20", caption="tetragonal: c is longer",
+                     set=[{"param": "a", "to": 3}, {"param": "c", "to": 5}, {"param": "beta", "to": 90}])])
+    notes = []
+    scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert scene["steps"][0]["set"] == [{"param": "c", "to": 5}]
+    assert "step 1: set of a, beta removed: already there" in notes
+
+
+def test_the_start_camera_stays_when_the_step_that_named_it_goes():
+    k = {"name": "k", "value": 0, "min": 0, "max": 1, "label": "", "unit": ""}
+    dots = [obj("dot", "point", points=[["k", "0", "0"]])] + [obj(f"p{i}", "point", points=[[str(i), "1", "0"]])
+                                                             for i in range(3)]
+    scene = popout.clean_scene(answer(dots, [step("0:20", caption="look", camera="front"),
+                                             step("0:25", caption="move", set=[{"param": "k", "to": 1}]),
+                                             step("0:30", caption="turn", camera="iso")], [k]),
+                               piece=1, pieces=[1], version="v", clip=CLIP)
+    assert [(s["caption"], s["camera"]) for s in scene["steps"]] == [("move", "front"), ("turn", "iso")]
+
+
+def test_a_caption_points_at_what_it_names():
+    k = {"name": "k", "value": 0, "min": 0, "max": 1, "label": "", "unit": ""}
+    v = ["0", "0", "0"]
+    objs = [obj("edge_a", "segment", points=[v, ["1", "0", "0"]], label="a"),
+            angle("alpha_angle", [v, ["0", "1", "0"], ["0", "0", "1"]], label="α"),
+            angle("beta_angle", [v, ["1", "0", "0"], ["0", "0", "1"]], label="beta"),
+            angle("gamma_angle", [v, ["1", "0", "0"], ["0", "1", "0"]], label="Gamma"),
+            obj("tag", "label", points=[["0", "0", "2"]], label="apex"),
+            obj("corner", "point", points=[["1", "1", "1"]], label="corner"),
+            obj("mover", "point", points=[["k", "0", "0"]])]
+    steps = [step("0:20", caption="Alpha and γ stay at 90 degrees; a is the same; the alphabet",
+                  set=[{"param": "k", "to": 1}]),
+             step("0:30", caption="Beta is not 90"),                          # beta is shown later: shown here
+             step("0:40", caption="beta again", show=["beta_angle"], set=[{"param": "k", "to": 0}]),
+             step("0:50", caption="the apex, the corner, alpha, beta and gamma"),  # 5 named: 3 pointed at
+             step("1:00", caption="the apex goes", hide=["tag"]),             # its own hide is left alone
+             step("1:10", caption="apex"),                                    # base object hidden: not shown again
+             step("1:20", caption="mu", highlight=["mover"])]
+    notes = []
+    scene = popout.clean_scene(answer(objs, steps, [k]), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    s = {x["caption"]: x for x in scene["steps"]}
+    first = s["Alpha and γ stay at 90 degrees; a is the same; the alphabet"]
+    assert first["highlight"] == ["alpha_angle", "gamma_angle"] and first["show"] == []  # never "a", nor "alphabet"
+    assert s["Beta is not 90"]["show"] == ["beta_angle"] and s["Beta is not 90"]["highlight"] == []
+    # its own show stays, and what it shows is visible then, so it glows too
+    assert s["beta again"]["show"] == ["beta_angle"] and s["beta again"]["highlight"] == ["beta_angle"]
+    assert s["the apex, the corner, alpha, beta and gamma"]["highlight"] == ["tag", "corner", "alpha_angle"]
+    assert s["the apex goes"]["hide"] == ["tag"] and s["the apex goes"]["highlight"] == []
+    assert "apex" not in s  # nothing to point at (the apex is hidden and part of the base): nothing changes
+    assert "step 1: alpha_angle highlighted: its caption names 'α'" in notes
+    assert "step 2: beta_angle shown: its caption names 'beta'" in notes
+    assert sum(" highlighted: " in n or " shown: " in n for n in notes) == 7
+
+
+def test_a_caption_naming_an_angle_is_satisfied_by_an_angle_object():
+    gamma = {"name": "gamma", "value": 90, "min": 60, "max": 120, "label": "gamma", "unit": "deg"}
+    v = ["0", "0", "0"]
+    objs = [obj("edge", "segment", points=[v, ["1", "0", "0"]]),
+            obj("edge2", "segment", points=[v, ["cos(gamma*deg)", "sin(gamma*deg)", "0"]]),
+            obj("edge3", "segment", points=[v, ["0", "0", "1"]]),
+            angle("g", [v, ["1", "0", "0"], ["cos(gamma*deg)", "sin(gamma*deg)", "0"]], label="γ")]
+    notes = []
+    scene = popout.clean_scene(answer(objs, [step("0:20", caption="Gamma is 120 degrees",
+                                                  set=[{"param": "gamma", "to": 120}])], [gamma]),
+                               piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert not [n for n in notes if "caption names gamma" in n]
+    assert scene["steps"][0]["highlight"] == ["g"] and measured(scene, "g") == [90, 120]
+
+
+@pytest.mark.parametrize("text, words", [("Angle β", "angle beta"), ("Γ", "gamma"),
+                                         ("Σ and ς", "sigma and sigma"), ("αβ", "alpha beta"),
+                                         ("  Beta=75°", "beta=75°")])
+def test_plain_words(text, words):
+    assert popout.plain_words(text) == words
+
+
+# ---------- the list of drawings that have a 3D view ----------
+def test_the_list_of_made_scenes(api, monkeypatch):
+    client, d, use = api
+    r = client.get("/api/jobs/lec/popouts")
+    assert r.status_code == 200 and r.json() == {"drawings": []} and r.headers["cache-control"] == "no-cache"
+    use(FakeClient([GOOD]))
+    assert client.post("/api/jobs/lec/popout/1").status_code == 200
+    assert client.post("/api/jobs/lec/popout/9").status_code == 200  # drawing 8
+    monkeypatch.setattr(server, "_meta_client", lambda: pytest.fail("the list never calls the model"))
+    r = client.get("/api/jobs/lec/popouts")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    one, eight = r.json()["drawings"]
+    assert one == {"drawing": 1, "pieces": [1, 2, 3], "title": "A turning rod", "steps": 2, "synced": True,
+                   "times": [30.0, 35.0]}
+    assert eight["drawing"] == 8 and eight["pieces"][0] == 8 and 9 in eight["pieces"] and eight["synced"]
+    # files the POST would not hand back (an old format, a half-written file, a broken one) are not listed
+    (d / "popout" / "005.json").write_text("{}", encoding="utf-8")
+    (d / "popout" / "006.v2.abcd1234.tmp").write_text("{", encoding="utf-8")
+    (d / "popout" / "007.v2.json").write_text("{not json", encoding="utf-8")
+    assert [x["drawing"] for x in client.get("/api/jobs/lec/popouts").json()["drawings"]] == [1, 8]
+    # new rules: every scene is made again on its next open, so none is listed
+    monkeypatch.setattr(popout, "SCENE_RULES_VERSION", "test-next")
+    assert client.get("/api/jobs/lec/popouts").json() == {"drawings": []}
+
+
+def test_the_list_follows_the_lecture_version_and_type(api):
+    client, d, use = api
+    use(FakeClient([answer([obj("p", "point", points=[["0", "0", "0"]])],
+                            [step("", highlight=["p"]), step("", caption="b", highlight=["p"])])]))
+    assert client.post("/api/jobs/lec/popout/1").json()["synced"] is False
+    (drawing,) = client.get("/api/jobs/lec/popouts").json()["drawings"]
+    assert drawing["synced"] is False and drawing["times"] == [] and drawing["steps"] == 2
+    replay = json.loads((d / "replay.json").read_text(encoding="utf-8"))
+    replay["subject"] = "cones"  # reprocessed: the scene is out of date
+    (d / "replay.json").write_text(json.dumps(replay), encoding="utf-8")
+    assert client.get("/api/jobs/lec/popouts").json() == {"drawings": []}
+    replay["type"] = "slides"
+    (d / "replay.json").write_text(json.dumps(replay), encoding="utf-8")
+    assert client.get("/api/jobs/lec/popouts").json() == {"drawings": []}
+    (d / "replay.json").unlink()  # not processed yet
+    assert client.get("/api/jobs/lec/popouts").json() == {"drawings": []}
+    r = client.get("/api/jobs/nope/popouts")
+    assert r.status_code == 404 and r.json()["detail"] == "no such job"
+
+
+def test_the_list_holds_only_what_a_click_on_its_badge_opens_without_a_model_call(api, monkeypatch):
+    # The board puts a "3D" badge on each listed drawing, and a click asks POST popout/{drawing}: a file under any
+    # other number (a piece with no 3D view, one that opens another drawing, no such piece) or a lecture whose word
+    # times are still being worked out would make that click a paid model call or an error.
+    client, d, use = api
+    use(FakeClient([GOOD]))
+    assert client.post("/api/jobs/lec/popout/1").status_code == 200
+    made = (d / "popout" / "001.v2.json").read_text(encoding="utf-8")
+    for other in (2, 6, 42):  # a label inside drawing 1, plain text, no such piece
+        (d / "popout" / f"{other:03d}.v2.json").write_text(made, encoding="utf-8")
+    monkeypatch.setattr(server, "_meta_client", lambda: pytest.fail("the list never calls the model"))
+    assert [x["drawing"] for x in client.get("/api/jobs/lec/popouts").json()["drawings"]] == [1]
+    for other in (6, 42):
+        assert client.post(f"/api/jobs/lec/popout/{other}").status_code == 404
+    replay = json.loads((d / "replay.json").read_text(encoding="utf-8"))
+    replay["transcript"]["timing"] = "proportional"  # the aligner still running: POST answers 409
+    raw = json.dumps(replay).encode("utf-8")
+    (d / "replay.json").write_bytes(raw)
+    (d / "status.json").write_text(json.dumps({"state": "running"}), encoding="utf-8")
+    scene = json.loads(made)
+    scene["version"] = popout.scene_version(raw)
+    (d / "popout" / "001.v2.json").write_text(json.dumps(scene), encoding="utf-8")
+    assert client.post("/api/jobs/lec/popout/1").status_code == 409
+    assert client.get("/api/jobs/lec/popouts").json() == {"drawings": []}
+
+
+@pytest.mark.parametrize("broken", [{"steps": 5}, {"pieces": 5}, {"steps": "abc"}, {"title": None},
+                                    {"pieces": [True, 2.5, "x"]}, {"steps": [{"t": 1e400}, 7]}])
+def test_a_broken_scene_file_never_breaks_the_list(api, broken):
+    client, d, use = api
+    use(FakeClient([GOOD]))
+    assert client.post("/api/jobs/lec/popout/1").status_code == 200
+    path = d / "popout" / "001.v2.json"
+    scene = {**json.loads(path.read_text(encoding="utf-8")), **broken}
+    path.write_text(json.dumps(scene), encoding="utf-8")
+    r = client.get("/api/jobs/lec/popouts")
+    assert r.status_code == 200
+    (one,) = r.json()["drawings"]
+    assert one["drawing"] == 1 and one["pieces"] and all(type(p) is int for p in one["pieces"])
+    assert isinstance(one["title"], str) and all(math.isfinite(t) for t in one["times"])
+    # as the player reads it (cleanScene): a synced scene keeps only its steps with a time
+    assert one["steps"] == len(one["times"]) if one["synced"] else one["times"] == []
+
+
+def test_an_unexpected_failure_of_the_list_is_one_plain_line(api, monkeypatch):
+    client, d, _ = api
+    monkeypatch.setattr(popout, "list_scenes", lambda job_dir: 1 / 0)
+    r = TestClient(server.app, raise_server_exceptions=False).get("/api/jobs/lec/popouts")
+    assert r.status_code == 500 and "\n" not in r.json()["detail"] and "ZeroDivisionError" in r.json()["detail"]
+
+
+def test_a_label_object_that_only_repeats_a_name_on_screen_is_dropped():
+    # test2 #7 (rules 6): lab_a, lab_b, lab_c beside the vectors a, b, c put each name twice on screen.
+    o = ["0", "0", "0"]
+    objs = [obj("vec_a", "vector", points=[o, ["2", "0", "0"]], label="a"),
+            obj("vec_b", "vector", points=[o, ["0", "2", "0"]], label="b"),
+            angle("beta_angle", [o, ["1", "0", "0"], ["0", "0", "1"]], label="beta"),
+            obj("lab_a", "label", points=[["1", "-0.3", "0"]], label="a"),        # vec_a is always there: dropped
+            obj("lab_b", "label", points=[["0", "1", "-0.3"]], label="b"),        # vec_b is hidden then: kept
+            obj("lab_beta", "label", points=[["0.5", "0", "0.5"]], label="β"),    # the angle's name as a letter
+            obj("apex", "label", points=[["0", "0", "2"]], label="apex"),         # nothing else says it: kept
+            obj("edge", "segment", points=[o, ["0", "0", "2"]])]
+    steps = [step("0:20", caption="the edges", show=["lab_a", "lab_b"], highlight=["vec_a"]),
+             step("0:30", caption="b goes", hide=["vec_b"]),
+             step("0:40", caption="the apex", show=["apex", "lab_beta"])]
+    notes = []
+    scene = popout.clean_scene(answer(objs, steps), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    ids = [x["id"] for x in scene["objects"]]
+    assert "lab_a" not in ids and "lab_beta" not in ids
+    assert {"vec_a", "vec_b", "beta_angle", "lab_b", "apex", "edge"} <= set(ids)
+    assert "object lab_a dropped: its label 'a' is said already by vec_a, there whenever it is" in notes
+    assert any(n.startswith("object lab_beta dropped") and "beta_angle" in n for n in notes)
+    first = scene["steps"][0]
+    assert first["show"] == ["lab_b"] and first["highlight"] == ["vec_a"]
+    assert all("lab_a" not in s[k] for s in scene["steps"] for k in ("show", "hide", "highlight"))
+    assert scene["steps"][2]["show"] == ["apex"]
+    # a step that only showed a dropped label changes nothing: dropped too, with its note
+    steps = [step("0:20", caption="name it", show=["lab_a"]), step("0:30", caption="edge", highlight=["edge"])]
+    notes = []
+    scene = popout.clean_scene(answer(objs, steps), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert [s["caption"] for s in scene["steps"]] == ["edge"]
+    assert any("changes nothing" in n and "name it" in n for n in notes)
+
+
+@pytest.mark.parametrize("text, n, cut", [
+    ("position along x parabola", 24, "position along x…"),          # synth3d-saddle: never "parabo…"
+    ("half length of traces", 24, "half length of traces"),          # fits: as it is
+    ("a b c d e f g h i j k l m", 10, "a b c d e…"),
+    ("supercalifragilistic expialidocious", 24, "supercalifragilistic…"),
+    ("averyveryverylongwordwithnospace", 12, "averyveryve…"),          # one word longer than the field: cut inside
+    ("x " + "y" * 30, 12, "x yyyyyyyyy…"),                           # the word boundary would keep too little
+    ("one two, three", 10, "one two…"),                              # no comma left before the dots
+])
+def test_a_long_text_is_cut_at_the_end_of_a_word(text, n, cut):
+    out = popout._str(text, n)
+    assert out == cut and len(out) <= n
+
+
+def test_an_angle_with_a_short_arm_gets_a_radius_that_shows():
+    # synth3d-vector3d: theta between the x axis, given by the point (1, 0, 0), and v = (3, 2, 4): the auto radius
+    # (0.3 of the 1-unit arm) drew a wedge nobody could see.
+    o = ["0", "0", "0"]
+    L = {"name": "L", "value": 5, "min": 1, "max": 6, "label": "", "unit": ""}
+    # each at a vertex of its own (angles that share one are nested: test_angles_at_one_corner_are_nested)
+    objs = [angle("theta", [o, ["1", "0", "0"], ["3", "2", "4"]], label="theta"),
+            angle("cell", [["0", "20", "0"], ["2.5", "20", "0"], ["0", "20", "5"]], label="beta"),  # 2.5, 5: as it is
+            angle("given", [["0", "40", "0"], ["1", "40", "0"], ["0", "40", "9"]], size=["0.5"]),  # its own: kept
+            angle("shrinks", [["0", "60", "0"], ["1", "60", "0"], ["0", "60 + L", "0"]], label="phi")]  # L 5 -> 2
+    notes = []
+    scene = popout.clean_scene(answer(objs, [step("0:20", caption="smaller", set=[{"param": "L", "to": 2}])], [L]),
+                               piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    size = {x["id"]: x["size"] for x in scene["objects"]}
+    assert size["theta"] == ["0.808"]  # 0.15 x 5.385, under 0.9 x 1
+    assert size["cell"] == [] and size["given"] == ["0.5"]
+    assert size["shrinks"] == []  # with L = 2 the most it may have is 0.3, the auto radius: nothing gained
+    assert "object theta: radius 0.808 (its arms are 1 and 5.39 long: 0.3 of the shorter would hardly show)" in notes
+    lo, hi = scene["bounds"]
+    assert lo[0] == pytest.approx(-0.808) and hi[0] == pytest.approx(0.808)  # framed by vertex +- its radius
+    assert measured(scene, "theta") == [pytest.approx(56.145, abs=1e-3)] * 2
+
+
+# ---------- rules from the critic's pass (fixer, rules 6) ----------
+TRICLINIC = [{"name": "a", "value": 3, "min": 1, "max": 6, "label": "edge a", "unit": ""},
+             {"name": "b", "value": 3, "min": 1, "max": 6, "label": "edge b", "unit": ""},
+             {"name": "c", "value": 3, "min": 1, "max": 6, "label": "edge c", "unit": ""},
+             {"name": "alpha", "value": 90, "min": 60, "max": 120, "label": "angle alpha", "unit": "deg"},
+             {"name": "beta", "value": 90, "min": 60, "max": 120, "label": "angle beta", "unit": "deg"},
+             {"name": "gamma", "value": 90, "min": 60, "max": 120, "label": "angle gamma", "unit": "deg"}]
+# test2 #4's defs (its cz is clamped, so a cell that cannot exist is drawn as a flat plate)
+TRICLINIC_DEFS = [{"name": "bx", "expr": "b*cos(gamma*deg)"}, {"name": "by", "expr": "b*sin(gamma*deg)"},
+                  {"name": "cx", "expr": "c*cos(beta*deg)"},
+                  {"name": "cy", "expr": "c*(cos(alpha*deg) - cos(beta*deg)*cos(gamma*deg))/sin(gamma*deg)"},
+                  {"name": "cz", "expr": "sqrt(max(c*c - cx*cx - cy*cy, 0.2))"}]
+
+
+def corner_cell(steps):
+    o = ["0", "0", "0"]
+    objs = [obj("face", "polygon", points=[o, ["a", "0", "0"], ["a + bx", "by", "0"], ["bx", "by", "0"]]),
+            obj("edge_c", "segment", points=[o, ["cx", "cy", "cz"]], label="c"),
+            obj("top", "polygon", points=[["cx", "cy", "cz"], ["a + cx", "cy", "cz"],
+                                          ["a + bx + cx", "by + cy", "cz"]]),
+            angle("alpha_angle", [o, ["bx", "by", "0"], ["cx", "cy", "cz"]], label="alpha"),
+            angle("beta_angle", [o, ["a", "0", "0"], ["cx", "cy", "cz"]], label="beta"),
+            angle("gamma_angle", [o, ["a", "0", "0"], ["bx", "by", "0"]], label="gamma")]
+    raw = answer(objs, steps, TRICLINIC)
+    raw["defs"] = TRICLINIC_DEFS
+    return raw
+
+
+SERIES = [step("0:20", caption="Cubic: all angles 90 degrees"),
+          step("0:40", caption="Rhombohedral", show=["alpha_angle", "beta_angle", "gamma_angle"],
+               set=[{"param": "alpha", "to": 80}, {"param": "beta", "to": 80}, {"param": "gamma", "to": 80}]),
+          step("1:00", caption="Monoclinic: beta is not 90",
+               set=[{"param": "a", "to": 2.5}, {"param": "b", "to": 4}, {"param": "c", "to": 5},
+                    {"param": "alpha", "to": 90}, {"param": "beta", "to": 75}, {"param": "gamma", "to": 90}])]
+
+
+def test_the_word_angles_shows_the_angles_not_on_screen_yet():
+    # test2 #4: "all angles 90 degrees" for 90 s with no angle marked; they came only at "Rhombohedral"
+    notes = []
+    scene = popout.clean_scene(corner_cell(SERIES), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert scene["steps"][0]["show"] == ["alpha_angle", "beta_angle", "gamma_angle"]
+    assert "step 1: alpha_angle shown: its caption names 'angles (alpha)'" in notes
+    # a whole word only: "triangle" and "angled" name no angle
+    steps = [step("0:20", caption="a triangle, angled", set=[{"param": "a", "to": 4}]),
+             step("0:40", caption="the angle", show=["alpha_angle", "beta_angle", "gamma_angle"])]
+    scene = popout.clean_scene(corner_cell(steps), piece=1, pieces=[1], version="v", clip=CLIP)
+    assert scene["steps"][0]["show"] == [] and len(scene["steps"]) == 2
+
+
+def test_angles_at_one_corner_are_nested():
+    # test2 #4: alpha, beta and gamma at one corner, all of radius 0.75: three marks on top of each other
+    notes = []
+    raw = corner_cell(SERIES)
+    raw["objects"].append(angle("lone", [["9", "0", "0"], ["10", "0", "0"], ["9", "1", "0"]], label="phi"))
+    scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    size = {o["id"]: o["size"] for o in scene["objects"] if o["type"] == "angle"}
+    assert size["lone"] == []  # at a vertex of its own: the auto radius
+    envs = popout._envs(scene, popout.param_states(scene["params"], scene["steps"], finals=True))
+    ids = ("alpha_angle", "beta_angle", "gamma_angle")
+    shapes = {i: popout.Shape(next(o for o in scene["objects"] if o["id"] == i), popout._names(scene), scene["axes"])
+              for i in ids}
+    for env in envs:
+        arms = {i: s.arms(env) for i, s in shapes.items()}
+        r = [arms[i][3] for i in ids]
+        shortest = min(float(np.linalg.norm(v)) for a in arms.values() for v in (a[1], a[2]))
+        assert r == pytest.approx([0.3 * shortest, 0.435 * shortest, 0.57 * shortest])
+        assert max(r) < shortest  # inside every arm
+    assert any("share a vertex: radii 1, 1.45, 1.9" in n for n in notes)
+
+
+def test_angle_ranges_hold_only_shapes_that_exist():
+    # test2 #4: alpha = beta = gamma = 120 (each 60..120) made a flat plate and read 119.9 on the labels
+    notes = []
+    scene = popout.clean_scene(corner_cell(SERIES), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    rng = {p["name"]: (p["min"], p["max"]) for p in scene["params"]}
+    assert rng["a"] == (1, 6)  # lengths are not touched
+    for n in ("alpha", "beta", "gamma"):
+        lo, hi = rng[n]
+        assert 60 < lo <= 75 and 90 <= hi < 120 and lo == int(lo) and hi == int(hi)  # still the lecture's values
+    cos = lambda d: math.cos(math.radians(d))  # noqa: E731
+    for al in rng["alpha"]:
+        for be in rng["beta"]:
+            for ga in rng["gamma"]:
+                gram = 1 - cos(al) ** 2 - cos(be) ** 2 - cos(ga) ** 2 + 2 * cos(al) * cos(be) * cos(ga)
+                assert gram >= popout.FLAT_MIN - 1e-6
+    assert "param alpha: range narrowed from 60..120 to" in " ".join(notes)
+    # one angle alone (the monoclinic beta of `cell`) exists over its whole range: left as it is
+    scene = popout.clean_scene(cell([step("0:20", caption="lean", set=[{"param": "beta", "to": 75}])]),
+                               piece=1, pieces=[1], version="v", clip=CLIP)
+    assert [(p["min"], p["max"]) for p in scene["params"] if p["name"] == "beta"] == [(60, 120)]
+
+
+def test_a_step_looks_from_where_what_it_points_at_is_seen():
+    # synth3d-vector3d: v = (2, -3, 4) seen from "iso" (24 degrees off its line) showed at 0.41 of its length
+    o = ["0", "0", "0"]
+    objs = [obj("x_axis", "vector", points=[o, ["0", "-5", "0"]], label="x"),
+            obj("y_axis", "vector", points=[o, ["5", "0", "0"]], label="y"),
+            obj("z_axis", "vector", points=[o, ["0", "0", "5"]], label="z"),
+            obj("v", "vector", points=[o, ["2", "-3", "4"]], label="v"),
+            obj("comp", "segment", points=[o, ["0", "-3", "0"]])]
+    steps = [step("0:10", caption="axes", highlight=["x_axis", "y_axis", "z_axis"], camera="iso"),
+             step("0:20", caption="the vector", show=["v"], camera="iso"),
+             step("0:30", caption="still it", highlight=["v"]),  # keeps the camera the step before turned to
+             step("0:40", caption="first along x", show=["comp"], camera="iso")]
+    notes = []
+    scene = popout.clean_scene(answer(objs, steps), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert [s["camera"] for s in scene["steps"]] == ["iso", "side", "keep", "iso"]
+    assert "step 2: camera side instead of iso: v seen 0.91 face on, not 0.41" in notes
+    assert sum("camera" in n for n in notes) == 1
+    # an angle: its plane faces the camera when its normal is along the line of sight
+    theta = angle("theta", [o, ["0", "-1", "0"], ["2", "-3", "4"]], label="theta")
+    notes = []
+    scene = popout.clean_scene(answer(objs + [theta], [step("0:10", caption="theta", show=["theta"], camera="iso")]),
+                               piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert scene["steps"][0]["camera"] == "side" and "theta seen 0.75 face on, not 0.23" in " ".join(notes)
+
+
+def test_a_param_label_up_to_32_characters_is_whole():
+    # synth3d-saddle: "position along x parabola" (25) was cut to "position along x…" in the value chips
+    assert popout.PARAM_LABEL_CHARS == 32
+    p = {"name": "px", "value": 1, "min": -2, "max": 2, "label": "position along x parabola", "unit": ""}
+    assert popout.clean_params([p], [])[0]["label"] == "position along x parabola"
+
+
+def test_the_prompt_asks_for_points_built_from_the_defs_and_angles_where_marked():
+    task = popout.SCENE_TASK
+    assert "Build every point from the params and defs" in task  # test2 #7: the prism walls ignored alpha
+    assert "goes at the corner where it is marked" in task  # test2 #7: gamma at the hexagon's centre
+    assert "at most 32 characters" in task

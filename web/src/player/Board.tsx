@@ -1,6 +1,6 @@
 import {
   forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
-  type RefObject,
+  type CSSProperties, type RefObject,
 } from 'react';
 import type { BoardData, BoardLine, Box, Piece, SlideAnnotation } from '../types';
 import { AnnotationLayer, type AnnotationLayerHandle, type Veil } from './AnnotationLayer';
@@ -10,8 +10,9 @@ import { texHtml } from './tex';
 import { cleanLatex } from './texClean';
 import { texLayouts, writtenText } from './texLayout';
 import { formatTime, isWrittenLine, schedule, seekTarget, typesetIds } from './timing';
-import { canPopout } from './popoutable';
+import { badgePlaces, boxOverlap, canPopout, drawingOnBoard, explainedAt, type BadgeSpot, type MadeScene } from './popoutable';
 import { preloadView3D } from './popoutLoader';
+import { labelText } from './sceneText';
 import { kindLabel, sameReading, tipTex } from './tip';
 
 export interface BoardHandle {
@@ -33,9 +34,17 @@ interface Props {
   onPopout?(p: Piece): void;
   /** Attach a piece to an Ask Muse question: its whole line when that line is finished by now (else line is null). */
   onAsk?(p: Piece, line: BoardLine | null): void;
+  /** Drawings whose 3D view is made already: a "3D" badge on each (once it is on the board), and "Watch in 3D" while
+   *  the lecture explains it. */
+  made?: MadeScene[];
 }
 
 const HIGHLIGHT_MS = 2400;
+/** The "3D" badge's and the "Watch in 3D" pill's sizes (CSS pixels, measured at 1366 px; a little smaller on a phone)
+ *  and their gap to the drawing: the board finds each a place this big (styles.css .b3d). */
+const PILL_PX: [number, number] = [104, 23];
+const BADGE_PX: [number, number] = [46, 20];
+const BADGE_GAP_PX = 3;
 
 /** Largest font size (board px, at most maxFont) at which the content fits the piece's box. */
 function fitText(inner: HTMLElement, w: number, h: number, maxFont: number): number {
@@ -191,7 +200,7 @@ const TypesetPiece = memo(function TypesetPiece(props: {
 // Memoised: the player re-renders on every spoken word, the board only needs to when its props change.
 export const Board = memo(
   forwardRef<BoardHandle, Props>(function Board(props, ref) {
-    const { jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay, onPopout, onAsk } = props;
+    const { jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay, onPopout, onAsk, made } = props;
     const [W, H] = board.size;
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const stageRef = useRef<HTMLDivElement>(null);
@@ -372,6 +381,54 @@ export const Board = memo(
       changeHover(p);
     };
 
+    // The drawings with a made 3D view, and their badges (shown, and turned into "Watch in 3D", frame by frame).
+    const madeHere = useMemo(
+      () =>
+        (made ?? [])
+          .map((m) => ({ m, p: board.pieces.find((p) => p.id === m.drawing) }))
+          .filter((x): x is { m: MadeScene; p: Piece } => !!x.p),
+      [made, board],
+    );
+    const madeRef = useRef(madeHere);
+    madeRef.current = madeHere;
+    // Where each badge goes: beside its drawing where it covers the least writing, the small badge and the wider
+    // "Watch in 3D" pill each (popoutable.ts badgePlaces). The drawing's own writing (its labels too) counts double:
+    // the pill shows while the lecture explains it. Worked out again when the board's size changes and as the
+    // pieces' images (their ink) arrive.
+    const spots = useMemo(() => {
+      const r = rendererRef.current;
+      const k = cssW > 0 ? W / cssW : 1; // board pixels per CSS pixel
+      const px = (s: [number, number]): [number, number] => [s[0] * k, s[1] * k];
+      const out = new Map<number, ReturnType<typeof badgePlaces>>();
+      const placed: Box[] = []; // badges never sit on each other (two drawings side by side on a phone)
+      for (const { m, p } of madeHere) {
+        const own = new Set([p.id, ...m.pieces]);
+        const ink = (b: Box) =>
+          (r ? r.inkIn(...b) + r.inkIn(...b, own) : 0) + 50 * placed.reduce((n, q) => n + boxOverlap(b, q), 0);
+        const spot = badgePlaces(p.box, [W, H], px(BADGE_PX), px(PILL_PX), BADGE_GAP_PX * k, ink);
+        out.set(p.id, spot);
+        placed.push(spot.badge.box, spot.pill.box);
+      }
+      return out;
+    }, [madeHere, cssW, W, H, inks]); // `inks` changes as the pieces' images (their ink) arrive
+    const badgeEls = useRef(new Map<number, HTMLElement>()).current;
+    const paintBadges = useCallback(
+      (t: number) => {
+        const r = rendererRef.current;
+        if (!r || !badgeEls.size) return;
+        const now = new Set(explainedAt(madeRef.current.map((x) => x.m), t).map((m) => m.drawing));
+        const made = new Map(madeRef.current.map((x) => [x.m.drawing, x.m]));
+        const seen = (pid: number) => r.isVisible(pid, t);
+        for (const [id, el] of badgeEls) {
+          const m = made.get(id);
+          const state = !(m ? drawingOnBoard(m, seen) : seen(id)) ? 'off' : now.has(id) ? 'pill' : 'badge';
+          if (el.dataset.state !== state) el.dataset.state = state;
+        }
+      },
+      [badgeEls],
+    );
+    useEffect(() => paintBadges(timeRef.current ?? 0), [madeHere, paintBadges, timeRef]);
+
     const litTimer = useRef<number | undefined>(undefined);
     useEffect(() => () => window.clearTimeout(litTimer.current), []);
     useImperativeHandle(
@@ -384,6 +441,7 @@ export const Board = memo(
           const h = hoverRef.current;
           if (h && !r.isVisible(h.id, t)) changeHover(null);
           r.render(t);
+          paintBadges(t);
         },
         highlight(ids: (number | string)[]) {
           const b = latestBoard.current;
@@ -401,7 +459,7 @@ export const Board = memo(
           litTimer.current = window.setTimeout(() => setLit(null), HIGHLIGHT_MS);
         },
       }),
-      [changeHover],
+      [changeHover, paintBadges],
     );
 
     /** The finished line a piece belongs to at time t (its tooltip reads, and Ask attaches, the whole line). */
@@ -529,8 +587,8 @@ export const Board = memo(
         onPointerMove={(e) => {
           const r = stageRef.current?.getBoundingClientRect();
           if (r) pointerRef.current = { x: e.clientX - r.left, y: e.clientY - r.top };
-          if (tipRef.current?.contains(e.target as Node)) {
-            cancelLeave(); // on the tooltip: keep it
+          if (tipRef.current?.contains(e.target as Node) || (e.target as HTMLElement).closest?.('.b3d')) {
+            cancelLeave(); // on the tooltip (or a 3D badge): keep it
             return;
           }
           hoverTo(pick(e.clientX, e.clientY));
@@ -630,6 +688,67 @@ export const Board = memo(
             );
           })}
         </div>
+
+        {onPopout && madeHere.length > 0 && (
+          <div className="b3d-layer">
+            {madeHere.map(({ m, p }) => {
+              const spot = spots.get(p.id);
+              if (!spot) return null;
+              /** A spot as CSS: the edge it keeps (its right edge, or its left one beside the drawing) and its top. */
+              const place = ({ box: [x, y, w], align }: BadgeSpot) => ({
+                left: `${((align === 'right' ? x + w : x) / W) * 100}%`,
+                top: `${(y / H) * 100}%`,
+                shift: align === 'right' ? 'translateX(-100%)' : 'none',
+              });
+              const b = place(spot.badge);
+              const pl = place(spot.pill);
+              const name = labelText(m.title) || 'this drawing';
+              return (
+                <button
+                  key={p.id}
+                  ref={(el) => {
+                    if (el) badgeEls.set(p.id, el);
+                    else badgeEls.delete(p.id);
+                  }}
+                  className="b3d"
+                  data-state="off"
+                  data-long={spot.long ? undefined : 'no'}
+                  style={
+                    {
+                      '--b3d-left': b.left,
+                      '--b3d-top': b.top,
+                      '--b3d-shift': b.shift,
+                      '--b3d-pill-left': pl.left,
+                      '--b3d-pill-top': pl.top,
+                      '--b3d-pill-shift': pl.shift,
+                    } as CSSProperties
+                  }
+                  aria-label={`View in 3D: ${name}`}
+                  title={`${name}: open its 3D view${m.steps ? `, ${m.steps} steps` : ''}`}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    cancelLeave();
+                    changeHover(null);
+                    onPopout(p);
+                  }}
+                >
+                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden>
+                    <path
+                      d="M8 1.6l5.6 3.2v6.4L8 14.4l-5.6-3.2V4.8zM2.4 4.8L8 8l5.6-3.2M8 8v6.4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.4"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span className="b3d-short">3D</span>
+                  <span className="b3d-long">Watch in 3D</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {hover && (
           <div

@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import {
   distinctCurveColors, fitRange, formatTick, looksAlike, niceStep, niceTicks, sampleSegments, stageColors, stageInk,
 } from '../src/player/plotMath.ts';
-import { canPopout, looksLikeGraphEquation } from '../src/player/popoutable.ts';
-import type { Piece } from '../src/types.ts';
+import {
+  badgePlaces, badgeSpot, boxOverlap, canPopout, cleanMadeScenes, drawingOnBoard, explainedAt, looksLikeGraphEquation, PILL_AFTER, PILL_BEFORE,
+} from '../src/player/popoutable.ts';
+import type { Box, Piece } from '../src/types.ts';
 
 const maxGap = (seg: [number, number][], xr: number, yr: number) => {
   let g = 0;
@@ -177,4 +179,114 @@ test('which pieces get a 3D view', () => {
   assert.ok(!looksLikeGraphEquation('y = 3'));
   assert.ok(!looksLikeGraphEquation('y = \\exp(2)'));
   assert.ok(!looksLikeGraphEquation('x = 3'));
+});
+
+// ---------------------------------------------------------------- drawings whose 3D view is already made
+
+test('the list of made 3D views is read defensively', () => {
+  const made = cleanMadeScenes({
+    drawings: [
+      { drawing: 4, pieces: [4, 5], title: 'Monoclinic  cell', steps: 8, synced: true, times: [189.4, 14.0, 'x', 49.3] },
+      { drawing: 7, pieces: [7], title: 'Hexagonal prism', steps: 12, synced: false, times: [1, 2] }, // not synced: no times
+      { drawing: 9, pieces: [], title: '', steps: 3, synced: true, times: [] }, // synced with no times: not synced
+      { drawing: 4, pieces: [], title: 'again', steps: 1, synced: false, times: [] }, // the drawing is listed already
+      { drawing: 'x' },
+      null,
+      'nope',
+    ],
+  });
+  assert.deepEqual(made, [
+    { drawing: 4, pieces: [4, 5], title: 'Monoclinic cell', steps: 8, synced: true, times: [14.0, 49.3, 189.4] },
+    { drawing: 7, pieces: [7], title: 'Hexagonal prism', steps: 12, synced: false, times: [] },
+    { drawing: 9, pieces: [], title: '', steps: 3, synced: false, times: [] },
+  ]);
+  // an older server (its 404 body), a slide lecture, nothing at all: no list
+  assert.deepEqual(cleanMadeScenes({ detail: 'Not Found' }), []);
+  assert.deepEqual(cleanMadeScenes({ drawings: [] }), []);
+  assert.deepEqual(cleanMadeScenes(null), []);
+  assert.deepEqual(cleanMadeScenes([{ drawing: 1 }]), []);
+});
+
+test('"Watch in 3D" from a second before the first step to five seconds after the last', () => {
+  const made = cleanMadeScenes({
+    drawings: [
+      { drawing: 4, pieces: [4], title: 'a', steps: 3, synced: true, times: [100, 120, 150] },
+      { drawing: 7, pieces: [7], title: 'b', steps: 2, synced: true, times: [140, 160] },
+      { drawing: 9, pieces: [9], title: 'c', steps: 2, synced: false, times: [] },
+    ],
+  });
+  const at = (t: number) => explainedAt(made, t).map((m) => m.drawing);
+  assert.deepEqual(at(98.9), []);
+  assert.deepEqual(at(100 - PILL_BEFORE), [4]);
+  assert.deepEqual(at(130), [4]);
+  assert.deepEqual(at(145), [4, 7]);
+  assert.deepEqual(at(150 + PILL_AFTER), [4, 7]);
+  assert.deepEqual(at(155.1), [7]);
+  assert.deepEqual(at(165.1), []);
+  assert.deepEqual(at(NaN), []);
+});
+
+// The badge of a made view covers as little writing as it can (test2 #4: inside the drawing's top-right corner it
+// covered the edge label "b").
+const inkOf = (ink: Box[]) => (r: Box) => ink.reduce((n, b) => n + boxOverlap(r, b), 0);
+
+test('the area two boxes share', () => {
+  assert.equal(boxOverlap([0, 0, 10, 10], [5, 5, 10, 10]), 25);
+  assert.equal(boxOverlap([0, 0, 10, 10], [10, 0, 10, 10]), 0);
+  assert.equal(boxOverlap([0, 0, 10, 10], [20, 20, 1, 1]), 0);
+  assert.equal(boxOverlap([2, 2, 2, 2], [0, 0, 10, 10]), 4);
+});
+
+test("a made view's badge goes beside the drawing where there is no writing, never off the board", () => {
+  const board: [number, number] = [800, 400];
+  const drawing: Box = [100, 200, 100, 120];
+  const badge: [number, number] = [60, 20];
+  // nothing around: just above the drawing's top-right corner (right edges lined up)
+  assert.deepEqual(badgeSpot(drawing, board, badge, 4, inkOf([drawing])), { box: [140, 176, 60, 20], align: 'right' });
+  // writing above it: beside its top-right corner
+  // (growing away from the drawing)
+  assert.deepEqual(badgeSpot(drawing, board, badge, 4, inkOf([drawing, [90, 150, 200, 45]])), { box: [204, 200, 60, 20], align: 'left' });
+  // writing above and beside: under it
+  assert.deepEqual(badgeSpot(drawing, board, badge, 4, inkOf([drawing, [90, 150, 200, 45], [204, 190, 100, 60]])), { box: [140, 324, 60, 20], align: 'right' });
+  // above and under are off the board (a drawing as tall as the board): beside it
+  assert.deepEqual(badgeSpot([100, 0, 100, 400], board, badge, 4, inkOf([])), { box: [204, 0, 60, 20], align: 'left' });
+  // nowhere clear: the spot that covers the least writing, here inside its own corner as before
+  const inside = (r: Box) => r[0] >= 100 && r[1] >= 200 && r[0] + r[2] <= 200 && r[1] + r[3] <= 320;
+  assert.deepEqual(badgeSpot(drawing, board, badge, 4, (r) => (inside(r) ? 5 : 10)), { box: [136, 204, 60, 20], align: 'right' });
+  // a drawing at the board's right edge: never off the board
+  const s = badgeSpot([700, 100, 100, 100], board, badge, 4, inkOf([[700, 100, 100, 100], [600, 60, 200, 40]])).box;
+  assert.ok(s[0] >= 0 && s[1] >= 0 && s[0] + s[2] <= 800 && s[1] + s[3] <= 400, JSON.stringify(s));
+  // a badge bigger than the board still gets a place on it
+  const big = badgeSpot([0, 0, 10, 10], [50, 20], [80, 30], 2, inkOf([])).box;
+  assert.ok(big[0] === 0 && big[1] === 0, JSON.stringify(big));
+});
+
+test('"Watch in 3D" is written out only where it covers no more writing than the small badge', () => {
+  const board: [number, number] = [800, 400];
+  const drawing: Box = [100, 200, 100, 120];
+  // room above the drawing for both
+  const free = badgePlaces(drawing, board, [40, 20], [100, 24], 4, inkOf([drawing]));
+  assert.equal(free.long, true);
+  assert.deepEqual(free.badge, { box: [160, 176, 40, 20], align: 'right' });
+  assert.deepEqual(free.pill, { box: [100, 172, 100, 24], align: 'right' });
+  // test2 #4: writing above and beside leaves room for the badge only (on its left), so the pill stays the badge's
+  // size and place (lit up, not written out) instead of covering the writing above
+  const tight = badgePlaces([72, 206, 111, 169], [800, 391], [54, 24], [123, 27], 3.5,
+    inkOf([[72, 206, 111, 169], [95, 150, 91, 45], [187, 190, 140, 30]]));
+  assert.equal(tight.long, false);
+  assert.deepEqual(tight.badge, { box: [14.5, 206, 54, 24], align: 'right' });
+  assert.deepEqual(tight.pill, tight.badge);
+});
+
+test('a made drawing is on the board as soon as any of its pieces is', () => {
+  // synth3d-saddle: the drawing's anchor (its label, piece 23) is written at 40.7 s, its curves (8, 12, 17) from 13 s;
+  // three of its five steps came before the badge did
+  const m = { drawing: 23, pieces: [23, 8, 12, 17] };
+  const drawnAt: Record<number, number> = { 23: 40.67, 8: 13, 12: 23, 17: 31.7 };
+  const on = (t: number) => drawingOnBoard(m, (id) => t >= (drawnAt[id] ?? Infinity));
+  assert.equal(on(12), false);
+  assert.equal(on(13), true);
+  assert.equal(on(21.15), true);
+  assert.equal(drawingOnBoard({ drawing: 5, pieces: [] }, (id) => id === 5), true);
+  assert.equal(drawingOnBoard({ drawing: 5, pieces: [5] }, () => false), false);
 });

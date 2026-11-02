@@ -1,5 +1,5 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { getJob, getReplay, jobFileUrl } from '../api';
+import { getJob, getMadeScenes, getReplay, jobFileUrl } from '../api';
 import { AskDrawer } from '../ask/AskDrawer';
 import { SparkIcon } from '../ask/icons';
 import { lectureIndex } from '../ask/items';
@@ -13,7 +13,9 @@ import { drawable } from './slideTiming';
 import {
   activeWord, chapterAt, formatTime, groupWords, isWrittenLine, lastStartedWord, seekTarget, turnsFromWords,
 } from './timing';
+import { fieldTakesKey } from './keys';
 import { LazyView3D, View3DFallback } from './popoutLoader';
+import { cleanMadeScenes, type MadeScene } from './popoutable';
 import { Chapters, Transcript } from './Transcript';
 
 const SKIP = 5;
@@ -271,6 +273,26 @@ export function Player({
   // The 3D view takes the board's place while the video keeps playing: its steps follow the video's clock.
   const boardPanelRef = useRef<HTMLElement>(null);
   const openPopout = useCallback((p: Piece) => setPopout(p), []);
+  // The drawings whose 3D view is made already (the board's "3D" badges and "Watch in 3D"): asked once per lecture,
+  // and again when the view has made a new one. GET only: it never makes a view (that costs Muse Spark credit).
+  const [made, setMade] = useState<MadeScene[]>([]);
+  const [madeAsk, setMadeAsk] = useState(0);
+  const madeRef = useRef(made);
+  madeRef.current = made;
+  const hasBoard = !!replay.board;
+  // While the word times are refined the server lists none (a view made then would follow the old times): asked
+  // again once they are.
+  useEffect(() => {
+    if (!hasBoard || refining) return setMade([]);
+    const ctrl = new AbortController();
+    getMadeScenes(jobId, ctrl.signal).then((raw) => {
+      if (!ctrl.signal.aborted) setMade(cleanMadeScenes(raw));
+    });
+    return () => ctrl.abort();
+  }, [jobId, hasBoard, madeAsk, refining]);
+  const onMade = useCallback((pieceId: number) => {
+    if (!madeRef.current.some((m) => m.drawing === pieceId || m.pieces.includes(pieceId))) setMadeAsk((k) => k + 1);
+  }, []);
   const closePopout = useCallback(() => {
     // the focus was in the 3D view (or nowhere): give it to the board panel, not to the page
     const a = document.activeElement as HTMLElement | null;
@@ -374,13 +396,10 @@ export function Player({
   modeRef.current = mode;
   useEffect(() => {
     let swallowSpaceUp = false;
-    const typing = (el: EventTarget | null) => {
-      const h = el as HTMLElement | null;
-      return !!h && (h.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(h.tagName));
-    };
     const down = (e: KeyboardEvent) => {
-      // The 3D view keeps the player's keys (it has no keys of its own); Esc goes back to the board.
-      if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+      // The 3D view keeps the player's keys (it has no keys of its own); Esc goes back to the board, also from a
+      // "Try it" slider (it keeps only the keys that move it: keys.ts).
+      if (e.ctrlKey || e.metaKey || e.altKey || fieldTakesKey(e.target as HTMLInputElement | null, e.key)) return;
       if ((e.target as HTMLElement | null)?.closest?.('.ask-drawer')) return;
       const v = videoRef.current;
       if (!v) return;
@@ -603,6 +622,7 @@ export function Player({
                 onTogglePlay={togglePlay}
                 onPopout={openPopout}
                 onAsk={askPiece}
+                made={made}
               />
             ) : slides ? (
               <Slides
@@ -637,6 +657,7 @@ export function Player({
                   playing={playing}
                   onSeek={seek}
                   onClose={closePopout}
+                  onMade={onMade}
                 />
               </Suspense>
             )}

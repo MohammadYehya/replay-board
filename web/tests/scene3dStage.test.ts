@@ -2,8 +2,8 @@
 // draws). Every shape is made up for the test.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Vector3 } from 'three';
-import { dashesGeom, DASH, GAP } from '../src/player/scene3dStage.ts';
+import { CylinderGeometry, Mesh, Vector3 } from 'three';
+import { axisScales, CURVE_LABEL_AT, dashesGeom, DASH, EMPH, GAP, placeRod } from '../src/player/scene3dStage.ts';
 import { sampleSegments } from '../src/player/plotMath.ts';
 
 /** The x of every vertex the index uses (the faces actually drawn). */
@@ -52,4 +52,43 @@ test('a dashed line too short or with one point draws nothing, without throwing'
   assert.equal(dashesGeom([new Vector3(1, 1, 1)], 0.016), null);
   assert.equal(dashesGeom([new Vector3(1, 1, 1), new Vector3(1, 1, 1)], 0.016), null);
   assert.equal(dashesGeom([], 0.016), null);
+});
+
+test('a rod is placed by its matrix: the unit cylinder from one end to the other, at the radius', () => {
+  const rod = new Mesh(new CylinderGeometry(1, 1, 1, 12, 1, false));
+  const a = new Vector3(1, 2, 3);
+  const b = new Vector3(4, 6, 3);
+  assert.equal(placeRod(rod, a, b, 0.02), true);
+  const top = new Vector3(0, 0.5, 0).applyMatrix4(rod.matrix);
+  const bottom = new Vector3(0, -0.5, 0).applyMatrix4(rod.matrix);
+  assert.ok(top.distanceTo(b) < 1e-9, 'its top is at b');
+  assert.ok(bottom.distanceTo(a) < 1e-9, 'its bottom is at a');
+  const side = new Vector3(1, 0, 0).applyMatrix4(rod.matrix).sub(new Vector3(0, 0, 0).applyMatrix4(rod.matrix));
+  assert.ok(Math.abs(side.length() - 0.02) < 1e-9, 'its radius');
+  // moved: a new matrix, the same geometry
+  const g = rod.geometry;
+  assert.equal(placeRod(rod, b, a, 0.02), true);
+  assert.ok(new Vector3(0, 0.5, 0).applyMatrix4(rod.matrix).distanceTo(a) < 1e-9);
+  assert.equal(rod.geometry, g);
+  // ends too close, or not finite: not placed
+  assert.equal(placeRod(rod, a, a.clone(), 0.02), false);
+  assert.equal(placeRod(rod, a, new Vector3(NaN, 0, 0), 0.02), false);
+});
+
+test('a tall surface over x and y gets its z axis drawn as long as x and y', () => {
+  // synth3d-saddle: x, y in +-2, z in +-4 drew a narrow shape twice as tall as wide
+  const k = axisScales([4, 4, 8], true, true);
+  assert.ok(Math.abs(k[0] * 4 - k[2] * 8) < 1e-9 && Math.abs(k[0] - k[1]) < 1e-9);
+  // anything else: one scale (a cube stays a cube), a far shorter shown axis stretched to 35% of the longest
+  const cube = axisScales([2, 2, 4], false, true);
+  assert.ok(Math.abs(cube[0] - cube[2]) < 1e-9);
+  const graph = axisScales([10, 1, 0], true, false);
+  assert.ok(Math.abs(graph[1] * 1 - 0.35 * graph[0] * 10) < 1e-9);
+  const flatSurface = axisScales([4, 4, 2], true, true);
+  assert.ok(Math.abs(flatSurface[0] - flatSurface[2]) < 1e-9);
+});
+
+test('a step emphasises its lines and names curves away from their middle', () => {
+  assert.equal(EMPH, 1.3);
+  assert.ok(CURVE_LABEL_AT >= 0.8 && CURVE_LABEL_AT <= 0.85);
 });

@@ -76,6 +76,19 @@ export async function getScene3D(jobId: string, pieceId: number, signal?: AbortS
   }
 }
 
+/** The drawings of a lecture whose 3D view is already made (GET /popouts: it never makes one, so it costs nothing),
+ *  as the server sent them (player/popoutable.ts cleanMadeScenes reads them), or null when there is no list: an older
+ *  server without the route (404, 405), or any failure. Never throws: no list just means no badges. */
+export async function getMadeScenes(jobId: string, signal?: AbortSignal): Promise<unknown> {
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/popouts`, { signal, cache: 'no-store' });
+    if (!r.ok || !(r.headers.get('content-type') ?? '').includes('json')) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
 export interface UploadOptions {
   start?: number;
   end?: number;

@@ -15,7 +15,14 @@ Then code checks everything, never trusting the answer:
 - references to unknown objects and parameters are dropped, values clamped, counts and lengths limited; a point
   object given several points becomes several points;
 - the geometry is evaluated at the start and through every step (graphs, curves and surfaces sampled): an object
-  that gives no finite values is dropped, and `bounds` frames the whole animation;
+  that gives no finite values is dropped (an angle only where the view rests: at the start and after each step),
+  and `bounds` frames the whole animation;
+- a param's range holds its value and every step's "to" (it is what a student explores with a slider); a "set" that
+  moves nothing and a step that changes nothing on screen are dropped; a step whose caption names an object's label
+  ("beta", "β") highlights it, or shows it when it is hidden ("angles" names every angle not
+  shown yet);
+- angles at one vertex get nested radii, angle params get ranges where the shape exists at every corner, and a step
+  whose camera sees what it points at edge-on turns to the preset that sees it best;
 - the view is never empty: something is shown before the first step; with no usable step left, one step points at
   the whole drawing (when it is first talked about, if it is).
 
@@ -32,6 +39,7 @@ All times are on the video's clock, like replay.json and the player.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -51,7 +59,7 @@ from .core.meta_api import MetaAPIError, chat_text, image_part, parse_json_objec
 from .export import NotReady, context_messages, read_replay, safe_text
 from .pipeline import replace_file
 
-SCENE_RULES_VERSION = "5"  # change it when the prompt, the checks or REASONING change, so every scene is made again
+SCENE_RULES_VERSION = "6"  # change it when the prompt, the checks or REASONING change, so every scene is made again
 # 2: angle arcs sized, spanning the named angle and following moving edges; every part of the board drawn; angles in
 #    different planes seen from "iso" (end-to-end check on test2: arcs collapsed and labels piled up seen from the front,
 #    a 120-degree arc spanned 60 degrees, three spokes drawn where the board has six).
@@ -70,6 +78,11 @@ SCENE_RULES_VERSION = "5"  # change it when the prompt, the checks or REASONING 
 # 5: a param named like a field's variable ("t" for a point's place along a curve, test-full #3 rules 4) is renamed
 #    instead of dropped with everything that used it. The prompt is the same as 4's, so the scenes made with 4 come
 #    back from the disk cache, checked again, at no cost.
+# 6: angles are "angle" objects (vertex and two arm ends: the view draws the arc in the right plane and shows its
+#    measured value), never curves written by formula (test2 #4's alpha and beta arcs, rules 5, ended at one point;
+#    test2 #7 named alpha and beta with nothing labelled so); every named length is
+#    labelled; a param's min and max are the range a student explores with a slider; a step that changes nothing is
+#    dropped, and one whose caption names a labelled object points at it.
 FORMAT = 2
 # Measured live on test2 #4 (a monoclinic cell, 2026-11-02), same prompt: "low" took 22 s and $0.028 (4.8k tokens
 # out) and got the geometry right, but turned the camera to where the lean cannot be seen and drew no angles;
@@ -84,7 +97,8 @@ MAX_TOKENS = 24000
 POPOUT = "popout"
 
 TITLE_CHARS, EXPLAIN_CHARS, CAPTION_CHARS = 80, 300, 140
-AXIS_LABEL_CHARS, PARAM_LABEL_CHARS, OBJECT_LABEL_CHARS = 20, 24, 30
+# a param's label is on screen all the time (the value chips): 24 cut "position along x parabola" (25)
+AXIS_LABEL_CHARS, PARAM_LABEL_CHARS, OBJECT_LABEL_CHARS = 20, 32, 30
 MAX_PARAMS, MAX_DEFS, MAX_OBJECTS, MAX_STEPS = 8, 16, 40, 12
 OVER_MIN, OVER_MAX, OVER_DEFAULT = 0.6, 8.0, 1.5
 STEP_GAP = 1.0           # s between steps, at least
@@ -94,11 +108,23 @@ SAMPLES, GRID = 241, 41  # samples of a graph or curve; grid of a surface
 IMAGE_SIDE = 768
 
 TYPES = ("point", "segment", "vector", "polygon", "box", "sphere", "cylinder", "cone", "torus", "graph", "surface",
-         "curve", "psurface", "label")
+         "curve", "psurface", "label", "angle")
 STYLES = ("solid", "wire", "dashed")
 CAMERAS = ("keep", "front", "top", "side", "iso")
 UNITS = ("", "deg")
 POINTS = {"point": (1, 1), "label": (1, 1), "segment": (2, 2), "vector": (2, 2), "polygon": (3, 12)}
+ARM_MIN = 1e-9           # an angle's arm shorter than this has no direction: the angle is degenerate
+AUTO_RADIUS = 0.3        # an angle's radius when it gives none: this share of its shorter arm
+NEST = 0.45              # angles at one vertex: radii 1, 1.45, 1.9... times the group's auto radius
+ANGLE_TOL = 0.5          # degrees an angle object named like a param may measure off that param's value
+# Three edges from one corner whose unit vectors' volume squared (Gram determinant) is under this make a plate, not
+# a cell: 60/60/60 (a real rhombohedral cell) is 0.5, 70/70/110 0.57, 120/120/120 0.
+FLAT_MIN = 0.45
+# Where each camera preset looks from (maths coordinates, z up): scene3dStage.ts CAMERA_DIRS, in its order of
+# preference when two see a step equally well.
+CAMERA_DIRS = {"iso": (0.7, -1.2, 0.62), "front": (0.2, -1.0, 0.25), "side": (1.0, 0.2, 0.25), "top": (0.0, -0.02, 1.0)}
+CAMERA_LOW, CAMERA_BETTER = 0.6, 0.15  # a preset scoring under this is swapped for one at least this much better
+DEG_SPAN, LEN_SHARE = 30.0, 0.5  # a param with no range explores value +- 30 degrees, or +- half its value
 SIZES = {"box": 3, "sphere": 1, "cylinder": 2, "cone": 2, "torus": 2}
 SAMPLED = ("graph", "surface", "curve", "psurface")
 PALETTE = ("#1f6fd1", "#d0342c", "#2e9d4a", "#8a4fd0", "#e07b12", "#139aa8", "#8c5a3c", "#d04f9a")
@@ -164,14 +190,20 @@ equal or not, angles of 90 degrees or not).
 what is on top stays on top. Pick the values that do this (with edge a along +x, a cell whose beta is 75 degrees \
 leans right and is the same monoclinic cell as one of 105 degrees, which leans left).
 - params: up to 8 numbers the steps can move: lengths, angles (unit "deg"), a turning or sweep angle, a point's \
-place along a curve, a time. Write the geometry in terms of them, so that a step's "set" animates it: corners \
-written with cos(theta*deg) and sin(theta*deg) turn when theta changes. "value" is where a param starts.
+place along a curve, a time, each with a short label (at most 32 characters). Write the geometry in terms of them, so that a step's "set" animates it: corners \
+written with cos(theta*deg) and sin(theta*deg) turn when theta changes. "value" is where a param starts. "min" and \
+"max" are the range a student may explore with a slider after the lecture (with every angle in its range at once, the shape must still exist): a sensible range around the values the \
+lecture uses, not only those values (an angle e.g. 60 to 120, a length e.g. 1 to 6), holding "value" and every \
+step's "to", where the model still makes sense.
 - defs: up to 16 named values worked out from the params, so that a long formula is written once and is right \
 once: [{"name": "cx", "expr": "c*cos(beta*deg)"}]. Each may use the params and the defs before it; every \
-expression in the objects may use their names. Use them for the corners that several edges share.
+expression in the objects may use their names. Use them for the corners that several edges share. Build every point from the params and defs, so that the whole model follows any value a student sets: a prism's top is its base moved by the c edge's vector (cx, cy, cz), not lifted by the length c; a hexagon's corners come from the a and b edges and gamma.
 - steps: 3 to 12 steps that follow how the teacher explains this drawing and the idea it illustrates, in the \
 lecture's order. A step shows, hides or highlights objects, moves params ("set") and turns the camera; its caption \
-says what it shows, in the teacher's own terms (plain text, at most 140 characters). After each step the model is \
+says what it shows, in the teacher's own terms (plain text, at most 140 characters). Every step visibly changes \
+what its caption talks about: it shows, moves or highlights the objects the caption names (the angle object \
+labelled beta when the caption says beta), or turns the camera to where the change is seen; never a step that only \
+repeats what is already on screen. After each step the model is \
 a correct example of everything its caption names: a step that names a case sets every length and angle of that \
 case (a monoclinic step makes a, b and c all different, alpha and gamma 90 and beta not 90, in that one step). If \
 the teacher explains a case in parts, give each part its own step at its word. Every number in a caption is true \
@@ -185,7 +217,7 @@ follow that series from where the teacher starts it, changing the one model case
 tilting an angle), a step for each case up to this drawing, at the moment the teacher names that case; then the \
 drawing itself gets a step for each thing the teacher says about it (each length, angle, atom or part, at its \
 word), not one step for all of it, and the model of the last case turns into the drawing where it sits in it (a \
-cell that is a third of a hexagonal prism stays in place as one third of it). The params cover what changes along \
+cell that is a third of a hexagonal prism stays in place as one third of it, with its gamma corner at a corner of the hexagon, where the board marks 120 degrees: the centre of the hexagon is the cell's far corner). The params cover what changes along \
 the series (each length and angle that differs from one case to the next).
 - For a graph, animate what the board shows about it: how it is made from a simpler graph (|f(x)| folds the part \
 below the x axis up, turning it over about the x axis; f(-x) mirrors it; 2*f(x) stretches it), a point moving \
@@ -203,10 +235,14 @@ details and changes as the teacher gets to them.
 The format:
 - Coordinates: z is up, x to the right, y away from the viewer. Use a scale where the model is about 2 to 10 \
 units across.
-- objects: every field is present; unused ones are "" or []. ids are short lowercase names (edge_a, beta_arc).
+- objects: every field is present; unused ones are "" or []. ids are short lowercase names (edge_a, beta_angle).
   - point and label: points [[x, y, z]], one point (a label shows its "label" text there): several atoms are \
 several point objects; segment and vector: points [from, to] (a vector has an arrow head at "to"); polygon: \
 points, 3 to 12 corners of a flat face, drawn filled and see-through.
+  - angle: points [vertex, end1, end2], exactly 3: the angle at the vertex between the edges vertex-end1 and \
+vertex-end2 (0 to 180 degrees). The view draws its arc in the plane of the two edges (a square mark at 90 degrees) \
+and shows its measured value next to its label. size [] (a radius of 0.3 of the shorter edge) or [radius]. Its \
+label is the angle's name only ("beta", "theta", "angle ABC"), never its value.
   - box: center, size [width along x, depth along y, height along z]; sphere: size [radius]; cylinder and cone: \
 size [radius, height], axis along z, the cone's tip up; torus: size [ring radius, tube radius], ring in the xy \
 plane. rotation: [degrees about x, y, z], or [].
@@ -214,12 +250,17 @@ plane. rotation: [degrees about x, y, z], or [].
 range). surface: expr f(x, y): the surface z = f(x, y) over the x and y axes' ranges. curve: x, y and z in t, \
 over range [from, to] in t. psurface: x, y and z in u and v, over range (u) and range2 (v).
   - color "#rrggbb" (like the ink, and distinct for the parts the captions name), opacity 0.15 to 1, style \
-"solid", "wire" (a wireframe) or "dashed" (hidden edges, guides), label: a short name shown next to it ("" for \
-none).
-  - An angle the lecture names is an arc (a curve in t) between its two edges, about a third of the shorter edge \
-from the corner, spanning exactly that angle (a 120-degree angle is 120 degrees of arc, not its supplement), with \
-its name as the arc's label (and its value when the lecture gives one). When the edges move, write the arc with the same params as the edges, so it \
-stays between them. A length is labelled at the middle of its edge. Keep labels apart: never two at one place.
+"solid", "wire" (a wireframe; an angle: its arc only) or "dashed" (hidden edges, guides), label: a short name \
+shown next to it ("" for none).
+  - Every angle the teacher names or the drawing marks is an angle object at its vertex, between the two edges \
+that make it (in a crystal cell, alpha is between b and c, beta between a and c, gamma between a and b), labelled \
+with its name; never a curve. Write its three points with the same expressions or defs as those edges' ends, so \
+that it follows them when the shape moves: its measured value is then the one the teacher says at every step (a \
+120-degree angle measures 120, not its supplement). An angle the teacher marks on the board goes at the corner where it is marked, between two edges of the drawing from that corner (a hexagon's 120 degrees at a corner of the hexagon, with a and b along two of its sides from that corner), never at a centre the board does not mark.
+  - Every length the teacher names (a, b, c, r, h...) is labelled with that name: the edge's own label, or a \
+label object at the middle of the edge, a little off it. Keep labels apart: never two at one place. A label is \
+true in every state it is shown in: when a step changes a graph or a length, its label keeps no formula or number \
+that stops being true (give a name instead, or hide that label and show a new one in that step).
   - Draw every part the board shows (each edge, atom, line and mark), at its true place.
   - At most 40 objects: a polygon for a face is often clearer than many segments.
 - Expressions are strings of numbers, + - * / ^ and parentheses, the functions sin cos tan asin acos atan sinh cosh \
@@ -484,8 +525,17 @@ def scene_messages(job_dir: Path, replay: dict, piece_id: int, attempt: int = 1)
 
 # ---------- checking the answer ----------
 def _str(v: Any, n: int) -> str:
+    """Plain text of at most n characters. A longer one is cut at the end of a word when that keeps over half of it
+    ("position along x parabola" -> "position along x…", never "position along x parabo…": synth3d-saddle)."""
     text = _flat(safe_text(v)) if isinstance(v, str) else ""
-    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+    if len(text) <= n:
+        return text
+    head = text[:n - 1]
+    if not text[n - 1].isspace():
+        whole = head.rsplit(" ", 1)[0] if " " in head else ""
+        if len(whole.rstrip()) > (n - 1) // 2:
+            head = whole
+    return head.rstrip(" ,;:-") + "…"
 
 
 def _number(v: Any) -> float | None:
@@ -555,17 +605,49 @@ def clean_params(raw: Any, notes: list[str], renames: dict[str, str] | None = No
         if lo is None or hi is None or v is None:
             notes.append(f"param {name} dropped: value, min or max is not a number")
             continue
-        lo, hi = sorted((_clamp(lo), _clamp(hi)))
-        if hi - lo < 1e-9:
-            lo, hi = lo - 1.0, hi + 1.0
         if len(out) == MAX_PARAMS:
             notes.append(f"param {name} dropped: at most {MAX_PARAMS}")
             continue
+        unit = p.get("unit") if p.get("unit") in UNITS else ""
+        v = _cut(v, f"param {name}: value", notes)
+        lo, hi = _cut(lo, f"param {name}: min", notes), _cut(hi, f"param {name}: max", notes)
+        lo, hi = fit_range(name, sorted((lo, hi)), [v], unit, notes)
         seen.add(name)
-        out.append({"name": name, "value": min(hi, max(lo, v)), "min": lo, "max": hi,
-                    "label": _str(p.get("label"), PARAM_LABEL_CHARS) or name,
-                    "unit": p.get("unit") if p.get("unit") in UNITS else ""})
+        out.append({"name": name, "value": v, "min": lo, "max": hi,
+                    "label": _str(p.get("label"), PARAM_LABEL_CHARS) or name, "unit": unit})
     return out
+
+
+def _round(v: float) -> float:
+    return float(f"{v:.6g}")
+
+
+def _cut(v: float, what: str, notes: list[str]) -> float:
+    """v within +-LIMIT, never silently: a value cut there may leave a step moving nothing, then dropped."""
+    c = _clamp(v)
+    if c != v:
+        notes.append(f"{what} {_round(v):g} cut to {_round(c):g} (at most {LIMIT:g} either way)")
+    return c
+
+
+def fit_range(name: str, rng: list[float] | tuple[float, float], values: list[float], unit: str,
+              notes: list[str]) -> tuple[float, float]:
+    """A param's [min, max]: the range a student explores with a slider. It holds every value the scene gives the
+    param (its start, every step's "to"), so a step is never cut short of what its caption says (rules 5 cut the
+    value to the range instead); one with no width gets a sensible one around its value (an angle +-30 degrees, a
+    length +-half of it), so the slider moves."""
+    lo, hi = float(rng[0]), float(rng[1])
+    want_lo, want_hi = min([lo] + values), max([hi] + values)
+    if (want_lo, want_hi) != (lo, hi):
+        notes.append(f"param {name}: range widened from {_round(lo):g}..{_round(hi):g} to "
+                     f"{_round(want_lo):g}..{_round(want_hi):g} to hold its values")
+        lo, hi = want_lo, want_hi
+    if hi - lo < 1e-9:
+        mid = (lo + hi) / 2
+        d = DEG_SPAN if unit == "deg" else (LEN_SHARE * abs(mid) if abs(mid) > 1e-6 else 1.0)
+        lo, hi = _clamp(mid - d), _clamp(mid + d)
+        notes.append(f"param {name}: no range to explore, so {_round(lo):g}..{_round(hi):g}")
+    return lo, hi
 
 
 def clean_defs(raw: Any, params: set[str], notes: list[str], renames: dict[str, str] | None = None) -> list[dict]:
@@ -664,7 +746,24 @@ def clean_object(o: Any, index: int, params: set[str], notes: list[str],
         notes.append(f"object {oid} dropped: {why}")
 
     try:
-        if typ in POINTS:
+        if typ == "angle":  # [vertex, end1, end2], and [] (auto radius) or [radius]
+            pts = o.get("points") if isinstance(o.get("points"), list) else []
+            if len(pts) != 3:
+                return bad(f"{len(pts)} points for an angle (its vertex and one point on each arm)")
+            for p in pts:
+                xyz = _exprs(p, 3, params, renames)
+                if xyz is None:
+                    return bad("a point is not 3 allowed expressions")
+                out["points"].append(xyz)
+            size = [s for s in o.get("size") or [] if not (isinstance(s, str) and not s.strip())] \
+                if isinstance(o.get("size"), list) else []
+            if len(size) > 1:
+                notes.append(f"object {oid}: only its first size kept (an angle's radius)")
+            if size:
+                out["size"] = _exprs(size[:1], 1, params, renames)
+                if out["size"] is None:
+                    return bad("its radius is not an allowed expression")
+        elif typ in POINTS:
             lo, hi = POINTS[typ]
             pts = o.get("points") if isinstance(o.get("points"), list) else []
             if len(pts) < lo or (typ == "polygon" and len(pts) > hi):
@@ -716,7 +815,20 @@ def clean_object(o: Any, index: int, params: set[str], notes: list[str],
     out["label"] = _str(o.get("label"), OBJECT_LABEL_CHARS)
     if typ == "label" and not out["label"]:
         return bad("a label with no text")
+    if typ == "angle":  # the view shows the measured value after the name: "beta = 75°" would show it twice
+        name = _ANGLE_VALUE.sub("", out["label"]).strip()
+        if name != out["label"]:
+            notes.append(f"object {oid}: the value taken out of its label {out['label']!r}: the view shows the "
+                         f"measured one")
+            out["label"] = name
     return out
+
+
+# A value at the end of an angle's label: after "=", ":" or "≈" (its unit optional), or on its own with a unit, also
+# when it is the whole label ("90°" would show "90° 90°"); "angle 1" and "θ1" are names and stay.
+_DEG = r"(?:[°º˚]|deg(?:rees?)?)"
+_ANGLE_VALUE = re.compile(rf"(?:\s*[=:≈]\s*[-+]?\d+(?:\.\d+)?\s*{_DEG}?|(?:^|\s+)[-+]?\d+(?:\.\d+)?\s*{_DEG})\s*$",
+                          re.I)
 
 
 def parse_at(v: Any) -> float | None:
@@ -764,8 +876,8 @@ def clean_steps(raw: Any, ids: list[str], params: list[dict], clip: tuple[float,
                 notes: list[str], words: list[dict] | None = None,
                 groups: dict[str, list[str]] | None = None,
                 renames: dict[str, str] | None = None) -> tuple[list[dict], bool]:
-    """(the steps, synced): known ids and params only, values clamped; when synced, each at its cue word when that
-    is found in `words` near its line's time, in time order, at least STEP_GAP apart, inside the clip, and each
+    """(the steps, synced): known ids and params only, values within +-LIMIT; when synced, each at its cue word when
+    that is found in `words` near its line's time, in time order, at least STEP_GAP apart, inside the clip, and each
     change over before the next step starts. `groups`: an object split in several (split_points) is named by
     its first id."""
     known = set(ids)
@@ -798,8 +910,8 @@ def clean_steps(raw: Any, ids: list[str], params: list[dict], clip: tuple[float,
             if name not in pmap or to is None:
                 notes.append(f"step: set of unknown param or value {str(st)[:40]!r} dropped")
                 continue
-            p = pmap[name]
-            sets[name] = min(p["max"], max(p["min"], to))
+            # the param's range is widened to hold it (fit_range), not the value cut
+            sets[name] = _cut(to, f"step: {name} set to", notes)
         over = _number(s.get("over"))
         t = line_t = parse_at(s.get("at"))
         cue = s.get("cue") if isinstance(s.get("cue"), str) else ""
@@ -867,9 +979,10 @@ def clean_steps(raw: Any, ids: list[str], params: list[dict], clip: tuple[float,
 
 
 # ---------- the geometry, through every state ----------
-def param_states(params: list[dict], steps: list[dict]) -> list[dict[str, float]]:
+def param_states(params: list[dict], steps: list[dict], finals: bool = False) -> list[dict[str, float]]:
     """The parameters at the start, after every step, and part-way through each change (a change moves every
-    param of its step along a straight line, so these samples cover its path)."""
+    param of its step along a straight line, so these samples cover its path). `finals`: only the start and the
+    state after each step that moves something (where an angle must be drawable)."""
     cur = {p["name"]: float(p["value"]) for p in params}
     out = [dict(cur)]
     for s in steps:
@@ -878,7 +991,8 @@ def param_states(params: list[dict], steps: list[dict]) -> list[dict[str, float]
         before = dict(cur)
         for st in s["set"]:
             cur[st["param"]] = float(st["to"])
-        out += [{k: before[k] + (cur[k] - before[k]) * f for k in cur} for f in (0.25, 0.5, 0.75)]
+        if not finals:
+            out += [{k: before[k] + (cur[k] - before[k]) * f for k in cur} for f in (0.25, 0.5, 0.75)]
         out.append(dict(cur))
     return out
 
@@ -913,6 +1027,36 @@ class Shape:
     def _vals(self, trees: list, env: dict) -> list[float]:
         return [float(np.asarray(sx.evaluate(t, env), dtype=float)) for t in trees]
 
+    def arms(self, env: dict[str, float]) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
+        """An angle in one state: (vertex, arm 1, arm 2, radius), the arms as vectors from the vertex; None when it
+        is degenerate there (an arm shorter than ARM_MIN, anything not finite or beyond LIMIT, a radius not above
+        0): the player does not draw it in that state."""
+        try:
+            v, p1, p2 = (np.array(self._vals(pt, env), dtype=float) for pt in self.points)
+            size = self._vals(self.size, env)
+        except (ValueError, TypeError, FloatingPointError, ZeroDivisionError):
+            return None
+        if not all(np.all(np.isfinite(a)) and np.all(np.abs(a) <= LIMIT) for a in (v, p1, p2, np.array(size))):
+            return None
+        a, b = p1 - v, p2 - v
+        la, lb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+        if not (la >= ARM_MIN and lb >= ARM_MIN):
+            return None
+        r = size[0] if size else AUTO_RADIUS * min(la, lb)
+        if not (math.isfinite(r) and r > 0):
+            return None
+        return v, a, b, r
+
+    def angle_at(self, env: dict[str, float]) -> float | None:
+        """An angle object's measured value in degrees (0 to 180) in one state, or None when it is degenerate."""
+        arms = self.arms(env)
+        if arms is None:
+            return None
+        _, a, b, _ = arms
+        # atan2(|a x b|, a.b), as the player measures it (angle3d.ts): acos of the cosine loses the small angles
+        # (under about 1e-6 degrees it gives 0) and the same near 180
+        return math.degrees(math.atan2(float(np.linalg.norm(np.cross(a, b))), float(np.dot(a, b))))
+
     def points_at(self, env: dict[str, float]) -> tuple[np.ndarray | None, int]:
         """(the points that frame it in this state, how many drawable samples it has); (None, 0) when a fixed
         value is not finite or a size is negative: then it cannot be drawn."""
@@ -922,6 +1066,12 @@ class Shape:
             + self._vals(self.range2, env)
         if not all(math.isfinite(v) and abs(v) <= LIMIT for v in fixed):
             return None, 0
+        if typ == "angle":  # framed by its vertex +- its radius; None when it is degenerate in this state
+            arms = self.arms(env)
+            if arms is None:
+                return None, 0
+            v, _, _, r = arms
+            return np.array([v - r, v + r]), 1
         if typ in POINTS:
             pts = np.array([self._vals(pt, env) for pt in self.points], dtype=float)
             return pts, len(pts)
@@ -999,10 +1149,22 @@ def check_geometry(scene: dict, notes: list[str]) -> list[dict[str, float]]:
     names = _names(scene)
     states = param_states(scene["params"], scene["steps"])
     envs = _envs(scene, states)
+    finals = None
     keep = []
     for o in scene["objects"]:
         try:
             shape = Shape(o, names, scene["axes"])
+            if o["type"] == "angle":
+                # An angle only has to be drawable where the view rests: at the start and after each step. Part-way
+                # through a change its arm may pass through zero (the player skips it for those frames).
+                if finals is None:
+                    finals = _envs(scene, param_states(scene["params"], scene["steps"], finals=True))
+                if any(shape.arms(env) is None for env in finals):
+                    notes.append(f"object {o['id']} dropped: the angle is degenerate (an arm of length 0, or a "
+                                 f"value not finite) at the start or after a step")
+                    continue
+                keep.append(o)
+                continue
             results = [shape.points_at(env) for env in envs]
         except (sx.ExprError, ValueError, TypeError, FloatingPointError) as e:
             notes.append(f"object {o['id']} dropped: could not be evaluated ({e})")
@@ -1080,6 +1242,13 @@ def clean_scene(raw: Any, *, piece: int, pieces: list[int], version: str, clip: 
 
     scene["steps"], scene["synced"] = steps_for(objects, notes)
     drop_axis_copies(scene, notes)
+    repeated = repeated_labels(scene)
+    if repeated:
+        for i, other in repeated.items():
+            text = next(o["label"] for o in scene["objects"] if o["id"] == i)
+            notes.append(f"object {i} dropped: its label {text!r} is said already by {other}, there whenever it is")
+        scene["objects"] = [o for o in scene["objects"] if o["id"] not in repeated]
+        scene["steps"], scene["synced"] = steps_for(scene["objects"], [])
     while True:
         count = len(scene["objects"])
         states = check_geometry(scene, notes)
@@ -1098,6 +1267,9 @@ def clean_scene(raw: Any, *, piece: int, pieces: list[int], version: str, clip: 
             scene["explain"] = "There is nothing in this drawing to show in 3D."
         scene["bounds"] = compute_bounds(scene, states)
         return scene
+    link_captions(scene, notes)
+    drop_filler(scene, notes)  # first: a hide that changes nothing would hold keep_base back
+    keep_base(scene["steps"], scene["objects"], notes)
     if not scene["steps"]:
         # The drawing is there from the start (a step that showed it would leave the view empty until then); the
         # one step makes it glow when the teacher first talks about it.
@@ -1110,10 +1282,14 @@ def clean_scene(raw: Any, *, piece: int, pieces: list[int], version: str, clip: 
                            "show": [], "hide": [], "highlight": [o["id"] for o in scene["objects"]], "set": [],
                            "camera": "iso"}]
         scene["synced"] = t is not None
-        states = param_states(params, scene["steps"])
-    keep_base(scene["steps"], scene["objects"], notes)
+    fit_ranges(scene, notes)
+    narrow_angle_ranges(scene, notes)
+    nest_shared_angles(scene, notes)
+    size_short_arms(scene, notes)
+    pick_cameras(scene, notes)
     check_captions(scene, notes)
-    scene["bounds"] = compute_bounds(scene, states)
+    # Dropping steps and sets that moved nothing leaves the same states, without repeats.
+    scene["bounds"] = compute_bounds(scene, param_states(params, scene["steps"]))
     return scene
 
 
@@ -1179,7 +1355,374 @@ def drop_axis_copies(scene: dict, notes: list[str]) -> None:
     scene["objects"] = keep
 
 
-_GREEK = {"alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "theta": "θ", "phi": "φ", "omega": "ω"}
+def size_short_arms(scene: dict, notes: list[str]) -> None:
+    """An angle with the auto radius whose one arm is under half the other (a point one unit along an axis giving
+    its direction: synth3d-vector3d's theta, 0.3 of a 1-unit arm beside a 5.4 long vector, a wedge nobody sees)
+    gets a radius of its own: 0.15 of the longer arm, at most 0.9 of the shorter one, in every state the steps
+    reach (the smallest), so its arc stays inside both arms and is never smaller than the auto one."""
+    angles = [o for o in scene["objects"] if o["type"] == "angle" and not o["size"]]
+    if not angles:
+        return
+    names = _names(scene)
+    envs = _envs(scene, param_states(scene["params"], scene["steps"], finals=True))
+    for o in angles:
+        shape = Shape(o, names, scene["axes"])
+        best, start = math.inf, None
+        for env in envs:
+            arms = shape.arms(env)
+            if arms is None:
+                continue
+            _, a, b, auto = arms
+            s, big = sorted((float(np.linalg.norm(a)), float(np.linalg.norm(b))))
+            best = min(best, 0.9 * s, 0.15 * big)
+            if start is None:
+                start = (auto, s, big)
+        if start is None or not math.isfinite(best) or best <= 1.2 * start[0]:
+            continue
+        r = float(f"{best:.3g}")
+        o["size"] = [f"{r:g}"]
+        notes.append(f"object {o['id']}: radius {r:g} (its arms are {start[1]:.3g} and {start[2]:.3g} long: "
+                     f"{AUTO_RADIUS:g} of the shorter would hardly show)")
+
+
+def _length_expr(p: list[str], v: list[str]) -> str:
+    """The expression of |p - v| for two points given as expressions."""
+    terms = []
+    for a, b in zip(p, v):
+        d = a if b == "0" else f"({a}) - ({b})"
+        if d != "0":
+            terms.append(f"({d})^2")
+    return f"sqrt({' + '.join(terms) or '0'})"
+
+
+def nest_shared_angles(scene: dict, notes: list[str]) -> None:
+    """Angles with the auto radius that share their vertex in every state the steps reach (alpha, beta and gamma at
+    one corner of test2 #4: three marks of radius 0.75 on top of each other, the labels pushed 30-60 px off them)
+    get radii 1, 1.45, 1.9... times the group's auto radius (0.3 of the shortest arm of any of them), in object
+    order, written as an expression of the arms, so the marks stay nested and inside the arms when a student moves
+    the lengths."""
+    angles = [o for o in scene["objects"] if o["type"] == "angle" and not o["size"]]
+    if len(angles) < 2:
+        return
+    names = _names(scene)
+    envs = _envs(scene, param_states(scene["params"], scene["steps"], finals=True))
+    verts: dict[str, list] = {}
+    for o in angles:
+        shape = Shape(o, names, scene["axes"])
+        verts[o["id"]] = [None if (arms := shape.arms(env)) is None else arms[0] for env in envs]
+
+    def same(a: list, b: list) -> bool:
+        both = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
+        return bool(both) and all(float(np.linalg.norm(x - y)) <= 1e-6 * max(1.0, float(np.linalg.norm(x)))
+                                  for x, y in both)
+
+    groups: list[list[dict]] = []
+    for o in angles:
+        for g in groups:
+            if same(verts[g[0]["id"]], verts[o["id"]]):
+                g.append(o)
+                break
+        else:
+            groups.append([o])
+    for g in groups:
+        if len(g) < 2:
+            continue
+        arms = list(dict.fromkeys(_length_expr(o["points"][k], o["points"][0]) for o in g for k in (1, 2)))
+        for k, o in enumerate(g):
+            f = AUTO_RADIUS * (1 + NEST * k)
+            try:
+                o["size"] = [sx.canonical(f"{f:g}*min({', '.join(arms)})", names)]
+            except sx.ExprError:
+                continue
+        notes.append(f"angles {', '.join(o['id'] for o in g)} share a vertex: radii "
+                     f"{', '.join(f'{1 + NEST * k:g}' for k in range(len(g)))} times {AUTO_RADIUS:g} of the "
+                     f"shortest arm, so their marks do not lie on each other")
+
+
+def narrow_angle_ranges(scene: dict, notes: list[str]) -> None:
+    """Angle params a student explores together must make a shape that can exist: at the corners of their ranges'
+    box (each one at its min or max, the other params as the lecture has them at the start and after each step),
+    every angle object named like one of them ("beta" for param beta or beta_d) must measure that param's value,
+    within ANGLE_TOL, and three edges from one corner must not lie nearly in one plane (FLAT_MIN). test2 #4 let
+    alpha = beta = gamma = 120 (60..120 each): the cell is then flat, its def clamps a height to sqrt(0.2) and the
+    labels read 119.9 while the sliders said 120. When a corner fails, every such range is narrowed towards the
+    values the lecture uses (the widest that passes, whole degrees), never below them."""
+    deg = [p for p in scene["params"] if p["unit"] == "deg"]
+    if not deg:
+        return
+    names = _names(scene)
+    pairs = []
+    for o in scene["objects"]:
+        if o["type"] != "angle":
+            continue
+        words = set(plain_words(o["label"]).split()) & set(_GREEK)
+        for p in deg:
+            if words & (set(re.split(r"[\s_]+", plain_words(p["name"]))) | set(plain_words(p["label"]).split())):
+                pairs.append((Shape(o, names, scene["axes"]), p))
+                break
+    if not pairs:
+        return
+    group = list({p["name"]: p for _, p in pairs}.values())
+    states = param_states(scene["params"], scene["steps"], finals=True)
+    need = {p["name"]: (min(s[p["name"]] for s in states), max(s[p["name"]] for s in states)) for p in group}
+    bases = list({tuple(sorted((k, v) for k, v in s.items() if k not in need)): s for s in states}.values())
+    defs = _parsed_defs(scene)
+
+    def ok(rng: dict[str, tuple[float, float]]) -> bool:
+        for base in bases:
+            for corner in itertools.product(*(rng[p["name"]] for p in group)):
+                env = {**base, **dict(zip(need, corner))}
+                env = with_defs(defs, env) if defs else env
+                corners: dict[tuple, list[np.ndarray]] = {}
+                for shape, p in pairs:
+                    try:
+                        arms = shape.arms(env)
+                        a = shape.angle_at(env)
+                    except (sx.ExprError, ValueError, TypeError, FloatingPointError, ZeroDivisionError):
+                        arms = a = None
+                    if arms is None or a is None or abs(a - env[p["name"]]) > ANGLE_TOL:
+                        return False
+                    dirs = corners.setdefault(tuple(np.round(arms[0], 6)), [])
+                    for u in (_unit_vec(arms[1]), _unit_vec(arms[2])):
+                        if u is not None and all(float(np.dot(u, w)) < 1 - 1e-9 for w in dirs):
+                            dirs.append(u)
+                # three edges from one corner (a cell's a, b, c) that lie nearly in one plane: a flat plate, the
+                # limit past which no shape has those angles (alpha = beta = gamma = 120 on test2 #4)
+                for dirs in corners.values():
+                    if len(dirs) == 3 and float(np.linalg.det(np.array(dirs))) ** 2 < FLAT_MIN:
+                        return False
+        return True
+
+    def at(f: float) -> dict[str, tuple[float, float]]:
+        return {p["name"]: (need[p["name"]][0] - f * (need[p["name"]][0] - p["min"]),
+                            need[p["name"]][1] + f * (p["max"] - need[p["name"]][1])) for p in group}
+
+    if ok(at(1.0)):
+        return
+    if not ok(at(0.0)):
+        notes.append(f"angles {', '.join(p['name'] for p in group)}: the lecture's own values do not make the "
+                     f"shape at some corner of their ranges; ranges left as they are")
+        return
+    lo_f, hi_f = 0.0, 1.0
+    for _ in range(14):
+        mid = (lo_f + hi_f) / 2
+        lo_f, hi_f = (mid, hi_f) if ok(at(mid)) else (lo_f, mid)
+    rng = at(lo_f)
+    for p in group:
+        a, b = rng[p["name"]]
+        a = min(need[p["name"]][0], float(math.ceil(a - 1e-9)))
+        b = max(need[p["name"]][1], float(math.floor(b + 1e-9)))
+        if (a, b) != (p["min"], p["max"]):
+            notes.append(f"param {p['name']}: range narrowed from {_round(p['min']):g}..{_round(p['max']):g} to "
+                         f"{_round(a):g}..{_round(b):g}: past it the angles together make no shape")
+            p["min"], p["max"] = a, b
+
+
+def _unit_vec(v: np.ndarray) -> np.ndarray | None:
+    n = float(np.linalg.norm(v))
+    return v / n if math.isfinite(n) and n > 1e-9 else None
+
+
+def pick_cameras(scene: dict, notes: list[str]) -> None:
+    """Each step looks from where what it points at is seen: the vectors and segments it shows or highlights as
+    long as they are (the sine of their angle to the line of sight), the angles it shows or highlights face on (|their
+    plane's normal . the line of sight|). synth3d-vector3d's v, the scene's main object, is (2, -3, 4): from "iso"
+    the camera looked along it (24 degrees off), so it showed at 0.41 of its length and theta's wedge as a sliver;
+    "side" shows it at 0.91. When the camera in effect scores under CAMERA_LOW and another preset scores at least
+    CAMERA_BETTER more, the step turns to that one (the steps after it that keep the camera keep it)."""
+    steps = scene["steps"]
+    kinds = ("segment", "vector", "angle")
+    if not steps or not any(o["type"] in kinds for o in scene["objects"]):
+        return
+    names = _names(scene)
+    shapes = {o["id"]: (o["type"], Shape(o, names, scene["axes"])) for o in scene["objects"] if o["type"] in kinds}
+    dirs = {k: np.array(v, dtype=float) / np.linalg.norm(v) for k, v in CAMERA_DIRS.items()}
+    defs = _parsed_defs(scene)
+    cur = {p["name"]: float(p["value"]) for p in scene["params"]}
+    vis = _visible(scene)
+    cam = next((s["camera"] for s in steps if s["camera"] != "keep"), "iso")
+    for n, s in enumerate(steps, 1):
+        cur.update({st["param"]: float(st["to"]) for st in s["set"]})
+        env = with_defs(defs, dict(cur)) if defs else dict(cur)
+        new = [i for i in s["show"] if i not in vis]
+        vis = (vis | set(s["show"])) - set(s["hide"])
+        chosen = cam if s["camera"] == "keep" else s["camera"]
+        lines, planes, what = [], [], []
+        for i in dict.fromkeys(new + s["highlight"]):
+            if i not in shapes or i not in vis:
+                continue
+            typ, shape = shapes[i]
+            try:
+                if typ == "angle":
+                    arms = shape.arms(env)
+                    u = None if arms is None else _unit_vec(np.cross(arms[1], arms[2]))
+                    if u is not None:
+                        planes.append(u)
+                        what.append(i)
+                else:
+                    pts, _ = shape.points_at(env)
+                    u = None if pts is None or len(pts) < 2 else _unit_vec(pts[-1] - pts[0])
+                    if u is not None:
+                        lines.append(u)
+                        what.append(i)
+            except (sx.ExprError, ValueError, TypeError, FloatingPointError, ZeroDivisionError):
+                continue
+        if what:
+            def score(k: str) -> float:
+                d = dirs[k]
+                vals = [math.sqrt(max(0.0, 1.0 - float(np.dot(u, d)) ** 2)) for u in lines] + \
+                       [abs(float(np.dot(u, d))) for u in planes]
+                return sum(vals) / len(vals)
+
+            scores = {k: score(k) for k in CAMERA_DIRS}
+            best = max(scores, key=lambda k: scores[k])
+            if scores[chosen] < CAMERA_LOW and scores[best] >= scores[chosen] + CAMERA_BETTER:
+                notes.append(f"step {n}: camera {best} instead of {chosen}: {', '.join(what)} seen "
+                             f"{scores[best]:.2f} face on, not {scores[chosen]:.2f}")
+                s["camera"] = chosen = best
+        cam = chosen
+
+
+def repeated_labels(scene: dict) -> dict[str, str]:
+    """Label objects that only say again a name another object shows already: a "label" whose text is the label of
+    an object of another type (an edge, a vector, an angle) that is visible in every state the label object is in
+    (test2 #7, rules 6: lab_a, lab_b, lab_c beside vec_a, vec_b, vec_c put "a", "b", "c" twice on screen). Greek
+    names match their letters. {label object id: the object that shows its name}."""
+    shown = {i for s in scene["steps"] for i in s["show"]}
+    vis = {o["id"] for o in scene["objects"] if o["id"] not in shown}
+    states = [set(vis)]
+    for s in scene["steps"]:
+        vis = (vis | set(s["show"])) - set(s["hide"])
+        states.append(set(vis))
+    others: dict[str, list[str]] = {}
+    for o in scene["objects"]:
+        if o["type"] != "label" and o["label"]:
+            others.setdefault(plain_words(o["label"]), []).append(o["id"])
+    out = {}
+    for o in scene["objects"]:
+        if o["type"] != "label" or not plain_words(o["label"]):
+            continue
+        for other in others.get(plain_words(o["label"]), []):
+            if all(other in st for st in states if o["id"] in st):
+                out[o["id"]] = other
+                break
+    return out
+
+
+_GREEK = {"alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "theta": "θ", "phi": "φ", "psi": "ψ",
+          "omega": "ω", "lambda": "λ", "mu": "μ", "sigma": "σ", "rho": "ρ", "tau": "τ"}
+_LETTERS = {**{v: k for k, v in _GREEK.items()}, "ς": "sigma", "ϕ": "phi", "ϑ": "theta", "µ": "mu"}
+CAPTION_LINKS = 3  # objects a caption may bring forward in one step
+_ANGLE_WORD = re.compile(r"(?<!\w)angles?(?!\w)")
+
+
+def plain_words(s: str) -> str:
+    """Lower case, Greek letters written as their names ("Angle β" -> "angle beta"), so that a caption and a label
+    name one thing the same way whichever they use."""
+    s = "".join(f" {_LETTERS[c]} " if c in _LETTERS else c for c in s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _visible(scene: dict) -> set[str]:
+    """The objects visible before the first step: those no step shows (STATE RULES in scene3dState.ts)."""
+    shown = {i for s in scene["steps"] for i in s["show"]}
+    return {o["id"] for o in scene["objects"] if o["id"] not in shown}
+
+
+def link_captions(scene: dict, notes: list[str]) -> None:
+    """A step whose caption names an object by its label points at it (test2 #7 under rules 5: "Alpha and beta 90
+    degrees, standing straight" pointed at nothing): visible and not highlighted, it is highlighted; hidden, it is
+    shown. Whole words, any
+    case, a Greek name as a word or a letter ("beta" or "β"); labels of 2 or more characters only, so "a", "b" and
+    "c" never match the words a caption is made of. At most CAPTION_LINKS per step. One the step itself shows is
+    visible then, so it is highlighted too. One the step hides is left as it is, and so is one of the base drawing
+    that an earlier step hid: showing it again would take it out of the base (what no step shows), so it would be
+    missing from the start."""
+    base = _visible(scene)
+    vis = set(base)
+    named = []
+    for o in scene["objects"]:
+        word = plain_words(o["label"])
+        if len(word) >= 2:
+            named.append((o["id"], o["label"], re.compile(r"(?<!\w)" + re.escape(word) + r"(?!\w)")))
+    angles = [(o["id"], o["label"] or o["id"]) for o in scene["objects"] if o["type"] == "angle"]
+    for n, s in enumerate(scene["steps"], 1):
+        after = (vis | set(s["show"])) - set(s["hide"])
+        caption = plain_words(s["caption"])
+        hits = sorted((m.start(), k, oid, label) for k, (oid, label, rx) in enumerate(named)
+                      if (m := rx.search(caption)))
+        # "all angles 90 degrees" names every angle not on screen yet (test2 #4: 90 s of "all angles 90" with no
+        # angle marked; they came at "Rhombohedral")
+        if (m := _ANGLE_WORD.search(caption)):
+            hits = sorted(hits + [(m.start(), len(named) + k, oid, f"{m.group(0)} ({label})")
+                                  for k, (oid, label) in enumerate(angles) if oid not in after])
+        added, seen = 0, set()
+        for _, _, oid, label in hits:
+            if added == CAPTION_LINKS:
+                break
+            if oid in seen:
+                continue
+            seen.add(oid)
+            if oid in s["hide"]:
+                continue
+            if oid in after:
+                if oid in s["highlight"]:
+                    continue
+                s["highlight"].append(oid)
+                notes.append(f"step {n}: {oid} highlighted: its caption names {label!r}")
+            elif oid in base:
+                continue
+            else:
+                s["show"].append(oid)
+                after.add(oid)
+                notes.append(f"step {n}: {oid} shown: its caption names {label!r}")
+            added += 1
+        vis = after
+
+
+def drop_filler(scene: dict, notes: list[str]) -> None:
+    """A step must change what is on screen: a "set" that leaves a param where it is goes, and so does a step that
+    then shows nothing new, hides nothing shown, highlights nothing, moves nothing and keeps the camera where it is
+    (rules 5: test2 #4's "Leans over in one direction only" set all six params to the values they had, and test2
+    #7's "Alpha and beta 90 degrees, standing straight" changed nothing at all). The camera before the first
+    step is the first step's that names one (STATE RULES): when the step that named it goes, the first step left
+    takes it over, so the view starts the same."""
+    steps = scene["steps"]
+    vis = _visible(scene)
+    cur = {p["name"]: float(p["value"]) for p in scene["params"]}
+    start_cam = next((s["camera"] for s in steps if s["camera"] != "keep"), "iso")
+    cam = start_cam
+    kept = []
+    for n, s in enumerate(steps, 1):
+        moves, still = [], []
+        for st in s["set"]:
+            was = cur[st["param"]]
+            (still if abs(st["to"] - was) <= 1e-9 * max(1.0, abs(was)) else moves).append(st)
+        if still:
+            notes.append(f"step {n}: set of {', '.join(st['param'] for st in still)} removed: already there")
+        s["set"] = moves
+        changes = (any(i not in vis for i in s["show"]) or any(i in vis for i in s["hide"]) or s["highlight"]
+                   or moves or s["camera"] not in ("keep", cam))
+        vis = (vis | set(s["show"])) - set(s["hide"])
+        cur.update({st["param"]: float(st["to"]) for st in moves})
+        if s["camera"] != "keep":
+            cam = s["camera"]
+        if changes:
+            kept.append(s)
+        else:
+            notes.append(f"step {n} dropped: it changes nothing on screen ({s['caption'][:40]!r})")
+    if kept and next((s["camera"] for s in kept if s["camera"] != "keep"), "iso") != start_cam \
+            and kept[0]["camera"] == "keep":
+        kept[0]["camera"] = start_cam
+    scene["steps"] = kept
+
+
+def fit_ranges(scene: dict, notes: list[str]) -> None:
+    """Every param's range holds its value and every step's "to" (fit_range)."""
+    for p in scene["params"]:
+        values = [float(p["value"])] + [float(st["to"]) for s in scene["steps"] for st in s["set"]
+                                        if st["param"] == p["name"]]
+        p["min"], p["max"] = fit_range(p["name"], (p["min"], p["max"]), values, p["unit"], notes)
 
 
 def check_captions(scene: dict, notes: list[str]) -> None:
@@ -1384,6 +1927,59 @@ def make_scene(make_client: Callable[[], Any], job_dir: Path, piece_id: int, rea
         except OSError:
             pass
         return for_piece(scene, piece_id)
+
+
+_SCENE_FILE = re.compile(rf"^(\d{{3,}})\.v{FORMAT}\.json$")
+
+
+def list_scenes(job_dir: Path) -> dict:
+    """GET popouts: the drawings whose 3D view is made already and still this lecture version's and these rules'
+    (the very files POST would hand back without a model call), so the board can mark them. Never makes anything.
+    {"drawings": [{"drawing", "pieces", "title", "steps", "synced", "times"}]}, by drawing; "times" are the steps'
+    times when synced, else []. A slide lecture, or one not processed yet, has none. NotReady while replay.json is
+    being replaced.
+    The board badges each listed drawing and a click asks POST popout/{drawing}, so a drawing is listed only when
+    that request is answered from its file (prepare, then cached_scene): its piece is there and has a 3D view, it
+    opens itself (drawing_id), and the word times are not being worked out. A file that cannot be read is left out:
+    one broken file never breaks the list."""
+    if not (job_dir / "replay.json").exists():
+        return {"drawings": []}
+    raw, replay = read_replay(job_dir)
+    if replay.get("type") != "board" or refining(job_dir, replay):
+        return {"drawings": []}
+    version = scene_version(raw)
+    board = replay.get("board") if isinstance(replay.get("board"), dict) else {}
+    by_id = {p.get("id"): p for p in board.get("pieces") or [] if isinstance(p, dict)}
+    found = []
+    folder = job_dir / POPOUT
+    for f in folder.iterdir() if folder.is_dir() else []:
+        m = _SCENE_FILE.match(f.name)
+        if not m:
+            continue
+        drawing = int(m.group(1))
+        try:
+            if not can_popout(by_id.get(drawing)) or drawing_id(replay, drawing) != drawing:
+                continue
+            scene = cached_scene(job_dir, drawing, version)
+            if scene is not None:
+                found.append(_made(drawing, scene))
+        except Exception:
+            continue
+    found.sort(key=lambda d: d["drawing"])
+    return {"drawings": found}
+
+
+def _made(drawing: int, scene: dict) -> dict:
+    """One drawing of list_scenes, read from its scene as the player reads it (cleanScene): a synced scene keeps the
+    steps that have a time, in time order."""
+    steps = [s for s in scene.get("steps") if isinstance(s, dict)] if isinstance(scene.get("steps"), list) else []
+    times = sorted(float(s["t"]) for s in steps if _num(s.get("t")))
+    synced = scene.get("synced") is True and bool(times)
+    pieces = scene.get("pieces") if isinstance(scene.get("pieces"), list) else []
+    pieces = [p for p in pieces if isinstance(p, int) and not isinstance(p, bool)]
+    title = scene.get("title")
+    return {"drawing": drawing, "pieces": pieces or [drawing], "title": title if isinstance(title, str) else "",
+            "steps": len(times) if synced else len(steps), "synced": synced, "times": times if synced else []}
 
 
 def plain(e: BaseException) -> str:

@@ -340,6 +340,32 @@ export class BoardRenderer {
     }
   }
 
+  /** How much ink (in board pixels) the pieces whose image is loaded put in a box of the board, counting every pixel
+   *  ever written there; only `only`'s pieces when it is given (the badges of made 3D views go where this is least). */
+  inkIn(bx: number, by: number, bw: number, bh: number, only?: ReadonlySet<number>): number {
+    let n = 0;
+    for (const e of this.entries) {
+      const s = e.sprite;
+      if (!s || (only && !only.has(e.piece.id))) continue;
+      const [x, y, w, h] = e.piece.box;
+      const x0 = Math.max(bx, x);
+      const x1 = Math.min(bx + bw, x + w);
+      const y0 = Math.max(by, y);
+      const y1 = Math.min(by + bh, y + h);
+      if (x1 <= x0 || y1 <= y0) continue;
+      const kx = s.w / (w || s.w);
+      const ky = s.h / (h || s.h);
+      const px1 = Math.min(s.w, Math.ceil((x1 - x) * kx));
+      const py1 = Math.min(s.h, Math.ceil((y1 - y) * ky));
+      let c = 0;
+      for (let py = Math.max(0, Math.floor((y0 - y) * ky)); py < py1; py++) {
+        for (let px = Math.max(0, Math.floor((x0 - x) * kx)); px < px1; px++) if (s.rgba[(py * s.w + px) * 4 + 3] >= 64) c++;
+      }
+      n += c / (kx * ky);
+    }
+    return n;
+  }
+
   /** The visible piece whose ink is nearest to board point (bx, by), within a few pixels. */
   hitTest(bx: number, by: number, t: number): Piece | null {
     const R = Math.max(4, 9 / this.cssScale);

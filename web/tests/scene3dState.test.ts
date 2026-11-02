@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   beforeLine, chipCaption, cleanScene, drawingFrom, dwell, ease, momentClock, openingCamera, playFrom, sceneLoader,
-  sceneState, seekTimeFor, stepHeading, stepTimes, STEP_GAP,
+  liveNumberLabels, sceneState, seekTimeFor, stepFraming, stepHeading, stepTimes, STEP_GAP,
 } from '../src/player/scene3dState.ts';
 import type { Scene3D } from '../src/types.ts';
 
@@ -529,4 +529,98 @@ test('one request per drawing, shared; only a usable scene is kept', async () =>
   answers.push(rawScene());
   await load('other', 3);
   assert.equal(calls, 8);
+});
+
+// ---------------------------------------------------------------- angles
+
+test('an angle: exactly three points, and no size or one radius', () => {
+  const corner = [['0', '0', '0'], ['h', '0', '0'], ['2*cos(lean*deg)', '0', '2*sin(lean*deg)']];
+  const s = scene({
+    objects: [
+      obj('beta', 'angle', { points: corner, label: 'beta' }),
+      obj('sized', 'angle', { points: corner, size: ['0.4*h'] }),
+      obj('two', 'angle', { points: corner.slice(0, 2) }), // too few points
+      obj('four', 'angle', { points: [...corner, ['1', '1', '1']] }), // too many
+      obj('badr', 'angle', { points: corner, size: ['k'] }), // k is not a parameter
+      obj('rr', 'angle', { points: corner, size: ['1', '2'] }), // one radius at most
+      obj('vars', 'angle', { points: [['t', '0', '0'], ['1', '0', '0'], ['0', '1', '0']] }), // no variables
+    ],
+    steps: [step(10, { show: ['beta', 'two'], highlight: ['sized'] })],
+  });
+  assert.deepEqual(s.objects.map((o) => o.id), ['beta', 'sized']);
+  const beta = s.objects[0];
+  assert.equal(beta.type, 'angle');
+  assert.equal(beta.points.length, 3);
+  assert.deepEqual(beta.size, []);
+  assert.equal(beta.label, 'beta');
+  assert.deepEqual(s.objects[1].size, ['0.4*h']);
+  assert.deepEqual(s.steps[0].show, ['beta']);
+  assert.deepEqual(s.steps[0].highlight, ['sized']);
+});
+
+// ---------------------------------------------------------------- "Try it": the viewer's own values
+
+test('overrides: the viewer\'s values on top of the lecture, kept in range; the rest still follows the clock', () => {
+  const s = scene();
+  // in the middle of step 2 (lean 90 -> 110 at 110 s, over 2 s)
+  const plain = sceneState(s, { clock: 111 });
+  assert.deepEqual(plain.changing, ['lean']);
+  assert.deepEqual(plain.overridden, []);
+  const own = sceneState(s, { clock: 111 }, { overrides: { lean: 70 } });
+  assert.equal(own.params.lean, 70);
+  assert.deepEqual(own.overridden, ['lean']);
+  assert.deepEqual(own.changing, [], 'an overridden parameter is not "changing" with the step');
+  assert.equal(own.params.h, plain.params.h, 'the other parameters follow the lecture');
+  assert.equal(own.index, plain.index);
+  assert.deepEqual(own.vis, plain.vis);
+  // out of range: kept inside [min, max]; not a number, or not a parameter: ignored
+  assert.equal(sceneState(s, { clock: 111 }, { overrides: { lean: 500 } }).params.lean, 120);
+  assert.equal(sceneState(s, { clock: 111 }, { overrides: { h: -3 } }).params.h, 1);
+  const junk = sceneState(s, { clock: 111 }, { overrides: { lean: NaN, nope: 3 } as Record<string, number> });
+  assert.equal(junk.params.lean, plain.params.lean);
+  assert.equal('nope' in junk.params, false);
+  // pure: the same scene, moment and overrides give the same state
+  assert.deepEqual(sceneState(s, { clock: 111 }, { overrides: { lean: 70 } }), own);
+  // the step that moves h (100 s, over 2 s) moves it while it is not overridden
+  assert.deepEqual(sceneState(s, { clock: 101 }).changing, ['h']);
+  assert.deepEqual(sceneState(s, { clock: 101 }, { overrides: { h: 2 } }).changing, []);
+});
+
+// ---------------------------------------------------------------- fixer's pass
+
+test('a number label the lecture keeps equal to one parameter is drawn live', () => {
+  // synth3d-vector3d: "3" by the x component while vx is 3 stayed "3" with the slider at 5
+  const s = scene({
+    params: [
+      { name: 'vx', value: 3, min: 1, max: 5, label: 'x', unit: '' },
+      { name: 'vy', value: 2, min: 1, max: 5, label: 'y', unit: '' },
+      { name: 'w', value: 2, min: 1, max: 5, label: 'w', unit: '' },
+      { name: 'h', value: 1, min: 1, max: 9, label: 'h', unit: '' },
+    ],
+    objects: [
+      obj('l3', 'label', { points: [['0', '0', '0']], label: '3' }),
+      obj('l2', 'label', { points: [['0', '0', '0']], label: '2' }), // vy and w are both 2: whose is it?
+      obj('lh', 'label', { points: [['0', '0', '0']], label: '1' }), // h moves away from 1 while it shows
+      obj('lt', 'label', { points: [['0', '0', '0']], label: 'the top' }),
+      obj('lv', 'label', { points: [['0', '0', '0']], label: '3' }), // shown after vx moved to 4
+    ],
+    steps: [
+      step(100, { caption: 'x', show: ['l3', 'l2', 'lh'] }),
+      step(110, { caption: 'up', set: [{ param: 'h', to: 5 }] }),
+      step(120, { caption: 'on', set: [{ param: 'vx', to: 4 }], show: ['lv'], hide: ['l3'] }),
+    ],
+  });
+  assert.deepEqual(liveNumberLabels(s), { l3: 'vx' });
+});
+
+test('each step is framed on what is on screen then, where its change starts and ends', () => {
+  const s = scene();
+  const f = stepFraming(s);
+  assert.equal(f.length, s.steps.length + 1);
+  assert.deepEqual(f[0].visible, ['base', 'force', 'note']); // before the first step: what no step shows
+  assert.deepEqual([f[0].from.h, f[0].to.h], [1, 1]);
+  assert.deepEqual([f[1].from.h, f[1].to.h], [1, 3]); // the height grows
+  assert.deepEqual(f[2].visible, ['base', 'force', 'note', 'edge']);
+  assert.deepEqual([f[2].from.lean, f[2].to.lean, f[2].to.h], [90, 110, 3]);
+  assert.deepEqual(f[3].visible, ['base', 'note', 'edge', 'fx', 'fz']); // the force goes, its parts come
 });

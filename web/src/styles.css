@@ -27,6 +27,13 @@
   box-sizing: border-box;
 }
 
+/* Greek letters in the 3D view as the board writes them, serif italic (in the UI font "γ" read as "y") */
+@font-face {
+  font-family: 'P3 Greek';
+  src: local('Cambria Italic'), local('Cambria-Italic'), local('Times New Roman Italic'), local('TimesNewRomanPS-ItalicMT'),
+    local('Georgia Italic'), local('DejaVu Serif Italic'), local('Noto Serif Italic');
+  unicode-range: U+0370-03FF;
+}
 html,
 body {
   margin: 0;
@@ -369,6 +376,14 @@ kbd {
   .player {
     height: 100vh;
   }
+  /* With the 3D view open, the page still fits the window (1366 x 900 and up): the stage takes what is left over
+     (never under 340 px), the transcript keeps at least 200 px. */
+  .player-main:has(.board-panel.has-3d) > .lower {
+    min-height: 200px;
+  }
+  .v3-stage {
+    max-height: max(340px, calc(100vh - var(--v3-around, 510px)));
+  }
   .player-main {
     flex: 1;
     min-height: 0;
@@ -553,6 +568,112 @@ kbd {
   }
 }
 
+/* A drawing whose 3D view is made: a small "3D" badge at its top right corner, "Watch in 3D" while the lecture
+   explains it. Board.tsx sets data-state on every frame (off: not on the board yet). */
+.b3d-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  overflow: hidden;
+  pointer-events: none;
+}
+.b3d {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px 2px 5px;
+  border: 1px solid rgba(122, 167, 255, 0.55);
+  border-radius: 999px;
+  background: rgba(13, 15, 19, 0.82);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  white-space: nowrap;
+  /* placed by the board beside its drawing, the badge and the pill each where they cover the least writing
+     (Board.tsx, popoutable.ts badgeSpot): the edge they keep there, and their top */
+  left: var(--b3d-left);
+  top: var(--b3d-top);
+  transform: var(--b3d-shift, translateX(-100%));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.b3d[data-state='off'] {
+  display: none;
+}
+.b3d .b3d-long {
+  display: none;
+}
+.b3d[data-state='pill'] {
+  left: var(--b3d-pill-left);
+  top: var(--b3d-pill-top);
+  transform: var(--b3d-pill-shift, translateX(-100%));
+  padding: 3px 10px 3px 7px;
+  border-color: var(--accent);
+  background: var(--accent-strong);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0;
+  animation: b3d-in 0.3s ease-out;
+}
+.b3d[data-state='pill'] .b3d-short {
+  display: none;
+}
+.b3d[data-state='pill'] .b3d-long {
+  display: inline;
+}
+/* no room for the words without covering writing: the pill stays the badge's size, lit up */
+.b3d[data-state='pill'][data-long='no'] {
+  padding: 2px 7px 2px 5px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.b3d[data-state='pill'][data-long='no'] .b3d-short {
+  display: inline;
+}
+.b3d[data-state='pill'][data-long='no'] .b3d-long {
+  display: none;
+}
+.b3d:hover,
+.b3d:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.b3d[data-state='pill']:hover,
+.b3d[data-state='pill']:focus-visible {
+  background: var(--accent);
+}
+.b3d:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@keyframes b3d-in {
+  from {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .b3d[data-state='pill'] {
+    animation: none;
+  }
+}
+@media (max-width: 640px) {
+  .b3d,
+  .b3d[data-state='pill'][data-long='no'] {
+    font-size: 10px;
+    padding: 1px 6px 1px 4px;
+  }
+  .b3d[data-state='pill'] {
+    font-size: 11px;
+  }
+}
 .board-tip {
   position: absolute;
   z-index: 10;
@@ -1392,12 +1513,14 @@ kbd {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  font-family: 'P3 Greek', Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   outline: none;
   container-type: inline-size; /* the caption goes under the drawing when the view is narrow */
 }
 /* the title is in the header bar, so the drawing gets the room */
 .v3-bar {
   flex-wrap: nowrap;
+  align-items: flex-start;
   margin-bottom: 0;
 }
 .v3-thumb {
@@ -1418,7 +1541,7 @@ kbd {
 }
 .panel-head h2.v3-title {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 8px;
   flex: 1;
   min-width: 0;
@@ -1430,6 +1553,7 @@ kbd {
 }
 .v3-kicker {
   flex: none;
+  margin-top: 1px;
   padding: 1px 6px;
   border: 1px solid var(--border-strong);
   border-radius: 5px;
@@ -1440,9 +1564,28 @@ kbd {
 }
 .v3-title-text {
   min-width: 0;
+  line-height: 1.3;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+/* Two lines keep the page inside a 1366 x 900 window; narrower, the board panel is narrow too (the page scrolls from
+   under 1000 px anyway): the title gets three lines, then all it needs (it was cut at 1024 x 768 and on a phone). */
+@media (max-width: 1199px) {
+  .v3-title-text {
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+  }
+}
+@media (max-width: 999px) {
+  .v3-title-text {
+    display: block;
+    -webkit-line-clamp: none;
+    line-clamp: none;
+  }
 }
 .v3-back {
   flex: none;
@@ -1547,9 +1690,22 @@ kbd {
   padding: 7px 12px 8px;
   border: 1px solid var(--border-strong);
   border-radius: 9px;
-  background: rgba(13, 15, 19, 0.84);
-  backdrop-filter: blur(4px);
+  background: rgba(13, 15, 19, 0.86);
   pointer-events: none; /* the drawing can still be turned through it */
+}
+.v3-cap-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px 12px;
+  min-width: 0;
+}
+.v3-cap-row .v3-hint {
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .v3-cap-head {
   color: var(--accent);
@@ -1568,21 +1724,207 @@ kbd {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* Every value in the drawing, as it is now: over the stage's top left (the drawing is framed under it). The one a
+   step is moving stands out; the viewer's own ("Try it") are marked. */
+.v3-values {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: calc(100% - 150px); /* clear of Reset view */
+  pointer-events: none; /* the drawing can be turned between the values */
+}
+.v3-values > * {
+  pointer-events: auto;
+}
+.v3-vals {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+}
+.v3-vals > * {
+  pointer-events: auto;
+}
+.v3-val {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: rgba(13, 15, 19, 0.8);
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+}
+.v3-val .v,
+.v3-slider .v {
+  color: var(--text);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.v3-val.changing,
+.v3-slider.changing {
+  border-color: var(--accent);
+  background: rgba(30, 44, 74, 0.92);
+}
+.v3-val.changing .v,
+.v3-slider.changing .v {
+  color: var(--accent);
+}
+.v3-val.mine,
+.v3-slider.mine .v {
+  color: var(--amber);
+}
+.v3-val.mine {
+  border-color: rgba(245, 181, 68, 0.6);
+}
+.v3-val.mine .v {
+  color: var(--amber);
+}
+.v3-try {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.v3-try:hover,
+.v3-try:focus-visible {
+  background: var(--accent-soft);
+}
+.v3-try[aria-pressed='true'] {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+/* "Try it": a slider per value, down the left of the stage (the drawing moves right to stay clear) */
+.v3-values.open {
+  width: 250px;
+  max-width: 45%;
+  max-height: calc(100% - 16px);
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: rgba(13, 15, 19, 0.9);
+  overflow-y: auto;
+  pointer-events: auto;
+}
+.v3-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.v3-try-head {
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+.v3-slider {
+  display: grid;
+  grid-template-columns: minmax(0, 72px) minmax(60px, 1fr) 40px;
+  grid-template-areas: 'k s v';
+  align-items: center;
+  gap: 0 8px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  font-size: 12px;
+  transition: border-color 0.2s, background 0.2s;
+}
+.v3-slider .k {
+  grid-area: k;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v3-slider .v {
+  grid-area: v;
+  text-align: right;
+}
+.v3-slider input {
+  grid-area: s;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.v3-slider input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.v3-mine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.v3-mine-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(245, 181, 68, 0.16);
+  color: var(--amber);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.v3-mine-back {
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: rgba(13, 15, 19, 0.85);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.v3-mine-back:hover,
+.v3-mine-back:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+@media (prefers-reduced-motion: reduce) {
+  .v3-val,
+  .v3-slider {
+    transition: none;
+  }
+}
 /* A narrow view (a 1024 px window, a phone): the caption goes under the drawing instead of over its bottom, where
    the corner of a cell and its angles were. */
 @container (max-width: 560px) {
+  /* the stage is as tall as what it holds: the drawing keeps its height when the values or the sliders join it */
   .v3-stage {
     display: flex;
     flex-direction: column;
+    aspect-ratio: auto !important;
+    max-height: none;
   }
   .v3-stage .p3-host {
     position: relative;
     inset: auto;
-    flex: 1 1 auto;
+    flex: none;
+    height: clamp(240px, 62cqw, 420px);
     min-height: 0;
   }
   .v3-caption {
-    position: static;
+    position: relative;
+    order: 2;
     flex: none;
     max-height: none;
     margin: 0;
@@ -1595,6 +1937,31 @@ kbd {
   .v3-cap-text {
     -webkit-line-clamp: 3;
     line-clamp: 3;
+  }
+  /* and the values between the two, in the flow (Reset view stays over the drawing's corner) */
+  .v3-values,
+  .v3-values.open {
+    position: static;
+    order: 1;
+    flex: none;
+    width: auto;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 6px 8px;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    background: var(--panel-2);
+    backdrop-filter: none;
+    overflow: visible;
+  }
+  .v3-values.open .v3-sliders {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  }
+  .v3-try-head {
+    grid-column: 1 / -1;
   }
 }
 .v3-cap-text.muted {
@@ -1769,9 +2136,14 @@ kbd {
 /* the element the label renderer places; the pill inside it is nudged off other labels (labelLayout.ts) */
 .p3-anchor {
   line-height: 0;
+  will-change: transform; /* moved on every frame: composited, never painted again */
 }
 .p3-anchor > .dim {
   opacity: 0.25;
+}
+/* an angle whose plane is seen edge-on: its mark is a line, so its name steps back */
+.p3-anchor > .edgeon:not(.hl) {
+  opacity: 0.4;
 }
 .p3-tick {
   color: var(--muted);
@@ -1801,6 +2173,9 @@ kbd {
 }
 .p3-label.p3-point {
   margin: -5px 0 0 7px;
+}
+.p3-label.p3-angle {
+  font-variant-numeric: tabular-nums;
 }
 .p3-label.p3-text {
   border: 0;

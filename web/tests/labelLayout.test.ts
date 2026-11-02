@@ -123,3 +123,20 @@ test('a curve that is not an arc, or a whole circle, keeps its label at its midd
   // a line
   assert.equal(arcLabelAt(Array.from({ length: 10 }, (_, i) => [i, 0, 0] as [number, number, number])), null);
 });
+
+test("a label that has to move never lands on an angle's mark (test2 #7: beta's name went onto gamma's arc)", () => {
+  // the second label must move: the smallest move (16 px down) is on an angle's wedge, so it goes up instead
+  const boxes = [box(100, 100), box(110, 104)];
+  const wedge = { x: 95, y: 118, w: 60, h: 30 };
+  const [a, b] = placeLabels(boxes, { ...STAGE, avoid: [wedge] });
+  assert.deepEqual(a, { dx: 0, dy: 0, dim: false });
+  assert.equal(b.dim, false);
+  assert.deepEqual([b.dx, b.dy], [0, -24]);
+  // a label already where it belongs (its own place) stays there, even on a mark
+  const [c] = placeLabels([box(100, 120)], { ...STAGE, avoid: [wedge] });
+  assert.deepEqual(c, { dx: 0, dy: 0, dim: false });
+  // nowhere free within reach but on marks: dimmed in its place
+  const walls = [{ x: 0, y: 0, w: 600, h: 99 }, { x: 0, y: 123, w: 600, h: 277 }, { x: 0, y: 0, w: 99, h: 400 }, { x: 151, y: 0, w: 449, h: 400 }];
+  const [, e] = placeLabels(boxes, { ...STAGE, avoid: walls });
+  assert.deepEqual(e, { dx: 0, dy: 0, dim: true });
+});

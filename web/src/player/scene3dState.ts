@@ -20,7 +20,7 @@ import { formatTime } from './timing.ts';
 
 export const OBJECT_TYPES: readonly Scene3DObjectType[] = [
   'point', 'segment', 'vector', 'polygon', 'box', 'sphere', 'cylinder', 'cone', 'torus', 'graph', 'surface', 'curve',
-  'psurface', 'label',
+  'psurface', 'label', 'angle',
 ];
 export const CAMERAS: readonly CameraPreset[] = ['keep', 'front', 'top', 'side', 'iso'];
 export const LIMITS = {
@@ -33,7 +33,7 @@ export const LIMITS = {
   explain: 300,
   caption: 140,
   label: 30,
-  paramLabel: 24,
+  paramLabel: 32,
   axisLabel: 20,
   overMin: 0.6,
   overMax: 8,
@@ -168,6 +168,19 @@ function cleanObject(o: unknown, params: string[]): Scene3DObject | null {
   };
   const points = arr(o.points);
   switch (type) {
+    case 'angle': {
+      // exactly three points (the vertex, then a point on each arm), and no size or one radius
+      if (points.length !== 3) return null;
+      const ps = points.map(vec);
+      if (ps.some((p) => !p)) return null;
+      const size = arr(o.size);
+      if (size.length > 1) return null;
+      const r = size.length ? e(size[0]) : null;
+      if (size.length && r === null) return null;
+      obj.points = ps as Vec3E[];
+      obj.size = r === null ? [] : [r];
+      break;
+    }
     case 'point':
     case 'label': {
       const p = vec(points[0]);
@@ -364,6 +377,9 @@ export type Moment = { clock: number } | { step: number; elapsed: number };
 export interface StateOptions {
   /** prefers-reduced-motion: every change jumps instead of animating. */
   reducedMotion?: boolean;
+  /** "Try it": values the viewer set with the sliders, on top of the lecture's (each kept inside its parameter's
+   *  range). A parameter in here does not move with the steps until the overrides end. */
+  overrides?: Readonly<Record<string, number>>;
 }
 
 export type Camera = Exclude<CameraPreset, 'keep'>;
@@ -375,6 +391,10 @@ export interface SceneState {
   progress: number;
   /** Every parameter's value. */
   params: Record<string, number>;
+  /** The parameters a step is moving at this moment (not the viewer's own values), in the scene's order. */
+  changing: string[];
+  /** The parameters at the viewer's own value ("Try it"), in the scene's order. */
+  overridden: string[];
   /** Every object's visibility, 0 (hidden) .. 1 (fully shown). */
   vis: Record<string, number>;
   /** Objects that glow now (the current step's). */
@@ -476,9 +496,22 @@ export function sceneState(scene: Scene3D, at: Moment, opts: StateOptions = {}):
 
   let moving = false;
   const params: Record<string, number> = {};
-  for (const [name, seg] of pseg) {
-    params[name] = segAt(seg, clock);
-    moving ||= segMoving(seg, clock);
+  const changing: string[] = [];
+  const overridden: string[] = [];
+  const own = opts.overrides ?? {};
+  for (const p of scene.params) {
+    const seg = pseg.get(p.name)!;
+    const mine = Object.prototype.hasOwnProperty.call(own, p.name) ? own[p.name] : undefined;
+    if (typeof mine === 'number' && Number.isFinite(mine)) {
+      params[p.name] = clamp(mine, Math.min(p.min, p.max), Math.max(p.min, p.max));
+      overridden.push(p.name);
+      continue;
+    }
+    params[p.name] = segAt(seg, clock);
+    if (segMoving(seg, clock)) {
+      moving = true;
+      changing.push(p.name);
+    }
   }
   const vis: Record<string, number> = {};
   for (const [id, seg] of vseg) {
@@ -494,6 +527,8 @@ export function sceneState(scene: Scene3D, at: Moment, opts: StateOptions = {}):
     index,
     progress: !step ? 0 : d > 0 ? clamp(since / d, 0, 1) : 1,
     params,
+    changing,
+    overridden,
     vis,
     highlight: step ? step.highlight : [],
     glow,
@@ -572,4 +607,53 @@ export function beforeLine(scene: Scene3D): string {
   if (!scene.steps.length) return 'Drag to turn the drawing.';
   if (scene.synced && scene.steps[0].t !== null) return `The explanation starts at ${formatTime(scene.steps[0].t)}.`;
   return 'This drawing is not talked about in the lecture: go through it with Next, or play the steps.';
+}
+
+/** Labels that are a plain number the lecture keeps equal to one parameter in every resting state where the label
+ *  shows (the start and the end of every step): synth3d-vector3d's "3", "2" and "4" beside the components while vx,
+ *  vy and vz are 3, 2 and 4. The stage draws them with the parameter's value, so they stay true while a student
+ *  moves the sliders ("3" stayed "3" with vx at 5). A number two parameters equal is left as it is. {object id:
+ *  parameter name}. */
+export function liveNumberLabels(scene: Scene3D): Record<string, string> {
+  const later = new Set(scene.steps.flatMap((s) => s.show));
+  let vis = new Set(scene.objects.filter((o) => !later.has(o.id)).map((o) => o.id));
+  let params: Record<string, number> = Object.fromEntries(scene.params.map((p) => [p.name, p.value]));
+  const states = [{ vis, params }];
+  for (const s of scene.steps) {
+    params = { ...params };
+    for (const { param, to } of s.set) if (param in params) params[param] = to;
+    const hide = new Set(s.hide);
+    vis = new Set([...vis, ...s.show].filter((id) => !hide.has(id)));
+    states.push({ vis, params });
+  }
+  const out: Record<string, string> = {};
+  for (const o of scene.objects) {
+    if (!/^\s*[-+]?\d+(?:\.\d+)?\s*$/.test(o.label)) continue;
+    const v = Number(o.label);
+    const where = states.filter((st) => st.vis.has(o.id));
+    if (!where.length) continue;
+    const same = scene.params.filter((p) => where.every((st) => Math.abs(st.params[p.name] - v) <= 1e-9 * Math.max(1, Math.abs(v))));
+    if (same.length === 1) out[o.id] = same[0].name;
+  }
+  return out;
+}
+
+/** What the camera frames at each step, in order from before the first one (index -1): the objects visible once the
+ *  step is done, and the parameters where its change starts and where it ends (the drawing is framed for both, so
+ *  nothing leaves the stage while it changes). The stage frames each step on these instead of on every object of
+ *  every moment at once (the cylinder filled a fifth of the stage until its ghosts came). */
+export function stepFraming(scene: Scene3D): { visible: string[]; from: Record<string, number>; to: Record<string, number> }[] {
+  const later = new Set(scene.steps.flatMap((s) => s.show));
+  let vis = scene.objects.filter((o) => !later.has(o.id)).map((o) => o.id);
+  let params: Record<string, number> = Object.fromEntries(scene.params.map((p) => [p.name, p.value]));
+  const out = [{ visible: vis, from: params, to: params }];
+  for (const s of scene.steps) {
+    const from = params;
+    params = { ...params };
+    for (const { param, to } of s.set) if (param in params) params[param] = to;
+    const hide = new Set(s.hide);
+    vis = [...new Set([...vis, ...s.show])].filter((id) => !hide.has(id));
+    out.push({ visible: vis, from, to: params });
+  }
+  return out;
 }

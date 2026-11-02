@@ -205,6 +205,27 @@ def job_popout(job_id: str, piece_id: int, request: Request):
         raise HTTPException(500, popout.plain(e)) from None
 
 
+@app.get("/api/jobs/{job_id}/popouts")
+def job_popouts(job_id: str):
+    """The drawings whose 3D view is made already and valid for this lecture and these rules (POST would hand it
+    back without a model call): {"drawings": [{"drawing", "pieces", "title", "steps", "synced", "times"}]}. Never
+    calls the model nor makes anything; a slide lecture or one with no 3D views gives none. 404 no such job; 409
+    while replay.json is being replaced: one plain line each."""
+    from . import popout
+    from .export import NotReady
+
+    d = _job_dir(job_id)
+    try:
+        return JSONResponse(popout.list_scenes(d), headers=NO_CACHE)
+    except NotReady as e:
+        raise HTTPException(409, popout.plain(e)) from None
+    except Exception as e:  # one plain line for the player (it then shows no badges); the traceback on the console
+        traceback.print_exc()
+        text = str(e).strip().splitlines()[0][:160] if str(e).strip() else ""
+        why = f"{type(e).__name__}: {text}" if text else type(e).__name__
+        raise HTTPException(500, f"could not list the 3D views ({why})") from None
+
+
 @app.get("/api/jobs/{job_id}/notes.json")
 def job_notes_json(job_id: str):
     from .notes import notes_data
