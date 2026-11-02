@@ -16,7 +16,7 @@ Record at 1920×1080, browser zoom 100%, dark theme. Close other tabs; hide the 
 | 1:35–1:45 | A moment where you point at a result on the board: the virtual board spotlights or underlines it while the video plays untouched. | "When the teacher points at the board, the clean board shows what they meant: SAM 3.1 follows the hand, Muse Spark decides if it was pointing and at what." |
 | 1:45–2:15 | Press A: Ask Muse. Attach a formula from the start (board tooltip "Ask") and the result from the end (Browse lecture), ask "How are these connected?". The answer streams with typeset item chips and times; click a chip: the video jumps and the board outlines it. | "And you can ask about it. Muse Spark sees the whole lecture, so it can connect the first minute to the last, and every claim links back to the moment and the writing." |
 | 2:15–2:35 | Slide lecture: clean slide (no cursor, webcam blanked); the cursor's wiggle becomes a calm circle; a sweep becomes an underline; an A→B move becomes an arrow; a rest becomes a spotlight. | "For slides, the restless cursor becomes calm, meaningful animations. Code tracks the pointer; Muse Spark looks at the path on the slide and what was being said, and decides what it meant." |
-| 2:35–2:45 | Click "Slides": the lecture as a deck, a cropped board per slide with Muse Spark's key points. Press Present, arrow through two slides, Esc. Point at "Download PowerPoint" and "Save as PDF". | "And when you're done, the whole lecture becomes slides: the board as the teacher built it, key points from Muse Spark, ready to present, print or open in PowerPoint." |
+| 2:35–2:45 | Click "Slides": Muse Spark's deck of the lecture. Scroll past the agenda to a formula slide, a worked example and the key takeaways. Click "Download PowerPoint" and show the file open in PowerPoint for two seconds (speaker notes visible). | "And when you're done, Muse Spark turns the whole lecture into a slide deck: typeset formulas, worked steps, the teacher's drawings and the key takeaways, as a real PowerPoint with what was said in the notes." |
 | 2:45–2:55 | The architecture diagram from the README; the self-test result lines (72/72, 47/47). | "Under the hood: plain code measures every pixel, fast and exact; Meta models make every judgement about meaning. Generated lectures with known answers keep it honest." |
 | 2:55–3:00 | Back to the board replay. | "Replay Board: every lecture, as if you had the best seat in the room." |
 
@@ -25,8 +25,9 @@ Record at 1920×1080, browser zoom 100%, dark theme. Close other tabs; hide the 
 - `cd web; npm run build`, then use the built player at http://127.0.0.1:8000 (smoother than dev mode).
 - The lecture list shows only your lectures (delete old test jobs in `data\jobs`).
 - Pop-outs you will show are already opened once (cached), so they appear instantly.
-- Open the Slides page of the lecture you film once before (the key points take about 6 s the first time), and
-  check each slide's crop and title. The 3D pop-out and Notes page are no longer in the script; show them only if
-  you have spare seconds.
+- Open the Slides page of the lecture you film once before (Muse Spark writes the deck in about 25–30 s the first
+  time, then it's cached) and read every slide. Download the PowerPoint and open it in PowerPoint once before
+  filming: it was only checked in LibreOffice here. The 3D pop-out and Notes page are no longer in the script; show
+  them only if you have spare seconds.
 - Decide on the Ask Muse question beforehand. A question asked before comes from the cache, free, but appears at
   once instead of streaming in; to show the streaming, ask it fresh on camera (about a cent).

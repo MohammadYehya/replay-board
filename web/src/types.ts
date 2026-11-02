@@ -266,41 +266,107 @@ export interface AskTurn {
   cached?: boolean;
 }
 
-// Slides export (app/export.py, GET /api/jobs/{id}/slides.json): a deck of what the teacher presented, one page per
-// stretch of the lecture, with Muse Spark's title and key points once they are written.
+// Slides (app/export.py, GET /api/jobs/{id}/slides.json): a lecture deck written by Muse Spark that covers the whole
+// lecture in order, checked by code, previewed here and downloaded as a PowerPoint (app/pptx_deck.py). Format 2.
+// Times are on the video's clock. Text is plain, except inline maths ($...$) in bullet, step, table and callout text.
 
-/** Something on a slide: a piece of writing ("#12"), a written line ("#L3") or a slide element ("#s0e1"). */
-export interface DeckItem {
-  ref: string;
-  kind: string;
+export type DeckKind = 'board' | 'slides';
+export type SlideKind = 'title' | 'agenda' | 'section' | 'content' | 'summary' | 'formulas';
+
+export interface BulletItem {
+  text: string;
+  level: 0 | 1;
+}
+export interface BulletsBlock {
+  type: 'bullets';
+  items: BulletItem[];
+}
+/** One display formula; refs are the board or slide items it comes from ("#12", "#L3", "#s0e1"). */
+export interface EquationBlock {
+  type: 'equation';
+  latex: string;
+  label: string;
+  refs: string[];
+}
+/** One step of a worked example or derivation: LaTeX, text or both. */
+export interface StepItem {
+  latex: string;
+  text: string;
+}
+export interface StepsBlock {
+  type: 'steps';
+  label: string;
+  items: StepItem[];
+}
+/** A drawing, graph or diagram cut from the board or a slide; image is "export/fig_NNN.png" ('' when unusable). */
+export interface FigureBlock {
+  type: 'figure';
+  refs: string[];
+  caption: string;
+  image: string;
+  size: [number, number] | null;
+}
+export interface TableBlock {
+  type: 'table';
+  header: string[];
+  rows: string[][];
+  caption: string;
+}
+export type CalloutStyle = 'definition' | 'key' | 'note';
+export interface CalloutBlock {
+  type: 'callout';
+  style: CalloutStyle;
+  title: string;
   text: string;
   latex: string;
-  /** Where the player should seek to see it explained (video clock). */
-  t: number;
-  /** A graph, diagram, arrow...: named in plain text in the Typeset view. */
-  drawing?: boolean;
 }
+export type DeckBlock = BulletsBlock | EquationBlock | StepsBlock | FigureBlock | TableBlock | CalloutBlock;
 
-export interface DeckPage {
-  id: string; // "p1"
-  t0: number;
-  t1: number;
-  chapter: string;
+export interface DeckSlide {
+  id: string; // "s1"
+  kind: SlideKind;
   title: string;
-  /** Path inside the job folder ("export/page_001.png"); '' when there is no image. */
-  image: string;
-  image_size: [number, number] | null;
-  items: DeckItem[];
-  /** What was said during the slide, as plain text (cut with "..."). */
+  /** The section the slide is in ('' for the title, agenda, summary and formula slides). */
+  section: string;
+  /** The part of the lecture it covers (null for the title, agenda and formula slides). */
+  t0: number | null;
+  t1: number | null;
+  /** Where "Play" seeks: the slide's first important moment. */
+  t: number | null;
+  blocks: DeckBlock[];
+  /** What a presenter would say: plain text, Unicode maths. */
+  notes: string;
+  /** What was said during [t0, t1), as plain text. */
   said: string;
-  /** Muse Spark's key points (plain text), or null until they are written. */
-  points: string[] | null;
 }
 
 export interface Deck {
-  type: 'board' | 'slides';
-  title: string;
+  format: 2;
+  /** Changes when replay.json or the deck rules change. */
   version: string;
-  points_ready: boolean;
-  pages: DeckPage[];
+  kind: DeckKind;
+  title: string;
+  subtitle: string;
+  /** The job's display name. */
+  lecture: string;
+  /** Seconds of the analysed span. */
+  duration: number;
+  clip: [number, number];
+  slides: DeckSlide[];
+  /** Plain lines about parts written without Muse Spark; [] when all went fine. */
+  degraded: string[];
+}
+
+export type SlidesState = 'none' | 'writing' | 'ready' | 'failed';
+
+/** GET /api/jobs/{id}/slides.json and POST /api/jobs/{id}/slides/write. */
+export interface SlidesStatus {
+  state: SlidesState;
+  /** A plain line: "Planning the slides", "Writing part 2 of 5". */
+  step: string;
+  done: number;
+  total: number;
+  error: string | null;
+  /** The deck when ready; while writing, the slides finished so far (in order) or null. */
+  deck: Deck | null;
 }

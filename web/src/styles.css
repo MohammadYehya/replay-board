@@ -2588,7 +2588,7 @@ pre.md-code {
   }
 }
 
-/* ---------------- slides export ---------------- */
+/* ---------------- slides ---------------- */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -2600,97 +2600,106 @@ pre.md-code {
   white-space: nowrap;
   border: 0;
 }
-.slides-page { min-height: 100vh; }
-.slides-bar { flex-wrap: wrap; }
-.slides-actions { flex-wrap: wrap; justify-content: flex-end; }
 .ghost-btn:disabled { opacity: 0.45; cursor: default; }
 .ghost-btn:disabled:hover { background: transparent; border-color: var(--border); }
+.slides-page { min-height: 100vh; }
+.slides-bar { flex-wrap: wrap; }
+.slides-bar-name {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.slides-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.primary-btn.slides-download {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border-radius: 9px;
+  font-size: 13px;
+  line-height: 1.45;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.slides-download[aria-busy='true'] { opacity: 0.75; cursor: progress; }
 .slides-page a:focus-visible,
 .slides-page button:focus-visible,
-.slides-page input:focus-visible,
+.slides-page summary:focus-visible,
 .present button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-.slides-main { max-width: 1040px; margin: 0 auto; padding: 32px 20px 80px; }
+.slides-bar-error { flex-basis: 100%; margin: 0; color: var(--err); font-size: 13px; text-align: right; }
+.slides-main { max-width: 1000px; margin: 0 auto; padding: 30px 20px 80px; }
 .slides-intro { margin: 0 0 26px; }
-.slides-intro .notes-sub { margin-bottom: 16px; }
-.slides-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
-.seg {
-  display: inline-flex;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel);
-}
-.seg button {
-  padding: 5px 14px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 13px;
-  cursor: pointer;
-}
-.seg button:hover { color: var(--text); }
-.seg button.on { background: var(--panel-3); color: var(--text); }
-.said-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+.slides-intro .notes-title { margin-bottom: 8px; }
+.slides-subtitle { margin: 0 0 6px; color: var(--text-2); font-size: 16px; }
+.slides-meta { margin: 0; color: var(--muted); font-size: 13px; }
+.slides-how { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+.slides-degraded {
+  margin: 14px 0 0;
+  padding: 9px 14px;
+  border-left: 3px solid rgba(245, 181, 68, 0.6);
+  border-radius: 0 8px 8px 0;
+  background: rgba(245, 181, 68, 0.06);
   color: var(--text-2);
   font-size: 13px;
-  cursor: pointer;
 }
-.said-toggle input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent-strong); }
-.slides-points-error,
+.slides-degraded p { margin: 0; }
+.slides-degraded p + p { margin-top: 4px; }
 .slides-load-error {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  margin: 14px 0 0;
-  color: var(--err);
-  font-size: 13.5px;
+  margin: 0 0 24px;
 }
-.slides-bar-error { flex-basis: 100%; margin: 0; color: var(--err); font-size: 13px; text-align: right; }
-.slides-actions a[aria-busy='true'] { opacity: 0.7; cursor: progress; }
 
-.deck-sheet { margin: 0 0 28px; scroll-margin-top: 70px; }
-.deck-card {
-  padding: 18px 20px 20px;
+/* while Muse Spark writes */
+.slides-progress {
+  margin: 0 0 30px;
+  padding: 18px 20px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--panel);
 }
-.deck-head { display: flex; align-items: flex-start; gap: 14px; margin: 0 0 14px; }
-.deck-num {
-  flex: none;
-  min-width: 30px;
-  height: 30px;
-  padding: 0 8px;
-  border-radius: 9px;
+.slides-progress-step { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; color: var(--text); font-size: 15px; }
+.slides-progress-step .spark-icon { color: var(--accent); }
+.slides-progress-bar {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
   background: var(--panel-3);
-  color: var(--text-2);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 30px;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
 }
-.deck-heading { flex: 1; min-width: 0; }
-.deck-heading h2 { margin: 0; font-size: 21px; line-height: 1.3; letter-spacing: -0.01em; }
-.deck-chapter {
-  margin: 0 0 2px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+.slides-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.8s ease;
 }
-.deck-meta { flex: none; display: flex; align-items: center; gap: 8px; padding-top: 4px; }
-.deck-time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-.deck-play {
+.slides-progress-bar.indeterminate span { width: 28%; animation: slides-progress 2.2s ease-in-out infinite; }
+@keyframes slides-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(360%); }
+}
+.slides-progress-note { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
+
+/* the slide sorter: one 16:9 slide per row, with its number, time, Play and speaker notes under it */
+.sl-list { display: flex; flex-direction: column; gap: 36px; }
+.sl-card { scroll-margin-top: 76px; }
+.sl-card .sl { border-radius: 6px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.35); }
+.sl-under { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 12px 2px 0; color: var(--muted); font-size: 13px; }
+.sl-under-num { color: var(--text-2); font-weight: 600; }
+.sl-under-time { font-variant-numeric: tabular-nums; }
+.sl-under-gap { flex: 1; }
+.sl-play {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2701,12 +2710,12 @@ pre.md-code {
   font-size: 12.5px;
   text-decoration: none;
 }
-.deck-play:hover { background: var(--accent-soft); }
-.deck-from-here {
+.sl-play:hover { background: var(--accent-soft); }
+.sl-from-here {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
+  width: 30px;
   height: 26px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2714,76 +2723,330 @@ pre.md-code {
   color: var(--muted);
   cursor: pointer;
 }
-.deck-from-here:hover { color: var(--text); border-color: var(--border-strong); }
+.sl-from-here:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
+.sl-from-here:disabled { opacity: 0.4; cursor: default; }
+.sl-notes { margin: 8px 2px 0; }
+.sl-notes summary { width: max-content; color: var(--muted); font-size: 13px; cursor: pointer; }
+.sl-notes summary:hover { color: var(--text-2); }
+.sl-notes-text,
+.sl-said { margin: 8px 0 0; color: var(--text-2); font-size: 14px; line-height: 1.55; white-space: pre-line; }
+.sl-notes h3 { margin: 14px 0 0; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.03em; }
+.sl-said { color: var(--muted); }
 
-.deck-content.under { display: flex; flex-direction: column; gap: 16px; }
-.deck-content.beside {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: 22px;
-  align-items: start;
+/* One slide, laid out like the PowerPoint (app/pptx_deck.py). Sizes are points of its 960 x 540 pt slide: --pt is
+   one point at the frame's width. A fitted box sets --s, its text size in points. */
+/* A length, computed where it is set (on .sl, against the frame): blocks that are containers themselves inherit
+   the frame's point, not their own. */
+@property --pt {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 1px;
 }
-.deck-visual.image {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border-radius: 10px;
-  background: #0a0c0f;
-}
-.deck-img { display: block; width: 100%; height: auto; max-height: 72vh; object-fit: contain; }
-.deck-visual.typeset {
-  min-height: 200px;
-  padding: 18px 22px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel-2);
-}
-.deck-empty { margin: 0; padding: 30px 12px; color: var(--muted); text-align: center; }
-.deck-typeset { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-.deck-ts-item {
-  display: block;
-  padding: 4px 8px;
-  margin: 0 -8px;
-  border-radius: 8px;
-  color: var(--text);
-  text-decoration: none;
-  overflow-x: auto;
-}
-a.deck-ts-item:hover { background: var(--panel-3); }
-.deck-ts-tex { font-size: 19px; }
-.deck-ts-text { font-size: 16px; }
-.deck-ts-drawing { color: var(--text-2); font-size: 15px; font-style: italic; }
-.deck-points {
-  margin: 0;
-  padding-left: 22px;
+.sl-frame { width: 100%; container: sl-frame / inline-size; }
+.sl {
+  --pt: calc(100cqw / 960);
+  --ink: #1f2a37;
+  --accent: #2563eb;
+  --mute: #6b7280;
+  --rule: #e3e7ed;
+  --title-font: 'Calibri Light', Calibri, Carlito, 'Segoe UI Light', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  font-size: 15.5px;
-  line-height: 1.45;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  padding: calc(var(--pt) * 24) calc(var(--pt) * 50) calc(var(--pt) * 17);
+  background: #fff;
+  color: var(--ink);
+  font-family: Calibri, Carlito, 'Segoe UI', ui-sans-serif, system-ui, -apple-system, Roboto, Arial, sans-serif;
+  font-size: calc(var(--pt) * 24);
+  line-height: 1.2;
+  text-align: left;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
 }
-.deck-points li::marker { color: var(--accent); }
-.deck-points-wait {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+.sl p { margin: 0; }
+.sl-head { flex: none; display: flex; flex-direction: column; }
+.sl-eyebrow {
+  height: calc(var(--pt) * 17);
+  max-width: 80%;
+  overflow: hidden;
+  color: var(--accent);
+  font-size: calc(var(--pt) * 13);
+  font-weight: 700;
+  line-height: calc(var(--pt) * 17);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.sl-title-box { display: flex; align-items: flex-end; height: calc(var(--pt) * 58); overflow: hidden; }
+.sl-title {
+  flex: 1;
+  min-width: 0;
   margin: 0;
-  color: var(--muted);
-  font-size: 13.5px;
-  animation: slides-wait 1.6s ease-in-out infinite;
+  color: var(--ink);
+  font-family: var(--title-font);
+  font-size: calc(var(--pt) * var(--s, 32));
+  font-weight: 300;
+  line-height: 1.08;
+  overflow-wrap: break-word;
+  text-wrap: balance; /* no word left alone on a title's last line */
 }
-.deck-points-wait .spark-icon { color: var(--accent); }
-@keyframes slides-wait {
-  50% {
-    opacity: 0.55;
-  }
+.sl-bar { width: calc(var(--pt) * 48); height: calc(var(--pt) * 3.5); margin-top: calc(var(--pt) * 7); background: var(--accent); }
+.sl-body {
+  flex: 1;
+  min-height: 0;
+  margin-top: calc(var(--pt) * 18.5);
+  overflow: hidden;
+  font-size: calc(var(--pt) * var(--s, 24));
 }
-.deck-said { margin: 8px 4px 0; }
-.deck-said summary { color: var(--muted); font-size: 13px; cursor: pointer; width: max-content; }
-.deck-said summary:hover { color: var(--text-2); }
-.deck-said p { margin: 8px 0 0; color: var(--text-2); font-size: 14px; line-height: 1.55; }
-.deck-said-print { display: none; }
+.sl-foot {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1em;
+  height: calc(var(--pt) * 16);
+  margin-top: calc(var(--pt) * 19);
+  color: var(--mute);
+  font-size: calc(var(--pt) * 11);
+  line-height: 1.15;
+}
+.sl-foot-name { display: flex; min-width: 0; }
+.sl-foot-lecture { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sl-foot-time { flex: none; white-space: pre; }
+.sl-num { flex: none; font-variant-numeric: tabular-nums; }
+
+/* content: one column, or two (36 pt apart) with a figure in its own */
+.sl-col { display: flex; flex-direction: column; gap: 0.85em; min-width: 0; }
+.sl-col.with-figure { height: 100%; }
+.sl-col.with-figure > .sl-figure { flex: 1 1 0; min-height: 0; }
+.sl-split { display: grid; column-gap: calc(var(--pt) * 36); height: 100%; align-items: start; }
+.sl-side { display: flex; align-self: stretch; height: 100%; min-width: 0; min-height: 0; }
+.sl-alone { height: 100%; }
+/* A tall, narrow table beside the other blocks (deck.ts, sideTable): the pair starts at one height. */
+.sl-split.with-table { height: auto; }
+.sl-side-table { display: block; height: auto; }
+/* The body sits in the middle of the space under the title, as in the PowerPoint; auto margins never push content
+   out at the top, so a body that spills still spills at the bottom, where the fitting sees it. */
+.sl-k-content .sl-body,
+.sl-k-summary .sl-body { display: flex; flex-direction: column; }
+.sl-k-content .sl-body > *,
+.sl-k-summary .sl-body > * { flex: none; }
+.sl-body > .sl-col:not(.with-figure),
+.sl-body > .sl-split.with-table { margin-block: auto; }
+
+/* blocks: sizes in em of the body's text size */
+.sl-bullets { margin: 0; padding: 0; list-style: none; }
+.sl-bullets > li { position: relative; padding-left: 0.95em; }
+.sl-bullets > li + li { margin-top: 0.5em; }
+.sl-bullets > li::before { content: '•'; position: absolute; left: 0; color: var(--accent); }
+.sl-bullets ul { margin: 0; padding: 0; list-style: none; font-size: max(calc(var(--pt) * 14), 0.88em); }
+.sl-bullets ul li { position: relative; margin-top: 0.32em; padding-left: 1.05em; }
+.sl-bullets ul li::before { content: '–'; position: absolute; left: 0; color: var(--mute); }
+.sl-m .katex { font-size: 1.05em; }
+.sl-m { white-space: nowrap; } /* "β ≠ 90°" never breaks after the ≠ */
+.sl-m-raw,
+.sl-tex-raw { font-family: Cambria, 'Cambria Math', Georgia, serif; font-style: italic; }
+.sl-tex { overflow-x: auto; overflow-y: hidden; }
+.sl-tex .katex-display { margin: 0; }
+.sl-label { margin-bottom: 0.3em !important; color: var(--mute); font-size: max(calc(var(--pt) * 13), 0.66em); font-weight: 700; }
+.sl-eq { padding: 0.62em 0.9em; border-radius: calc(var(--pt) * 8); background: #f4f6f9; }
+/* Formulas that follow one another: side by side on cards of one height when each fits, else one per line. */
+.sl-eq-row { display: flex; flex-wrap: wrap; gap: 0.85em; }
+.sl-eq-row > .sl-eq { display: flex; flex: 1 1 max-content; flex-direction: column; min-width: 0; }
+.sl-eq-row > .sl-eq > .sl-tex { margin-block: auto; }
+.sl-eq > .sl-tex { font-size: 1.25em; }
+.sl-steps { container: sl-steps / inline-size; }
+.sl-steps-label { margin-bottom: 0.45em !important; font-size: max(calc(var(--pt) * 14), 0.85em); font-weight: 700; }
+.sl-steps ol {
+  display: grid;
+  grid-template-columns: 1.3em minmax(0, 1fr);
+  align-items: center;
+  row-gap: 0.5em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sl-steps ol.grid { grid-template-columns: 1.3em fit-content(60%) minmax(0, 1fr); }
+.sl-steps li { display: contents; }
+.sl-step-n {
+  grid-column: 1;
+  display: grid;
+  place-items: center;
+  width: 2.1em;
+  height: 2.1em;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.62em;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.sl-step-eq { grid-column: 2; margin-left: 0.6em; font-size: 1.05em; }
+.sl-step-eq .katex-display,
+.sl-step-eq .katex-display > .katex { text-align: left; }
+.sl-step-text { grid-column: 3; margin-left: 1em !important; font-size: max(calc(var(--pt) * 14), 0.92em); }
+.sl-step-eq.wide,
+.sl-step-text.wide { grid-column: 2 / -1; margin-left: 0.6em !important; }
+.sl-step-num { margin-left: 0.6em !important; font-variant-numeric: tabular-nums; } /* a step that is a number */
+.sl-figure { display: flex; flex-direction: column; align-items: center; width: 100%; height: 100%; min-height: 0; margin: 0; }
+.sl-figure img {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border: 1px solid var(--rule);
+  background: #fff;
+}
+.sl-figure figcaption {
+  flex: none;
+  margin-top: 0.4em;
+  color: var(--mute);
+  font-size: max(calc(var(--pt) * 12), 0.62em);
+  text-align: center;
+}
+.sl-missing { margin: auto 0 !important; color: var(--mute); font-size: 0.7em; text-align: center; }
+.sl-table-wrap { overflow-x: auto; }
+.sl-table { min-width: 75%; margin: 0 auto; border-collapse: collapse; font-size: max(calc(var(--pt) * 14), 0.8em); }
+.sl-table caption {
+  caption-side: bottom;
+  padding-top: 0.45em;
+  color: var(--mute);
+  font-size: max(calc(var(--pt) * 12), 0.78em);
+  text-align: left;
+}
+.sl-table th,
+.sl-table td { padding: 0.32em 0.55em; text-align: left; vertical-align: middle; }
+.sl-table th { background: var(--accent); color: #fff; font-weight: 700; }
+.sl-table tbody tr:nth-child(even) td { background: #f3f6fc; }
+.sl-callout {
+  position: relative;
+  padding: 0.6em 0.8em 0.6em calc(var(--pt) * 5 + 0.8em);
+  overflow: hidden;
+  border-radius: calc(var(--pt) * 6);
+  background: #eef3fe;
+}
+.sl-callout::before { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: calc(var(--pt) * 5); background: var(--accent); }
+.sl-callout.note { background: #f3f4f6; }
+.sl-callout.note::before { background: #9ca3af; }
+.sl-callout-tag { color: var(--accent); font-size: max(calc(var(--pt) * 12), 0.56em); font-weight: 700; text-transform: uppercase; }
+.sl-callout.note .sl-callout-tag { color: var(--mute); }
+.sl-callout-title { margin-top: 0.18em !important; font-weight: 700; }
+.sl-callout-text { margin-top: 0.22em !important; }
+.sl-callout-eq { margin-top: 0.35em; font-size: 1.15em; }
+.sl-callout-eq .katex-display,
+.sl-callout-eq .katex-display > .katex { text-align: left; }
+
+/* title slide: the title ends at 248 pt, the subtitle starts at 272 pt, the facts sit under a rule near the foot */
+.sl-k-title { padding: 0; }
+.sl-cover-top { position: absolute; left: calc(var(--pt) * 72); right: calc(var(--pt) * 72); bottom: calc(var(--pt) * 292); }
+.sl-cover-bar { width: calc(var(--pt) * 64); height: calc(var(--pt) * 5); margin-bottom: calc(var(--pt) * 25); background: var(--accent); }
+.sl-cover-box { height: auto; max-height: calc(var(--pt) * 140); }
+.sl-k-title .sl-title { line-height: 1.05; }
+.sl-subtitle {
+  position: absolute;
+  top: calc(var(--pt) * 272);
+  left: calc(var(--pt) * 72);
+  right: calc(var(--pt) * 72);
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--mute);
+  font-size: calc(var(--pt) * 22);
+  line-height: 1.2;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+.sl-cover-rule { position: absolute; top: calc(var(--pt) * 452); left: calc(var(--pt) * 72); right: calc(var(--pt) * 72); height: calc(var(--pt) * 1); background: var(--rule); }
+.sl-cover-facts { position: absolute; top: calc(var(--pt) * 466); left: calc(var(--pt) * 72); right: calc(var(--pt) * 72); color: var(--mute); font-size: calc(var(--pt) * 14); }
+.sl-cover-facts.alone { top: calc(var(--pt) * 272); font-size: calc(var(--pt) * 16); }
+
+/* section slide: the accent, "PART n", the title and its time, in the middle */
+.sl-k-section { justify-content: center; padding: 0 calc(var(--pt) * 72); background: var(--accent); color: #fff; }
+.sl-part-wrap { display: flex; flex-direction: column; transform: translateY(calc(var(--pt) * -8)); }
+.sl-part { height: calc(var(--pt) * 24); margin-bottom: calc(var(--pt) * 14) !important; color: #d6e4ff; font-size: calc(var(--pt) * 16); font-weight: 700; line-height: calc(var(--pt) * 24); text-transform: uppercase; }
+.sl-part-box { height: auto; max-height: calc(var(--pt) * 120); }
+.sl-k-section .sl-title { color: #fff; line-height: 1.05; }
+.sl-part-range { margin-top: calc(var(--pt) * 16) !important; color: #d6e4ff; font-size: calc(var(--pt) * 18); line-height: 1.4; font-variant-numeric: tabular-nums; }
+
+/* agenda: numbered sections with their times, rows sharing the body (two columns past 7) */
+.sl-agenda {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(var(--rows, 1), minmax(calc(var(--pt) * var(--row-h, 52)), auto));
+  column-gap: calc(var(--pt) * 36);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sl-agenda.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.sl-agenda li { display: grid; grid-template-columns: 2.2em minmax(0, 1fr) auto; align-items: center; column-gap: calc(var(--pt) * 12); line-height: 1.15; }
+.sl-agenda li.ruled { border-bottom: calc(var(--pt) * 0.75) solid var(--rule); }
+.sl-agenda-n { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+.sl-agenda-time { color: var(--mute); font-size: max(calc(var(--pt) * 13), calc(var(--pt) * (var(--s, 22) - 6))); font-variant-numeric: tabular-nums; text-align: right; }
+
+/* formula sheet: cards, one or two columns */
+.sl-formulas {
+  display: grid;
+  grid-template-rows: repeat(var(--rows, 1), calc(var(--pt) * var(--card-h, 150)));
+  gap: calc(var(--pt) * 18);
+}
+.sl-formulas.cols-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.sl-card-eq { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; padding: calc(var(--pt) * 14); }
+.sl-card-eq .sl-label { margin-bottom: calc(var(--pt) * 6) !important; font-size: calc(var(--pt) * 13); }
+/* flex: none, so a formula too tall for its card spills out of the card (and the card's fit sees it) */
+.sl-card-eq > .sl-tex { flex: none; margin: auto 0; font-size: calc(var(--pt) * var(--s, 28)); text-align: center; }
+
+/* Steps in a narrow column: each formula over its words, as the PowerPoint does when the words would be cramped. */
+@container sl-steps (max-width: 22em) {
+  .sl-steps ol.grid { grid-template-columns: 1.3em minmax(0, 1fr); }
+  .sl-steps ol.grid .sl-step-eq,
+  .sl-steps ol.grid .sl-step-text { grid-column: 2 / -1; margin-left: 0.6em !important; }
+  .sl-steps ol.grid .sl-step-text { margin-top: -0.25em !important; }
+}
+
+/* A narrow frame (a phone) cannot hold a 16:9 slide's text at a readable size: there the slide grows downwards. */
+@container sl-frame (max-width: 599px) {
+  .sl { --pt: 0.64px; aspect-ratio: auto; min-height: calc(100cqw * 9 / 16); padding: 16px 16px 12px; }
+  .sl-eyebrow { height: auto; font-size: 11px; line-height: 1.3; }
+  .sl-title-box,
+  .sl-cover-box,
+  .sl-part-box { height: auto; max-height: none; }
+  .sl-body { margin-top: 12px; overflow: visible; }
+  .sl-foot { height: auto; margin-top: 14px; font-size: 11px; }
+  .sl-split { grid-template-columns: minmax(0, 1fr) !important; row-gap: 14px; height: auto; }
+  .sl-side,
+  .sl-alone,
+  .sl-figure,
+  .sl-col.with-figure { height: auto; }
+  .sl-col.with-figure > .sl-figure { flex: none; }
+  .sl-figure img { max-height: 60vh; }
+  .sl-label,
+  .sl-callout-tag,
+  .sl-figure figcaption,
+  .sl-table caption { font-size: max(10.5px, 0.66em); }
+  .sl-agenda,
+  .sl-formulas { grid-auto-flow: row; grid-template-rows: none; grid-template-columns: minmax(0, 1fr) !important; }
+  .sl-agenda li { padding: 8px 0; }
+  .sl-agenda li:not(:last-child) { border-bottom: 1px solid var(--rule); }
+  .sl-card-eq .sl-label { font-size: 10.5px; }
+  .sl-k-title { justify-content: flex-start; padding: 28px 20px 20px; }
+  .sl-cover-top,
+  .sl-subtitle,
+  .sl-cover-rule,
+  .sl-cover-facts { position: static; }
+  .sl-cover-bar { margin-bottom: 14px; }
+  .sl-subtitle { margin-top: 12px !important; }
+  .sl-cover-rule { margin: 18px 0 10px; }
+  .sl-cover-facts,
+  .sl-cover-facts.alone { margin-top: 10px !important; font-size: 11.5px; }
+  .sl-k-section { padding: 28px 20px; }
+  .sl-part { font-size: 11px; }
+  .sl-part-range { font-size: 12px; }
+}
 
 /* present mode: one slide over the whole screen */
 body.presenting { overflow: hidden; }
@@ -2801,33 +3064,19 @@ body.presenting { overflow: hidden; }
   flex: 1;
   min-height: 0;
   display: flex;
-  flex-direction: column;
-  gap: 2vh;
-  padding: 3vh 4vw 2vh;
+  align-items: center;
+  justify-content: center;
+  padding: 2vh 2vw;
+  overflow: auto;
 }
-.present-title { flex: none; margin: 0; font-size: clamp(20px, 4.2vh, 46px); line-height: 1.2; letter-spacing: -0.01em; }
-.present-body { flex: 1; min-height: 0; display: flex; gap: 2.4vh 3vw; }
-.present-body.under { flex-direction: column; }
-.present-body.beside { flex-direction: row; align-items: center; }
-/* the picture's box takes the body's full height, so the image's height: 100% has something to be a share of */
-.present-body.beside .present-visual { align-self: stretch; }
-.present-visual { flex: 1; min-height: 0; min-width: 0; display: flex; align-items: center; justify-content: center; }
-.present-visual .deck-img { width: auto; max-width: 100%; height: 100%; max-height: 100%; }
-.present-visual.typeset { align-items: flex-start; justify-content: flex-start; overflow: auto; }
-.present-visual .deck-typeset { gap: 1.4vh; }
-.present-visual .deck-ts-tex { font-size: clamp(18px, 3.6vh, 40px); }
-.present-visual .deck-ts-text { font-size: clamp(16px, 3vh, 32px); }
-.present-visual .deck-ts-drawing { font-size: clamp(15px, 2.6vh, 28px); }
-.present-body .deck-points { flex: none; font-size: clamp(15px, 2.6vh, 28px); gap: 0.8vh; max-width: 70em; }
-.present-body.beside .deck-points { flex: 0 0 38%; }
-.present-body .deck-points-wait { flex: none; font-size: clamp(14px, 2vh, 20px); }
+.present-stage .sl-frame { width: min(100%, calc((100vh - 46px - 4vh) * 16 / 9)); margin: auto; }
 .present-bar {
   flex: none;
   display: flex;
   align-items: center;
   gap: 16px;
   height: 46px;
-  padding: 0 16px 0 4vw;
+  padding: 0 16px 0 2vw;
   border-top: 1px solid var(--border);
   background: #0d0f13;
   color: var(--muted);
@@ -2836,7 +3085,7 @@ body.presenting { overflow: hidden; }
 .present-count { flex: none; color: var(--text-2); font-variant-numeric: tabular-nums; }
 .present-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .present-time { flex: none; font-variant-numeric: tabular-nums; }
-.present-nav { flex: none; display: flex; gap: 6px; }
+.present-nav { flex: none; display: flex; gap: 6px; margin-left: auto; }
 .present-btn {
   min-width: 34px;
   height: 30px;
@@ -2855,73 +3104,45 @@ body.presenting { overflow: hidden; }
 
 @media (max-width: 700px) {
   .slides-main { padding: 22px 16px 60px; }
-  .deck-card { padding: 14px 14px 16px; }
-  .deck-head { flex-wrap: wrap; gap: 10px; }
-  .deck-heading { flex-basis: calc(100% - 50px); }
-  .deck-heading h2 { font-size: 18px; }
-  .deck-meta { padding-top: 0; margin-left: 40px; }
-  .deck-content.beside { grid-template-columns: 1fr; }
-  .present-time { display: none; }
-  .present-body.beside { flex-direction: column; }
-  .present-body.beside .deck-points { flex: none; }
+  .slides-bar-name { display: none; }
+  .slides-actions { flex: 1; justify-content: flex-start; }
+  .slides-intro .notes-title { font-size: 24px; }
+  .sl-list { gap: 28px; }
+  .present-time,
+  .present-name { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .deck-points-wait { animation: none; }
+  .slides-progress-bar span { transition: none; }
+  .slides-progress-bar.indeterminate span { width: 100%; animation: none; opacity: 0.35; }
 }
 
-/* Save as PDF: one slide per landscape page (the @page rule lives in the Slides page), light, no controls. */
+/* Save as PDF: one slide per page, the page the size of the slide (the @page rule lives in the Slides page), light,
+   no controls. */
 @media print {
-  /* With "Background graphics" on, the page's own background prints above the cover's title and the dark colour
-     scheme's canvas (#121212) prints in the page margins: both light on paper. */
+  /* With "Background graphics" on, the dark colour scheme's canvas (#121212) would print around the slides. */
   :root {
     color-scheme: light;
   }
   html,
   body {
+    margin: 0;
     background: #fff !important;
   }
   .slides-page { background: #fff !important; color: #111 !important; }
   .slides-bar,
-  .slides-tools,
-  .slides-points-error,
-  .deck-play,
-  .deck-from-here,
-  .deck-said,
-  .deck-points-wait,
+  .slides-intro,
+  .slides-progress,
+  .slides-load-error,
+  .sl-under,
+  .sl-notes,
   .present {
     display: none !important;
   }
   .slides-main { max-width: none; padding: 0; }
-  .slides-intro { margin: 0; break-after: page; }
-  .slides-intro .notes-title { margin: 50mm 0 4mm; color: #111; font-size: 28pt; }
-  .slides-intro .notes-sub { color: #555 !important; font-size: 11pt; }
-  .deck-sheet { margin: 0; break-after: page; }
-  .deck-sheet:last-child { break-after: auto; }
-  .deck-card { padding: 0; border: 0; border-radius: 0; background: none; break-inside: avoid; }
-  .deck-head { margin: 0 0 4mm; gap: 4mm; }
-  .deck-num { min-width: 9mm; height: 9mm; line-height: 9mm; background: none; border: 0.5pt solid #bbb; color: #444; }
-  .deck-heading h2 { color: #111; font-size: 20pt; }
-  .deck-chapter { color: #666; font-size: 9pt; }
-  .deck-meta { padding-top: 1mm; }
-  .deck-time { color: #555; font-size: 10pt; }
-  .deck-content.under { gap: 4mm; }
-  .deck-content.beside { gap: 6mm; }
-  .deck-visual.image { background: none; border-radius: 0; }
-  .deck-img { width: 100%; height: auto; max-height: 150mm; object-fit: contain; }
-  .has-points .deck-content.under .deck-img { max-height: 112mm; }
-  .has-points .deck-content.beside .deck-img { max-height: 160mm; }
-  .deck-visual.typeset { min-height: 0; padding: 0; border: 0; background: none; }
-  .deck-ts-item,
-  .deck-ts-text,
-  .deck-ts-tex {
-    color: #111 !important;
-  }
-  .deck-ts-drawing { color: #444 !important; }
-  .deck-points { color: #111; font-size: 12.5pt; gap: 1.5mm; }
-  .deck-points li::marker { color: #2b5cd9; }
-  .deck-said-print { display: block; margin-top: 6mm; break-inside: avoid; }
-  .deck-said-print h3 { margin: 0 0 2mm; color: #444; font-size: 10pt; font-weight: 600; }
-  .deck-said-print p { margin: 0; color: #333; font-size: 10pt; line-height: 1.45; }
+  .sl-list { display: block; }
+  .sl-card { break-inside: avoid; break-after: page; }
+  .sl-card:last-child { break-after: auto; }
+  .sl-card .sl { border-radius: 0; box-shadow: none; }
 }
 
 /* the player's top bar: Slides stays on phones, as an icon */

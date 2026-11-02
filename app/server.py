@@ -206,7 +206,7 @@ def job_notes_json(job_id: str):
 
 
 def _meta_client():
-    """The client for Ask Muse (tests replace this with a fake)."""
+    """The client for Ask Muse and the slides (tests replace this with a fake)."""
     from .core.meta_api import MetaClient
 
     return MetaClient()
@@ -330,8 +330,8 @@ def job_chat_clear(job_id: str, request: Request):
 
 
 def _slides_error(d: Path, e: Exception) -> HTTPException:
-    """A failed slides request as one plain line: 409 not processed yet, 502 the model failed, 500 anything else
-    (its traceback in export-error.log)."""
+    """A failed slides request as one plain line: 409 not processed yet (or no deck to download yet), 502 the model
+    failed, 500 anything else (its traceback in export-error.log)."""
     from . import export
     from .core.meta_api import MetaAPIError
 
@@ -348,35 +348,36 @@ def _slides_error(d: Path, e: Exception) -> HTTPException:
 
 @app.get("/api/jobs/{job_id}/slides.json")
 def job_slides(job_id: str):
-    """The lecture as a slide deck (app/export.py): built from replay.json by code, with Muse Spark's key points
-    if they were written for this version of the lecture. No model call."""
+    """The lecture's slide deck (app/export.py): {state: none | writing | ready | failed, step, done, total, error,
+    deck}. While Muse Spark writes it, `deck` holds the slides finished so far. Never calls the model."""
     from . import export
 
     d = _job_dir(job_id)
     try:
-        return JSONResponse(export.slides_data(d), headers=NO_CACHE)
+        return JSONResponse(export.slides_status(d), headers=NO_CACHE)
     except Exception as e:
         raise _slides_error(d, e) from None
 
 
-@app.post("/api/jobs/{job_id}/slides/points")
-def job_slides_points(job_id: str, request: Request):
-    """Muse Spark writes each slide's title and key points (one call per deck, saved), then the deck as in
-    slides.json. A model failure is a 502 with one plain line; the deck still works without key points."""
+@app.post("/api/jobs/{job_id}/slides/write")
+def job_slides_write(job_id: str, request: Request):
+    """Muse Spark starts writing the deck in the background (a plan, then one call per section), unless it is ready
+    or already being written: a second request joins that run and never pays twice. Answers like slides.json."""
     from . import export
 
     if _cross_site(request):  # like /ask: other websites must not spend the owner's API credit
-        raise HTTPException(403, "key points are only written for the Replay Board player itself")
+        raise HTTPException(403, "slides are only written for the Replay Board player itself")
     d = _job_dir(job_id)
     try:
-        return JSONResponse(export.slides_data(d, _meta_client), headers=NO_CACHE)
+        return JSONResponse(export.start_writing(d, _meta_client), headers=NO_CACHE)
     except Exception as e:
         raise _slides_error(d, e) from None
 
 
 @app.get("/api/jobs/{job_id}/slides.pptx")
 def job_slides_pptx(job_id: str):
-    """The deck as a PowerPoint download (key points included when they were written)."""
+    """The written deck as a PowerPoint download (app/pptx_deck.py), kept per deck version. 409 before the deck is
+    written."""
     from fastapi.responses import Response
 
     from . import export

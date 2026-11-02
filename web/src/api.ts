@@ -1,6 +1,6 @@
 import { cleanChat, readAnswer } from './ask/protocol';
-import { cleanDeck, pptxFileName } from './slides/deck';
-import type { AskDone, AskRequest, AskTurn, Deck, JobStatus, JobSummary, PopoutScene, Replay } from './types';
+import { cleanStatus, pptxFileName } from './slides/deck';
+import type { AskDone, AskRequest, AskTurn, JobStatus, JobSummary, PopoutScene, Replay, SlidesStatus } from './types';
 
 /** URL of a file inside a job folder (video, piece images). Each path segment is encoded. */
 export function jobFileUrl(jobId: string, path: string): string {
@@ -165,19 +165,19 @@ export async function clearChat(jobId: string): Promise<void> {
   if (!r.ok && r.status !== 404) throw new Error(await errorLine(r));
 }
 
-// ---------- slides export ----------
+// ---------- slides ----------
 
 const NO_SLIDES = 'This server cannot make slides yet: restart `python -m app.server` with the latest code.';
 
-/** The deck from GET slides.json or POST slides/points, or one plain line. A server without the slides routes answers
- *  the player's own index.html to the GET (and 405 to the POST): that is "restart the server", not a JSON error. */
+/** A failed slides request as one plain line. A server without the slides routes answers the player's own
+ *  index.html to a GET (and 404 or 405 to a POST): that is "restart the server", not a JSON error. */
 async function slidesError(r: Response): Promise<Error> {
   const line = await errorLine(r);
   if ((r.status === 404 || r.status === 405) && /^(not found\.?|method not allowed)$/i.test(line)) return new Error(NO_SLIDES);
   return new Error(line);
 }
 
-async function readDeck(r: Response): Promise<Deck> {
+async function readStatus(r: Response): Promise<SlidesStatus> {
   if (!r.ok) throw await slidesError(r);
   if (!(r.headers.get('content-type') ?? '').includes('json')) throw new Error(NO_SLIDES);
   let body: unknown;
@@ -187,40 +187,32 @@ async function readDeck(r: Response): Promise<Deck> {
     throw new Error('The slides came back damaged. Try reloading the page.');
   }
   // An older server without a built player answers every unknown address with {"message": "player not built..."}.
-  const o = body as { pages?: unknown; message?: unknown } | null;
-  if (o && typeof o === 'object' && !Array.isArray(o.pages) && typeof o.message === 'string') throw new Error(NO_SLIDES);
-  return cleanDeck(body);
+  const o = body as { state?: unknown; message?: unknown } | null;
+  if (o && typeof o === 'object' && o.state === undefined && typeof o.message === 'string') throw new Error(NO_SLIDES);
+  return cleanStatus(body);
 }
 
-/** The lecture's slide deck (made by code on the server, no model call). Key points may not be written yet. */
-export async function getSlides(jobId: string, signal?: AbortSignal): Promise<Deck> {
+async function slidesCall(jobId: string, path: string, method: 'GET' | 'POST', signal?: AbortSignal): Promise<SlidesStatus> {
   let r: Response;
   try {
-    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/slides.json`, { signal, cache: 'no-store' });
+    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/${path}`, { method, signal, cache: 'no-store' });
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
     throw new Error(SERVER_DOWN);
   }
-  return readDeck(r);
+  return readStatus(r);
 }
 
-/** Ask Muse Spark for each slide's title and key points (one call per deck, cached by the server); the deck with
- *  them filled in. */
-export async function writeSlidePoints(jobId: string, signal?: AbortSignal): Promise<Deck> {
-  let r: Response;
-  try {
-    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/slides/points`, { method: 'POST', signal, cache: 'no-store' });
-  } catch (e) {
-    if ((e as Error).name === 'AbortError') throw e;
-    throw new Error(SERVER_DOWN);
-  }
-  return readDeck(r);
-}
+/** Where the lecture's slides stand: none, being written (with the slides finished so far), ready, or failed.
+ *  Never calls the model. */
+export const getSlides = (jobId: string, signal?: AbortSignal) => slidesCall(jobId, 'slides.json', 'GET', signal);
 
-/** The deck as a PowerPoint file. The version makes a new download after the key points land. */
-export const slidesPptxUrl = (jobId: string, version = '', points = false) =>
-  `/api/jobs/${encodeURIComponent(jobId)}/slides.pptx` +
-  (version ? `?v=${encodeURIComponent(version)}${points ? '&points=1' : ''}` : '');
+/** Ask Muse Spark to write the slides (in the background on the server; a second request joins the run). */
+export const writeSlides = (jobId: string, signal?: AbortSignal) => slidesCall(jobId, 'slides/write', 'POST', signal);
+
+/** The deck as a PowerPoint file. The version makes a new download when the deck is rewritten. */
+export const slidesPptxUrl = (jobId: string, version = '') =>
+  `/api/jobs/${encodeURIComponent(jobId)}/slides.pptx` + (version ? `?v=${encodeURIComponent(version)}` : '');
 
 /** The PowerPoint and its file name, or one plain line. Fetched rather than followed as a plain link, so that a
  *  failure on the server (or an older server answering with the player's page) is a line on the page, not a broken

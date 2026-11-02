@@ -9,8 +9,9 @@ equation), the virtual board shows it as a calm spotlight, circle, underline or 
 Slide lectures get the same treatment: clean slides, and the teacher's cursor or laser turned into the
 same animations. And you can **ask Muse** about the lecture: attach a formula from the first minute and a
 result from the last, ask how they connect, and get an answer whose times and board items you can click.
-When you're done, **export the lecture as slides**: one slide per board (or slide) the teacher built, with
-Muse Spark's title and key points, to present, save as PDF or download as PowerPoint.
+When you're done, **export the lecture as slides**: Muse Spark writes a deck that teaches the whole lecture
+in order (typeset formulas, worked steps, tables, the teacher's own drawings, key takeaways and a formula
+sheet, with what was said in the speaker notes), downloaded as a real PowerPoint.
 
 Built for the Meta Global AI Developer Hackathon. **Meta models do the understanding**; plain code does
 the per-pixel measurement.
@@ -52,7 +53,7 @@ flowchart LR
 | Slide changes, clean slides, pointer | slide analysis (code) | states, live regions, cursor/laser track, gesture guesses |
 | What a pointing gesture means | **Muse Spark** with the path drawn on the slide (or on the video frame and the clean board) + the words spoken | spotlight / circle / underline / arrow / pulse, target elements, or "not pointing" |
 | Questions about the lecture | **Muse Spark** with the whole lecture (board or slides, chapters, timed transcript) as a cached prefix, plus images of what the student attached | a streamed answer that cites clickable times and board items |
-| Slides export | **Muse Spark** with the whole lecture plus each slide's writing and what was said (one call per lecture) | a title and 2–4 key points per slide |
+| Slides export | **Muse Spark** with the whole lecture: one call plans the deck, then one call per part writes it (4 at a time) | sections, which writing goes on which slide, then each slide's title, bullets, formulas, worked steps, tables, definitions, figures and notes |
 | Words | **Muse Voice Transcribe** in parallel pieces | turns |
 | Word times | **MMS forced aligner** (Meta, torchaudio) | per-word start/end |
 | When each element is talked about | **Muse Spark** with elements + timed transcript | spoken ranges, redraw time of hidden writing, chapters |
@@ -137,8 +138,8 @@ cd web; npm test
 
 ## Layout
 ```
-app/            pipeline, CLI (app.process), server (app.server), smoke test (app.smoke)
-app/core/       meta_api (one client), board, slides, sam, sam_codec, speech, understand, media
+app/            pipeline, CLI (app.process), server (app.server), slides export (export, pptx_deck), smoke test
+app/core/       meta_api (one client), board, slides, sam, sam_codec, speech, understand, media, texrender
 web/            player: React + Vite + TypeScript + KaTeX
 tests/          generated-lecture self-tests and unit tests
 data/           videos, job folders and the model cache (never committed)
@@ -153,13 +154,17 @@ data/           videos, job folders and the model cache (never committed)
   chips show the writing typeset, jump to it and outline it on the board. The conversation is kept per lecture.
   Cost on the 8-minute lecture: about $0.01 for a first question, $0.006 for a follow-up (Meta's prompt cache
   reuses the lecture), nothing for a repeated one (disk cache).
-- **Slides export**: the player's Slides button turns the lecture into a deck. Code cuts the board into pages
-  where the teacher starts a new chapter or wipes a big part of the board, crops each page to what was written
-  (or talked about) in it, and fades the older writing around it. Slide lectures give one page per slide, shown
-  with its build steps complete. Muse Spark writes each page's title and key points in one call ($0.014 on the
-  8-minute lecture, cached after that). Then: **Present** (full screen, arrow keys), **Save as PDF** (the
-  browser's print, one landscape slide per page), or **Download PowerPoint** (16:9, with the time range, key points
-  and what was said in the speaker notes). A Typeset view shows each page's writing as KaTeX instead of the picture.
+- **Slides export**: the player's Slides button turns the lecture into a deck that teaches it, in order, the way
+  a teacher would prepare one. Muse Spark plans it from the whole lecture (sections, slides, which writing goes
+  where), then writes the parts in parallel: titles that say what each slide teaches, bullets, typeset formulas,
+  numbered worked steps, comparison tables, definition and key-idea boxes, and figures made from the teacher's
+  own drawings (the ink lifted off the board onto a clean background, not a photo of it). Code checks every
+  answer: each piece of writing that matters must land on a slide, the LaTeX must be valid, a formula made of
+  plain numbers is worked out (a rounded result gets ≈, a false one is left out), and text must fit the layout.
+  The **PowerPoint** (python-pptx, 16:9) has real slide titles, native bullets and tables, an agenda, key
+  takeaways, a formula sheet, and speaker notes with what was said and when; equations are typeset by MathJax
+  into sharp pictures that keep their LaTeX as alt text. The page previews the same slides, with **Present**
+  (full screen) and **Save as PDF**. Cost on the 8-minute lecture: about $0.08 and 25 s, once; then it's cached.
 - **Study notes**: the player's Notes page lists every line of writing (or slide element) by chapter, typeset with
   KaTeX, with what was said; each time links back to that moment in the player. Download as Markdown or print.
 - **Typeset by line**: a line written in bursts (several pieces) is read by Muse Spark as one line and typeset whole

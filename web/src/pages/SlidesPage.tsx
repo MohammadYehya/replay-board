@@ -1,334 +1,135 @@
-// The lecture as a slide deck: one slide per stretch of the lecture (between chapters and big erases on a board, one
-// per slide in a slide lecture), each with the board or slide as it stood, Muse Spark's title and key points, and a
-// link back into the player. Present shows one slide at a time, full screen; Save as PDF prints one slide per
-// landscape page; the PowerPoint is made by the server (app/export.py).
+// The lecture as a deck: Muse Spark writes the slides a good teacher would have prepared, covering the whole lecture
+// in order (app/export.py), and this page previews them as 16:9 slides, presents them full screen, prints them one per
+// landscape page and downloads the same deck as a PowerPoint (app/pptx_deck.py). Opening the page starts the writing
+// once; while Muse Spark writes, the page shows how far it is and the slides finished so far.
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
-import { getSlides, getSlidesPptx, jobFileUrl, slidesPptxUrl, writeSlidePoints } from '../api';
+import { getSlides, getSlidesPptx, slidesPptxUrl, writeSlides } from '../api';
 import { SparkIcon } from '../ask/icons';
-import { texHtml } from '../player/tex';
-import {
-  clampIndex, loadPrefs, playerAt, pointsBeside, presentKey, rangeLabel, savePrefs, sentence, typesetList,
-  type SlidesPrefs, type SlidesView,
-} from '../slides/deck';
+import { joinCall, runFlow, sleep } from '../slides/flow';
+import { durationLabel, playerAt, progressShare, rangeLabel, sentence, stepLine } from '../slides/deck';
 import { PlayIcon, PresentIcon } from '../slides/icons';
-import type { Deck, DeckPage } from '../types';
+import { Presenter } from '../slides/Presenter';
+import { SlideFrame } from '../slides/SlideFrame';
+import type { Deck, DeckSlide, SlidesStatus } from '../types';
 
-/** One key-points call per deck version at a time, even when the page mounts twice (React's StrictMode in dev). */
-const pointsCalls = new Map<string, Promise<Deck>>();
+/** One request to write a lecture's slides at a time, even when the page mounts twice (React's StrictMode in dev)
+ *  or Try again is pressed while one is on its way. The server joins a second tab's request to the same run. */
+const writeCalls = new Map<string, Promise<SlidesStatus>>();
 
 /** Pictures failing together cause one fresh read of the deck, not one each. */
 const REFRESH_GAP_MS = 4000;
 
-function localStore(): Storage | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
+const aborted = (e: unknown) => (e as Error | null)?.name === 'AbortError';
+const line = (e: unknown) => sentence(String((e as Error | null)?.message || e)) || 'Something went wrong.';
 
-const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+type PptxState = { state: 'idle' | 'making' } | { state: 'failed'; error: string };
 
-/** A slide's picture. One that cannot be loaded (the deck was rebuilt meanwhile, the file is gone) says so in a
- *  plain line instead of a broken-image icon. Keyed by its address, so a new deck version tries again. */
-function DeckImage({ src, alt, size, onError }: { src: string; alt: string; size: [number, number] | null; onError(): void }) {
-  const [broken, setBroken] = useState(false);
-  if (broken) return <p className="deck-empty">The picture for this slide could not be loaded.</p>;
+function SpeakerNotes({ slide }: { slide: DeckSlide }) {
+  if (!slide.notes && !slide.said) return null;
+  const range = rangeLabel(slide.t0, slide.t1);
   return (
-    <img
-      className="deck-img"
-      src={src}
-      width={size?.[0]}
-      height={size?.[1]}
-      alt={alt}
-      decoding="async"
-      onError={() => {
-        setBroken(true);
-        onError();
-      }}
-    />
+    <details className="sl-notes">
+      <summary>Speaker notes</summary>
+      {slide.notes && <p className="sl-notes-text">{slide.notes}</p>}
+      {slide.said && (
+        <>
+          <h3>What was said{range ? ` (${range})` : ''}</h3>
+          <p className="sl-said">{slide.said}</p>
+        </>
+      )}
+    </details>
   );
-}
-
-/** The board (or slide) image of a page, or its items typeset. Items link into the player unless presenting. */
-function SlideVisual({
-  jobId,
-  deck,
-  page,
-  view,
-  links,
-  onImageError,
-}: {
-  jobId: string;
-  deck: Deck;
-  page: DeckPage;
-  view: SlidesView;
-  links: boolean;
-  onImageError(): void;
-}) {
-  if (view === 'typeset') {
-    const entries = typesetList(page);
-    if (!entries.length) return <p className="deck-empty">Talk only: nothing new was written.</p>;
-    return (
-      <ol className="deck-typeset">
-        {entries.map((e, i) => {
-          const html = e.tex ? texHtml(e.tex) : null;
-          const body = html ? (
-            <span className="deck-ts-tex" dangerouslySetInnerHTML={{ __html: html }} />
-          ) : (
-            <span className={e.drawing ? 'deck-ts-drawing' : 'deck-ts-text'}>{e.text}</span>
-          );
-          return (
-            <li key={`${e.ref}-${i}`}>
-              {links ? (
-                <a className="deck-ts-item" href={playerAt(jobId, e.t)} title="Watch this explained">
-                  {body}
-                </a>
-              ) : (
-                <span className="deck-ts-item">{body}</span>
-              )}
-            </li>
-          );
-        })}
-      </ol>
-    );
-  }
-  if (!page.image) return <p className="deck-empty">No picture for this slide.</p>;
-  const src = `${jobFileUrl(jobId, page.image)}${deck.version ? `?v=${encodeURIComponent(deck.version)}` : ''}`;
-  const what = deck.type === 'slides' ? 'The slide' : 'The board';
-  return (
-    <DeckImage key={src} src={src} size={page.image_size} alt={`${what} for “${page.title}”`} onError={onImageError} />
-  );
-}
-
-function Points({ page, writing }: { page: DeckPage; writing: boolean }) {
-  if (page.points?.length)
-    return (
-      <ul className="deck-points">
-        {page.points.map((p, i) => (
-          <li key={i}>{p}</li>
-        ))}
-      </ul>
-    );
-  if (writing)
-    return (
-      <p className="deck-points-wait">
-        <SparkIcon size={12} />
-        Muse Spark is writing the key points…
-      </p>
-    );
-  return null;
 }
 
 function SlideCard({
   jobId,
   deck,
-  page,
+  slide,
   index,
-  view,
-  said,
-  writing,
+  canPresent,
   onPresent,
   onImageError,
 }: {
   jobId: string;
   deck: Deck;
-  page: DeckPage;
+  slide: DeckSlide;
   index: number;
-  view: SlidesView;
-  said: boolean;
-  writing: boolean;
+  canPresent: boolean;
   onPresent(index: number): void;
   onImageError(): void;
 }) {
-  const hasPoints = !!page.points?.length;
-  const beside = view === 'image' && hasPoints && pointsBeside(page.image_size);
-  const headId = `slide-title-${index + 1}`;
+  const headingId = `slide-${index + 1}-title`;
+  const range = rangeLabel(slide.t0, slide.t1);
   return (
-    <article className="deck-sheet" id={`slide-${index + 1}`} aria-labelledby={headId}>
-      <div className={`deck-card ${hasPoints ? 'has-points' : ''}`}>
-        <header className="deck-head">
-          <span className="deck-num">
-            <span className="sr-only">Slide </span>
-            {index + 1}
-          </span>
-          <div className="deck-heading">
-            {page.chapter && page.chapter !== page.title && <p className="deck-chapter">{page.chapter}</p>}
-            <h2 id={headId}>{page.title}</h2>
-          </div>
-          <div className="deck-meta">
-            <span className="deck-time">{rangeLabel(page.t0, page.t1)}</span>
-            <a className="deck-play" href={playerAt(jobId, page.t0)} title="Watch this part of the lecture">
-              <PlayIcon />
-              Play
-            </a>
-            <button
-              className="deck-from-here"
-              onClick={() => onPresent(index)}
-              title="Present from this slide"
-              aria-label={`Present from slide ${index + 1}`}
-            >
-              <PresentIcon size={12} />
-            </button>
-          </div>
-        </header>
-        <div className={`deck-content ${beside ? 'beside' : 'under'}`}>
-          <div className={`deck-visual ${view}`}>
-            <SlideVisual jobId={jobId} deck={deck} page={page} view={view} links onImageError={onImageError} />
-          </div>
-          <Points page={page} writing={writing} />
-        </div>
+    <article className="sl-card" id={`slide-${index + 1}`} aria-labelledby={headingId}>
+      <SlideFrame jobId={jobId} deck={deck} slide={slide} index={index} headingId={headingId} onImageError={onImageError} />
+      <div className="sl-under">
+        <span className="sl-under-num">Slide {index + 1}</span>
+        {range && <span className="sl-under-time">{range}</span>}
+        <span className="sl-under-gap" />
+        {slide.t !== null && (
+          <a className="sl-play" href={playerAt(jobId, slide.t)} title="Watch this part of the lecture">
+            <PlayIcon />
+            Play
+          </a>
+        )}
+        <button
+          className="sl-from-here"
+          onClick={() => onPresent(index)}
+          disabled={!canPresent}
+          title="Present from this slide"
+          aria-label={`Present from slide ${index + 1}`}
+        >
+          <PresentIcon size={12} />
+        </button>
       </div>
-      {said && page.said && (
-        <>
-          <details className="deck-said">
-            <summary>What was said</summary>
-            <p>{page.said}</p>
-          </details>
-          <div className="deck-said-print">
-            <h3>What was said ({rangeLabel(page.t0, page.t1)})</h3>
-            <p>{page.said}</p>
-          </div>
-        </>
-      )}
+      <SpeakerNotes slide={slide} />
     </article>
   );
 }
 
-/** One slide at a time over the whole screen. Keys: arrows, PageUp/PageDown, Space, Home/End; Esc leaves. */
-function Presenter({
-  jobId,
-  deck,
-  start,
-  view,
-  writing,
-  onClose,
-  onImageError,
-}: {
-  jobId: string;
-  deck: Deck;
-  start: number;
-  view: SlidesView;
-  writing: boolean;
-  onClose(index: number): void;
-  onImageError(): void;
-}) {
-  const count = deck.pages.length;
-  const [shown, setIndex] = useState(() => clampIndex(start, count));
-  // The deck can be swapped while presenting (key points landing, a rebuilt deck with fewer pages): stay on a page
-  // that exists, or the overlay would vanish and leave the page locked under it.
-  const index = clampIndex(shown, count);
-  const at = useRef(index);
-  at.current = index;
-  const close = useRef(onClose);
-  close.current = onClose;
-  const box = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    box.current?.focus();
-    document.body.classList.add('presenting');
-    return () => document.body.classList.remove('presenting');
-  }, []);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      // Space and Enter on a focused button press it; only the slide itself takes them as "next".
-      if ((e.key === ' ' || e.key === 'Enter') && (e.target as Element | null)?.closest?.('button, a')) return;
-      const to = presentKey(e.key, e.shiftKey, at.current, count);
-      if (to === null) return;
-      e.preventDefault();
-      if (to === 'exit') close.current(at.current);
-      else {
-        at.current = to; // two keys before the next render still move two slides
-        setIndex(to);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [count]);
-
-  // Esc in full screen is taken by the browser to leave full screen: leave present mode with it.
-  useEffect(() => {
-    let wasFull = !!document.fullscreenElement;
-    const onChange = () => {
-      if (document.fullscreenElement) wasFull = true;
-      else if (wasFull) close.current(at.current);
-    };
-    document.addEventListener('fullscreenchange', onChange);
-    return () => document.removeEventListener('fullscreenchange', onChange);
-  }, []);
-
-  const page = deck.pages[index];
-  if (!page) return null;
-  const hasPoints = !!page.points?.length;
-  const beside = view === 'image' && hasPoints && pointsBeside(page.image_size);
+/** How far Muse Spark is: the step, a calm bar, and that the page may be left meanwhile. */
+function Progress({ status }: { status: SlidesStatus | null }) {
+  const share = status ? progressShare(status) : null;
+  const text = status ? stepLine(status) : 'Opening the slides…';
   return (
-    <div className="present" role="dialog" aria-modal="true" aria-label={`Presenting ${deck.title}`} tabIndex={-1} ref={box}>
-      <div className="present-stage">
-        <h2 className="present-title">{page.title}</h2>
-        <div className={`present-body ${beside ? 'beside' : 'under'} ${view}`}>
-          <div className={`present-visual ${view}`}>
-            <SlideVisual jobId={jobId} deck={deck} page={page} view={view} links={false} onImageError={onImageError} />
-          </div>
-          <Points page={page} writing={writing} />
-        </div>
+    <div className="slides-progress">
+      <p className="slides-progress-step" role="status">
+        <SparkIcon size={14} />
+        <span>{text}</span>
+      </p>
+      <div
+        className={`slides-progress-bar${share === null ? ' indeterminate' : ''}`}
+        role="progressbar"
+        aria-label="Writing the slides"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={share === null ? undefined : Math.round(share * 100)}
+      >
+        <span style={share === null ? undefined : { width: `${Math.max(4, share * 100)}%` }} />
       </div>
-      <footer className="present-bar">
-        <span className="present-count" aria-live="polite" aria-atomic="true">
-          <span className="sr-only">Slide </span>
-          {index + 1} / {count}
-          <span className="sr-only">: {page.title}</span>
-        </span>
-        <span className="present-name" aria-hidden>
-          {page.title}
-        </span>
-        <span className="present-time">{rangeLabel(page.t0, page.t1)}</span>
-        <div className="present-nav">
-          <button
-            className="present-btn"
-            onClick={() => setIndex(clampIndex(index - 1, count))}
-            disabled={index === 0}
-            aria-label="Previous slide"
-            title="Previous slide (←)"
-          >
-            ‹
-          </button>
-          <button
-            className="present-btn"
-            onClick={() => setIndex(clampIndex(index + 1, count))}
-            disabled={index === count - 1}
-            aria-label="Next slide"
-            title="Next slide (→ or Space)"
-          >
-            ›
-          </button>
-          <button className="present-btn exit" onClick={() => close.current(at.current)} title="Leave (Esc)">
-            Exit
-          </button>
-        </div>
-      </footer>
+      {status && (
+        <p className="slides-progress-note">
+          Muse Spark is reading the whole lecture to write its slides. This takes a minute or two; you can leave this
+          page meanwhile.
+        </p>
+      )}
     </div>
   );
 }
 
-type PointsState = { state: 'idle' | 'writing' } | { state: 'failed'; error: string };
-type PptxState = { state: 'idle' | 'making' } | { state: 'failed'; error: string };
-
 export function SlidesPage({ jobId }: { jobId: string }) {
-  const [deck, setDeck] = useState<Deck | null>(null);
+  const [status, setStatus] = useState<SlidesStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [points, setPoints] = useState<PointsState>({ state: 'idle' });
-  const [prefs, setPrefs] = useState<SlidesPrefs>(() => loadPrefs(localStore(), jobId));
+  /** Each start over of the flow; `write` asks Muse Spark again first (Try again after a failure). */
+  const [run, setRun] = useState({ n: 0, write: false });
   const [presenting, setPresenting] = useState<number | null>(null);
   const [pptx, setPptx] = useState<PptxState>({ state: 'idle' });
-  const [attempt, setAttempt] = useState(0);
   const presentBtn = useRef<HTMLButtonElement>(null);
   const fromHeader = useRef(true);
   const alive = useRef(true);
-  const triedFor = useRef<string | null>(null);
-  const deckRef = useRef<Deck | null>(null);
-  deckRef.current = deck;
+  const statusRef = useRef<SlidesStatus | null>(null);
+  statusRef.current = status;
   const lastRefresh = useRef(0);
 
   useEffect(() => {
@@ -338,83 +139,62 @@ export function SlidesPage({ jobId }: { jobId: string }) {
     };
   }, []);
 
+  // Read, write once if nothing is written, poll while writing; one run per (re)start.
   useEffect(() => {
     const ac = new AbortController();
-    getSlides(jobId, ac.signal)
-      .then(setDeck)
-      .catch((e) => {
-        if (!ac.signal.aborted) setError(sentence(String((e as Error).message || e)));
-      });
-    return () => ac.abort();
-  }, [jobId, attempt]);
+    let live = true;
+    runFlow(
+      {
+        get: () => getSlides(jobId, ac.signal),
+        // Not tied to this run: the server starts writing either way, and a remount joins the same request.
+        write: () => joinCall(writeCalls, jobId, () => writeSlides(jobId)),
+        wait: (ms) => sleep(ms, ac.signal),
+        show: (s) => {
+          setStatus(s);
+          setError(null);
+        },
+        alive: () => live,
+      },
+      { write: run.write },
+    ).catch((e) => {
+      if (live && !aborted(e)) setError(line(e));
+    });
+    return () => {
+      live = false;
+      ac.abort();
+    };
+  }, [jobId, run]);
 
-  const tryAgain = () => {
+  const startOver = (write: boolean) => {
     setError(null);
-    setAttempt((n) => n + 1);
+    setRun((r) => ({ n: r.n + 1, write }));
   };
 
-  /** A picture would not load: the deck was probably rebuilt since it was read (replay.json rewritten when the word
-   *  times landed). Read it again, at most once every few seconds however many pictures fail together; a new
-   *  version brings new picture addresses, the same version changes nothing (so this cannot loop). */
+  /** A figure would not load: the deck was probably rewritten since it was read. Read it again, at most once every
+   *  few seconds however many figures fail together; a new version brings new addresses, the same version changes
+   *  nothing (so this cannot loop). */
   const onImageError = useCallback(() => {
     const now = Date.now();
-    if (!deckRef.current || now - lastRefresh.current < REFRESH_GAP_MS) return;
+    const cur = statusRef.current;
+    if (cur?.state !== 'ready' || now - lastRefresh.current < REFRESH_GAP_MS) return;
     lastRefresh.current = now;
     getSlides(jobId)
       .then((fresh) => {
-        if (alive.current && fresh.version !== deckRef.current?.version) setDeck(fresh);
+        if (alive.current && fresh.state === 'ready' && fresh.deck?.version !== statusRef.current?.deck?.version)
+          setStatus(fresh);
       })
       .catch(() => {
-        /* the cards already say the picture could not be loaded */
+        /* the frames already say the figure could not be loaded */
       });
   }, [jobId]);
 
+  const deck = status?.deck ?? null;
+  const ready = status?.state === 'ready' && !!deck;
+  const slides = deck?.slides ?? [];
+
   useEffect(() => {
-    if (deck) document.title = `Slides · ${capital(deck.title)} · Replay Board`;
+    if (deck) document.title = `Slides · ${deck.title} · Replay Board`;
   }, [deck]);
-
-  const update = (next: Partial<SlidesPrefs>) => {
-    const v = { ...prefs, ...next };
-    setPrefs(v);
-    savePrefs(localStore(), jobId, v);
-  };
-
-  /** Ask Muse Spark for the titles and key points. The deck stays usable whatever happens. */
-  const writePoints = useCallback(
-    (version: string) => {
-      const key = `${jobId}\n${version}`;
-      let call = pointsCalls.get(key);
-      if (!call) {
-        call = writeSlidePoints(jobId);
-        pointsCalls.set(key, call);
-        const forget = () => pointsCalls.delete(key);
-        call.then(forget, forget);
-      }
-      setPoints({ state: 'writing' });
-      call.then(
-        (d) => {
-          if (!alive.current) return;
-          setDeck(d);
-          setPoints(
-            d.points_ready || !d.pages.length
-              ? { state: 'idle' }
-              : { state: 'failed', error: 'Muse Spark did not write the key points this time.' },
-          );
-        },
-        (e) => {
-          if (alive.current) setPoints({ state: 'failed', error: sentence(String((e as Error).message || e)) });
-        },
-      );
-    },
-    [jobId],
-  );
-
-  // On first open, write the key points once, automatically.
-  useEffect(() => {
-    if (!deck || deck.points_ready || !deck.pages.length || triedFor.current === deck.version) return;
-    triedFor.current = deck.version;
-    writePoints(deck.version);
-  }, [deck, writePoints]);
 
   const present = (index: number, header = false) => {
     fromHeader.current = header;
@@ -429,9 +209,9 @@ export function SlidesPage({ jobId }: { jobId: string }) {
     setPresenting(null);
     if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
     requestAnimationFrame(() => {
-      const sheet = document.getElementById(`slide-${index + 1}`);
-      sheet?.scrollIntoView({ block: 'start' });
-      const back = fromHeader.current ? presentBtn.current : sheet?.querySelector<HTMLElement>('.deck-from-here');
+      const card = document.getElementById(`slide-${index + 1}`);
+      card?.scrollIntoView({ block: 'start' });
+      const back = fromHeader.current ? presentBtn.current : card?.querySelector<HTMLElement>('.sl-from-here');
       (back ?? presentBtn.current)?.focus({ preventScroll: true });
     });
   }, []);
@@ -456,56 +236,69 @@ export function SlidesPage({ jobId }: { jobId: string }) {
       setTimeout(() => URL.revokeObjectURL(href), 60_000);
       if (alive.current) setPptx({ state: 'idle' });
     } catch (err) {
-      if (alive.current) setPptx({ state: 'failed', error: sentence(String((err as Error).message || err)) });
+      if (alive.current) setPptx({ state: 'failed', error: line(err) });
     }
   };
 
-  const view: SlidesView = deck?.type === 'board' ? prefs.view : 'image';
-  const writing = points.state === 'writing';
-  const title = deck ? capital(deck.title) : '';
-  const pages = deck?.pages ?? [];
-  const anySaid = pages.some((p) => p.said);
-  // The overlay is up. A deck re-read with no pages takes it down, and the page must not stay inert under nothing.
-  const showing = !!deck && presenting !== null && pages.length > 0;
-  const pptxNote = deck && !deck.points_ready ? ' (key points are not written yet: titles only)' : '';
+  // The overlay is up. A deck re-read with no slides takes it down, and the page must not stay inert under nothing.
+  const showing = ready && presenting !== null && slides.length > 0;
+  const canPresent = ready && slides.length > 0;
+  const writing = !error && (!status || status.state === 'none' || status.state === 'writing');
+  const failed = !error && status?.state === 'failed';
+  const meta = deck
+    ? [
+        ready ? `${slides.length} slide${slides.length === 1 ? '' : 's'}` : '',
+        deck.lecture !== deck.title ? deck.lecture : '',
+        durationLabel(deck.duration) ? `${durationLabel(deck.duration)} of lecture` : '',
+      ].filter(Boolean)
+    : [];
 
   return (
     <div className="slides-page">
-      {/* Landscape pages while this page is open (the notes print portrait). */}
-      <style>{'@page { size: landscape; margin: 10mm; }'}</style>
+      {/* While this page is open, a printed page is one slide: 960 x 540 pt, the PowerPoint's slide size, like a
+          PowerPoint saved as PDF (the notes print portrait). */}
+      <style>{'@page { size: 960pt 540pt; margin: 0; }'}</style>
       {/* While presenting, the page under the overlay can be neither focused nor read: the dialog is modal. */}
       <header className="notes-bar slides-bar" inert={showing}>
         <a className="ghost-btn" href={`#/job/${encodeURIComponent(jobId)}`}>
           ← Back to the lecture
         </a>
-        <div className="notes-actions slides-actions">
+        <p className="slides-bar-name" title={deck?.lecture}>
+          {deck?.lecture ?? ''}
+        </p>
+        <div className="slides-actions">
           <button
             ref={presentBtn}
-            className="ghost-btn present-start"
+            className="ghost-btn"
             onClick={() => present(0, true)}
-            disabled={!pages.length}
+            disabled={!canPresent}
             title="Show one slide at a time, full screen"
           >
             <PresentIcon />
             Present
           </button>
-          <button className="ghost-btn" onClick={() => window.print()} disabled={!pages.length} title="One slide per landscape page">
+          <button
+            className="ghost-btn"
+            onClick={() => window.print()}
+            disabled={!canPresent}
+            title="One slide per landscape page"
+          >
             Save as PDF
           </button>
-          {deck && pages.length > 0 ? (
+          {ready && deck ? (
             <a
-              className="ghost-btn"
-              href={slidesPptxUrl(jobId, deck.version, deck.points_ready)}
+              className="primary-btn slides-download"
+              href={slidesPptxUrl(jobId, deck.version)}
               download
               onClick={downloadPptx}
               aria-busy={pptx.state === 'making'}
               aria-disabled={pptx.state === 'making'}
-              title={`Download the slides as a PowerPoint file${pptxNote}`}
+              title="Download the slides as a PowerPoint file"
             >
               {pptx.state === 'making' ? 'Making the PowerPoint…' : 'Download PowerPoint'}
             </a>
           ) : (
-            <button className="ghost-btn" disabled>
+            <button className="primary-btn slides-download" disabled>
               Download PowerPoint
             </button>
           )}
@@ -518,97 +311,61 @@ export function SlidesPage({ jobId }: { jobId: string }) {
         )}
       </header>
       <main className="slides-main" inert={showing}>
+        <div className="slides-intro">
+          <h1 className="notes-title">{deck?.title ?? 'Slides'}</h1>
+          {deck?.subtitle && <p className="slides-subtitle">{deck.subtitle}</p>}
+          {meta.length > 0 && <p className="slides-meta">{meta.join(' · ')}</p>}
+          {ready && (
+            <p className="slides-how">
+              Written by Muse Spark from the whole lecture. Play opens the lecture at that moment; the PowerPoint has the
+              same slides, with the speaker notes.
+            </p>
+          )}
+          {deck && deck.degraded.length > 0 && (
+            <div className="slides-degraded">
+              {deck.degraded.map((d, i) => (
+                <p key={i}>{d}</p>
+              ))}
+            </div>
+          )}
+        </div>
         {error && (
           <p className="error-line slides-load-error" role="alert">
             <span>{error}</span>
-            <button className="ghost-btn" onClick={tryAgain}>
+            <button className="ghost-btn" onClick={() => startOver(false)}>
               Try again
             </button>
           </p>
         )}
-        {!deck && !error && <p className="muted">Making the slides…</p>}
-        {deck && (
-          <>
-            <div className="slides-intro">
-              <h1 className="notes-title">{title}</h1>
-              <p className="notes-sub screen-only">
-                {pages.length} slide{pages.length === 1 ? '' : 's'} made by Replay Board from what the teacher{' '}
-                {deck.type === 'slides' ? 'showed' : 'wrote'}. Titles and key points by Muse Spark. Play opens the
-                lecture at that slide.
-              </p>
-              <p className="notes-sub print-only">
-                Made with Replay Board from the recorded lecture · {pages.length} slide{pages.length === 1 ? '' : 's'}
-                {pages.length > 0 && ` · ${rangeLabel(pages[0].t0, pages[pages.length - 1].t1)}`}
-              </p>
-              <div className="slides-tools" role="group" aria-label="Slide options">
-                {deck.type === 'board' && (
-                  <div className="seg" role="group" aria-label="Show the board as">
-                    <button
-                      className={view === 'image' ? 'on' : ''}
-                      aria-pressed={view === 'image'}
-                      onClick={() => update({ view: 'image' })}
-                    >
-                      Board
-                    </button>
-                    <button
-                      className={view === 'typeset' ? 'on' : ''}
-                      aria-pressed={view === 'typeset'}
-                      onClick={() => update({ view: 'typeset' })}
-                    >
-                      Typeset
-                    </button>
-                  </div>
-                )}
-                {anySaid && (
-                  <label className="said-toggle">
-                    <input type="checkbox" checked={prefs.said} onChange={(e) => update({ said: e.target.checked })} />
-                    Include what was said
-                  </label>
-                )}
-              </div>
-              {points.state === 'failed' && (
-                <p className="slides-points-error" role="alert">
-                  <span>{points.error}</span>
-                  <button className="ghost-btn" onClick={() => deck && writePoints(deck.version)}>
-                    Retry
-                  </button>
-                </p>
-              )}
-              <p className="sr-only" role="status">
-                {writing ? 'Muse Spark is writing the key points.' : ''}
-              </p>
-            </div>
-            {pages.length ? (
-              pages.map((p, i) => (
-                <SlideCard
-                  key={p.id}
-                  jobId={jobId}
-                  deck={deck}
-                  page={p}
-                  index={i}
-                  view={view}
-                  said={prefs.said}
-                  writing={writing}
-                  onPresent={present}
-                  onImageError={onImageError}
-                />
-              ))
-            ) : (
-              <p className="muted">This lecture has no slides: nothing was written or shown.</p>
-            )}
-          </>
+        {failed && status && (
+          <p className="error-line slides-load-error" role="alert">
+            <span>{status.error}</span>
+            <button className="ghost-btn" onClick={() => startOver(true)}>
+              Try again
+            </button>
+          </p>
         )}
+        {writing && <Progress status={status} />}
+        {deck && slides.length > 0 && (
+          <div className="sl-list">
+            {slides.map((s, i) => (
+              <SlideCard
+                key={s.id}
+                jobId={jobId}
+                deck={deck}
+                slide={s}
+                index={i}
+                canPresent={canPresent}
+                onPresent={present}
+                onImageError={onImageError}
+              />
+            ))}
+          </div>
+        )}
+        {ready && !slides.length && <p className="muted">This lecture has no slides: nothing was said or shown.</p>}
       </main>
       {showing && deck && presenting !== null && (
-        <Presenter
-          jobId={jobId}
-          deck={deck}
-          start={presenting}
-          view={view}
-          writing={writing}
-          onClose={stopPresenting}
-          onImageError={onImageError}
-        />
+        <Presenter jobId={jobId} deck={deck} start={presenting} onClose={stopPresenting} onImageError={onImageError} />
       )}
     </div>
   );
