@@ -1,10 +1,17 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { getJob, getReplay, jobFileUrl } from '../api';
-import type { Piece, Replay } from '../types';
+import { AskDrawer } from '../ask/AskDrawer';
+import { SparkIcon } from '../ask/icons';
+import { lectureIndex } from '../ask/items';
+import { spanEntry, type SpanPick } from '../ask/selection';
+import { addEntry, loadTray, openKey, saveTray, session, TRAY_MAX, type TrayEntry } from '../ask/tray';
+import type { AskRef, BoardLine, Piece, Replay, SlideElement } from '../types';
 import { Board, type BoardHandle } from './Board';
 import { Slides, type SlidesHandle } from './Slides';
 import { drawable } from './slideTiming';
-import { activeWord, chapterAt, formatTime, groupWords, lastStartedWord, seekTarget, turnsFromWords } from './timing';
+import {
+  activeWord, chapterAt, formatTime, groupWords, isWrittenLine, lastStartedWord, seekTarget, turnsFromWords,
+} from './timing';
 import { LazyPopout, PopoutFallback } from './popoutLoader';
 import { Chapters, Transcript } from './Transcript';
 
@@ -24,7 +31,9 @@ function Shortcuts({ onClose, mode }: { onClose(): void; mode: 'board' | 'slides
           [['Space'], 'Play / pause'],
           [['←', '→'], 'Back / forward 5 s'],
           [['P'], "Show the teacher's pointer"],
+          [['A'], 'Ask Muse about the lecture'],
           [['Click slide text'], 'Jump to where it is explained'],
+          [['Shift+click slide text'], 'Attach it to a question'],
           [['Click slide'], 'Play / pause'],
           [['Click a word'], 'Jump to that word'],
         ]
@@ -32,7 +41,9 @@ function Shortcuts({ onClose, mode }: { onClose(): void; mode: 'board' | 'slides
           [['Space'], 'Play / pause'],
           [['←', '→'], 'Back / forward 5 s'],
           [['T'], 'Handwriting / typeset'],
+          [['A'], 'Ask Muse about the lecture'],
           [['Click writing'], 'Jump to where it is explained'],
+          [['Shift+click writing'], 'Attach it to a question'],
           [['Hover a graph'], 'View it in 3D (3D button)'],
           [['Click board'], 'Play / pause'],
           [['Click a word'], 'Jump to that word'],
@@ -108,6 +119,26 @@ export function Player({
   const [videoAspect, setVideoAspect] = useState(
     replay.video.width && replay.video.height ? replay.video.width / replay.video.height : 16 / 9,
   );
+
+  // Ask Muse: the drawer (kept mounted once opened, so a conversation survives closing it) and the tray of things
+  // attached to the next question, kept per lecture in sessionStorage.
+  const [askOpen, setAskOpen] = useState(() => {
+    try {
+      return session()?.getItem(openKey(jobId)) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [askMounted, setAskMounted] = useState(askOpen);
+  const [askFocus, setAskFocus] = useState(0);
+  const [tray, setTrayState] = useState<TrayEntry[]>(() => loadTray(session(), jobId));
+  const trayRef = useRef(tray);
+  const [askNotice, setAskNotice] = useState<{ text: string; key: number } | null>(null);
+  const askBtnRef = useRef<HTMLButtonElement>(null);
+  const askOpenRef = useRef(askOpen);
+  askOpenRef.current = askOpen;
+  const showKeysRef = useRef(showKeys);
+  showKeysRef.current = showKeys;
 
   const words = useMemo(
     () =>
@@ -239,7 +270,94 @@ export function Player({
   }, []);
   const closePopout = useCallback(() => setPopout(null), []);
 
-  // Keyboard: space, arrows, t (board), p (slides). Ignored while typing in a field.
+  // ---- Ask Muse ----
+  const lecture = useMemo(
+    () => lectureIndex(replay, { clipStart, isLine: (ln) => isWrittenLine(ln, replay.board?.size?.[0] ?? 960) }),
+    [replay, clipStart],
+  );
+  useEffect(() => saveTray(session(), jobId, tray), [jobId, tray]);
+  useEffect(() => {
+    try {
+      if (askOpen) session()?.setItem(openKey(jobId), '1');
+      else session()?.removeItem(openKey(jobId));
+    } catch {
+      /* storage blocked: the drawer just won't reopen by itself after a reload */
+    }
+    if (askOpen) setAskMounted(true);
+  }, [askOpen, jobId]);
+  useEffect(() => {
+    if (!askNotice) return;
+    const id = window.setTimeout(() => setAskNotice(null), 3200);
+    return () => window.clearTimeout(id);
+  }, [askNotice]);
+
+  const setTray = useCallback((next: TrayEntry[]) => {
+    trayRef.current = next;
+    setTrayState(next);
+  }, []);
+  const openAsk = useCallback((focus: boolean) => {
+    setAskOpen(true);
+    if (focus) setAskFocus((k) => k + 1);
+  }, []);
+  const closeAsk = useCallback(() => {
+    setAskOpen(false);
+    if ((document.activeElement as HTMLElement | null)?.closest?.('.ask-drawer')) askBtnRef.current?.focus();
+  }, []);
+  /** Put something on the tray and show the drawer (without taking the focus from what the student clicked). */
+  const attach = useCallback(
+    (entry: TrayEntry) => {
+      const r = addEntry(trayRef.current, entry);
+      if (r.status === 'added') setTray(r.tray);
+      setAskNotice({
+        text:
+          r.status === 'added'
+            ? `Attached: ${entry.label}`
+            : r.status === 'duplicate'
+              ? 'That is already attached.'
+              : `You can attach up to ${TRAY_MAX} things to one question.`,
+        key: Date.now(),
+      });
+      openAsk(false);
+    },
+    [openAsk, setTray],
+  );
+  const askRef = useCallback(
+    (ref: string, fallback: TrayEntry) => {
+      const it = lecture.byRef.get(ref);
+      attach(it ? { item: it.item, label: it.label, t: it.t } : fallback);
+    },
+    [lecture, attach],
+  );
+  const askPiece = useCallback(
+    (p: Piece, line: BoardLine | null) =>
+      line
+        ? askRef(`#${line.id}`, { item: { kind: 'line', id: line.id }, label: line.read?.text || line.id, t: line.t_complete })
+        : askRef(`#${p.id}`, { item: { kind: 'piece', id: p.id }, label: p.read?.text || `#${p.id}`, t: seekTarget(p, clipStart) }),
+    [askRef, clipStart],
+  );
+  const askElement = useCallback(
+    (el: SlideElement) =>
+      askRef(`#${el.id}`, { item: { kind: 'element', id: el.id }, label: el.text || el.id, t: timeRef.current ?? 0 }),
+    [askRef],
+  );
+  const askSpan = useCallback((s: SpanPick) => attach(spanEntry(s)), [attach]);
+  const addMoment = useCallback(() => {
+    const t = Math.round((timeRef.current ?? 0) * 10) / 10;
+    attach({ item: { kind: 'moment', t }, label: 'Moment', t });
+  }, [attach]);
+  /** Show a board or slide item an answer cites: seek to it and light it up for a moment. */
+  const showItem = useCallback(
+    (r: AskRef) => {
+      seek(r.t);
+      if (r.kind === 'element') slidesRef.current?.highlight([String(r.id)]);
+      else boardRef.current?.highlight([r.id]);
+    },
+    [seek],
+  );
+  const seekOnly = useCallback((t: number) => seek(t), [seek]);
+
+  // Keyboard: space, arrows, t (board), p (slides), a (Ask Muse). Ignored while typing in a field, and inside the
+  // Ask Muse drawer (it has its own keys: Enter sends, Esc closes).
   const modeRef = useRef(mode);
   modeRef.current = mode;
   useEffect(() => {
@@ -251,6 +369,7 @@ export function Player({
     const down = (e: KeyboardEvent) => {
       if (popoutOpen.current) return; // the 3D view has the keyboard (Esc closes it)
       if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+      if ((e.target as HTMLElement | null)?.closest?.('.ask-drawer')) return;
       const v = videoRef.current;
       if (!v) return;
       let handled = true;
@@ -262,8 +381,14 @@ export function Player({
       else if ((e.key === 't' || e.key === 'T') && modeRef.current === 'board') setTypeset((x) => !x);
       else if ((e.key === 'p' || e.key === 'P') && modeRef.current === 'slides') setShowPointer((x) => !x);
       else if (e.key === '?') setShowKeys((x) => !x);
-      else if (e.key === 'Escape') setShowKeys(false);
-      else handled = false;
+      else if ((e.key === 'a' || e.key === 'A') && !e.shiftKey) {
+        if (askOpenRef.current) closeAsk();
+        else openAsk(true);
+      } else if (e.key === 'Escape') {
+        if (showKeysRef.current) setShowKeys(false);
+        else if (askOpenRef.current) closeAsk();
+        else handled = false;
+      } else handled = false;
       if (handled) {
         e.preventDefault();
         e.stopPropagation();
@@ -281,7 +406,7 @@ export function Player({
       window.removeEventListener('keydown', down, true);
       window.removeEventListener('keyup', up, true);
     };
-  }, [seek, togglePlay]);
+  }, [seek, togglePlay, openAsk, closeAsk]);
 
   const onLoadedMetadata = () => {
     const v = videoRef.current;
@@ -314,7 +439,7 @@ export function Player({
   } as CSSProperties;
 
   return (
-    <div className="player">
+    <div className={`player ${askOpen ? 'ask-open' : ''}`}>
       <header className="topbar">
         <a className="brand" href="#/" title="All lectures">
           <Logo />
@@ -346,6 +471,22 @@ export function Player({
           </a>
           <button className={`ghost-btn keys-btn ${showKeys ? 'on' : ''}`} onClick={() => setShowKeys((x) => !x)}>
             <kbd>?</kbd> Shortcuts
+          </button>
+          <button
+            ref={askBtnRef}
+            className={`ghost-btn ask-btn ${askOpen ? 'on' : ''}`}
+            aria-expanded={askOpen}
+            aria-label={tray.length ? `Ask Muse, ${tray.length} attached` : 'Ask Muse'}
+            title="Ask Muse Spark about this lecture (A)"
+            onClick={() => (askOpen ? closeAsk() : openAsk(true))}
+          >
+            <SparkIcon size={13} />
+            <span className="ask-btn-label">Ask Muse</span>
+            {tray.length > 0 && (
+              <span className="ask-btn-count" aria-hidden>
+                {tray.length}
+              </span>
+            )}
           </button>
           {showKeys && <Shortcuts mode={mode} onClose={() => setShowKeys(false)} />}
         </div>
@@ -437,6 +578,7 @@ export function Player({
                 onSeekPiece={seekPiece}
                 onTogglePlay={togglePlay}
                 onPopout={openPopout}
+                onAsk={askPiece}
               />
             ) : slides ? (
               <Slides
@@ -449,6 +591,7 @@ export function Player({
                 showPointer={showPointer}
                 onSeek={seekAndPlay}
                 onTogglePlay={togglePlay}
+                onAsk={askElement}
               />
             ) : (
               <div className="board-missing">
@@ -512,9 +655,29 @@ export function Player({
             timing={replay.transcript?.timing}
             refining={refining}
             onSeek={seekWord}
+            onAskSpan={askSpan}
           />
         </div>
       </main>
+
+      {askMounted && (
+        <AskDrawer
+          jobId={jobId}
+          open={askOpen}
+          focusKey={askFocus}
+          onClose={closeAsk}
+          tray={tray}
+          setTray={setTray}
+          notice={askNotice}
+          index={lecture}
+          mode={mode}
+          timeRef={timeRef}
+          videoEnd={replay.video.duration}
+          onAddMoment={addMoment}
+          onSeek={seekOnly}
+          onShowItem={showItem}
+        />
+      )}
 
       {popout && board && (
         <Suspense fallback={<PopoutFallback />}>

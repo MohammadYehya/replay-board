@@ -1,6 +1,14 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { SparkIcon } from '../ask/icons';
+import { spanFromTurns, spanFromWords, type SpanPick } from '../ask/selection';
 import type { Chapter, Turn, Word } from '../types';
 import { formatTime } from './timing';
+
+/** True while the student has text selected: the click that ends a selection is not a click on a word. */
+const selecting = () => {
+  const sel = window.getSelection();
+  return !!sel && !sel.isCollapsed;
+};
 
 type TurnState = 'past' | 'current' | 'future';
 const EMPTY: number[] = [];
@@ -25,6 +33,7 @@ const TurnBlock = memo(function TurnBlock(props: {
         <p
           className="turn-text"
           onClick={(e) => {
+            if (selecting()) return;
             const i = Number((e.target as HTMLElement).dataset?.i);
             if (Number.isInteger(i) && words[i]) onSeek(words[i].s);
           }}
@@ -39,7 +48,7 @@ const TurnBlock = memo(function TurnBlock(props: {
           ))}
         </p>
       ) : (
-        <p className="turn-text plain" onClick={() => onSeek(turn.start)}>
+        <p className="turn-text plain" onClick={() => !selecting() && onSeek(turn.start)}>
           {turn.text}
         </p>
       )}
@@ -59,11 +68,88 @@ export function Transcript(props: {
   /** True while the backend still refines the word times (the player swaps in the new ones when they land). */
   refining?: boolean;
   onSeek(t: number): void;
+  /** Ask Muse about the selected words: a small "Ask about this" button appears by a selection. */
+  onAskSpan?(span: SpanPick): void;
 }) {
-  const { turns, words, groups, wordTurn, active, upTo, currentTurn, timing, refining, onSeek } = props;
+  const { turns, words, groups, wordTurn, active, upTo, currentTurn, timing, refining, onSeek, onAskSpan } = props;
   const boxRef = useRef<HTMLDivElement>(null);
   const [detached, setDetached] = useState(false);
   const idleTimer = useRef<number | undefined>(undefined);
+
+  // Selected words -> the stretch of speech they cover, with a button to ask about it beside the selection.
+  const [askSel, setAskSel] = useState<{ left: number; top: number; pick: SpanPick } | null>(null);
+  const pointerDown = useRef(false);
+  const readSelection = useCallback(() => {
+    const box = boxRef.current;
+    const sel = window.getSelection();
+    if (!onAskSpan || !box || !sel || sel.isCollapsed || !sel.rangeCount) return setAskSel(null);
+    const range = sel.getRangeAt(0);
+    if (!box.contains(range.commonAncestorContainer)) return setAskSel(null);
+    const turnOf = (n: Node) =>
+      (n instanceof Element ? n : n.parentElement)?.closest<HTMLElement>('[data-turn]') ?? null;
+    const a = turnOf(range.startContainer);
+    const b = turnOf(range.endContainer);
+    const from = a ? Number(a.dataset.turn) : 0;
+    const to = b ? Number(b.dataset.turn) : turns.length - 1;
+    // a word counts when some of it is selected (not when the selection only touches its edge)
+    const covers = (el: Element) => {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      // END_TO_START: the selection's start against the word's end; START_TO_END: its end against the word's start
+      return range.compareBoundaryPoints(Range.END_TO_START, r) < 0 && range.compareBoundaryPoints(Range.START_TO_END, r) > 0;
+    };
+    const idx: number[] = [];
+    const plain: number[] = [];
+    for (let ti = from; ti <= to; ti++) {
+      const el = box.querySelector(`[data-turn="${ti}"] .turn-text`);
+      if (!el) continue;
+      const spans = el.querySelectorAll<HTMLElement>('[data-i]');
+      if (spans.length) spans.forEach((sp) => covers(sp) && idx.push(Number(sp.dataset.i)));
+      else if (covers(el)) plain.push(ti);
+    }
+    const text = sel.toString();
+    const pick =
+      spanFromWords(words, idx, text) ?? (plain.length ? spanFromTurns(turns, plain[0], plain[plain.length - 1], text) : null);
+    if (!pick) return setAskSel(null);
+    const rects = range.getClientRects();
+    const last = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+    const boxRect = box.getBoundingClientRect();
+    const left = Math.min(Math.max(4, last.right - boxRect.left - 70), Math.max(4, box.clientWidth - 150));
+    setAskSel({ left, top: last.bottom - boxRect.top + box.scrollTop + 6, pick });
+  }, [onAskSpan, words, turns]);
+
+  useEffect(() => {
+    if (!onAskSpan) return;
+    let timer: number | undefined;
+    const onChange = () => {
+      const sel = window.getSelection();
+      const box = boxRef.current;
+      if (!sel || sel.isCollapsed || !box || !sel.anchorNode || !box.contains(sel.anchorNode)) {
+        setAskSel(null);
+        return;
+      }
+      // a selection made by touch (handles dragged) or the keyboard has no mouseup: read it once it settles
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => !pointerDown.current && readSelection(), 300);
+    };
+    // the selection is final once the button is up (even when the drag ended outside the transcript). A long press
+    // on a phone ends in pointercancel, not pointerup (the browser takes over to select): without it the flag would
+    // stay set and the button would never show on touch.
+    const onUp = () => {
+      if (!pointerDown.current) return;
+      pointerDown.current = false;
+      window.setTimeout(readSelection, 0);
+    };
+    document.addEventListener('selectionchange', onChange);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('selectionchange', onChange);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [onAskSpan, readSelection]);
 
   // Word spans by global index, collected after the words render (the highlight below writes to them).
   const spans = useRef<HTMLElement[]>([]);
@@ -152,6 +238,7 @@ export function Transcript(props: {
         onWheel={userScrolled}
         onTouchMove={userScrolled}
         onPointerDown={(e) => {
+          pointerDown.current = true;
           if (e.target === e.currentTarget) userScrolled(); // grabbing the scrollbar
         }}
         onKeyDown={(e) => {
@@ -160,6 +247,23 @@ export function Transcript(props: {
         tabIndex={-1}
       >
         {turns.length === 0 && <p className="empty">No speech was transcribed for this lecture.</p>}
+        {askSel && onAskSpan && (
+          <button
+            type="button"
+            className="ask-sel-btn"
+            style={{ left: askSel.left, top: askSel.top }}
+            onMouseDown={(e) => e.preventDefault()} // keep the selection
+            onClick={() => {
+              onAskSpan(askSel.pick);
+              window.getSelection()?.removeAllRanges();
+              setAskSel(null);
+            }}
+            title={`Ask Muse about what was said ${formatTime(askSel.pick.t0)}–${formatTime(askSel.pick.t1)}`}
+          >
+            <SparkIcon size={12} />
+            Ask about this
+          </button>
+        )}
         {turns.map((turn, ti) => {
           const state: TurnState = ti < currentTurn ? 'past' : ti === currentTurn ? 'current' : 'future';
           return (

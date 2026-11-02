@@ -1,4 +1,5 @@
-import type { JobStatus, JobSummary, PopoutScene, Replay } from './types';
+import { cleanChat, readAnswer } from './ask/protocol';
+import type { AskDone, AskRequest, AskTurn, JobStatus, JobSummary, PopoutScene, Replay } from './types';
 
 /** URL of a file inside a job folder (video, piece images). Each path segment is encoded. */
 export function jobFileUrl(jobId: string, path: string): string {
@@ -99,4 +100,66 @@ export function uploadVideo(file: File, opts: UploadOptions = {}): { promise: Pr
     xhr.send(form);
   });
   return { promise, abort: () => xhr.abort() };
+}
+
+const SERVER_DOWN = 'Cannot reach the Replay Board server. Is `python -m app.server` running?';
+const NO_ASK = 'This server has no Ask Muse yet: restart `python -m app.server` with the latest code.';
+
+/**
+ * Ask Muse Spark a question about the lecture (POST /api/jobs/{id}/ask). The answer streams in: each piece of text
+ * goes to onDelta as it arrives, and the promise resolves with the whole answer, its refs, times and cost.
+ * Every failure is one plain line (an aborted request rejects with an AbortError).
+ */
+export async function askMuse(
+  jobId: string,
+  req: AskRequest,
+  opts: { signal?: AbortSignal; onDelta?: (text: string) => void } = {},
+): Promise<AskDone> {
+  let r: Response;
+  try {
+    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(req),
+      signal: opts.signal,
+      cache: 'no-store',
+    });
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    throw new Error(SERVER_DOWN);
+  }
+  if (!r.ok) {
+    const line = await errorLine(r);
+    if ((r.status === 404 || r.status === 405) && /^(not found\.?|method not allowed)$/i.test(line)) throw new Error(NO_ASK);
+    throw new Error(line);
+  }
+  if (!r.body || !(r.headers.get('content-type') ?? '').includes('text/event-stream')) {
+    throw new Error('The server did not stream an answer. Is it up to date?');
+  }
+  return readAnswer(r.body, opts.onDelta ?? (() => {}));
+}
+
+/** The saved conversation about a lecture (oldest first); none when the server has no Ask Muse yet. */
+export async function getChat(jobId: string, signal?: AbortSignal): Promise<AskTurn[]> {
+  let r: Response;
+  try {
+    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/chat`, { signal, cache: 'no-store' });
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    throw new Error(SERVER_DOWN);
+  }
+  if (r.status === 404 || r.status === 405) return [];
+  if (!r.ok) throw new Error(await errorLine(r));
+  return cleanChat(await r.json());
+}
+
+/** Forget the conversation about a lecture. */
+export async function clearChat(jobId: string): Promise<void> {
+  let r: Response;
+  try {
+    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/chat`, { method: 'DELETE' });
+  } catch {
+    throw new Error(SERVER_DOWN);
+  }
+  if (!r.ok && r.status !== 404) throw new Error(await errorLine(r));
 }

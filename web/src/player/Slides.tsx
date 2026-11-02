@@ -7,7 +7,7 @@ import {
   type RefObject,
 } from 'react';
 import { jobFileUrl } from '../api';
-import type { PointerSample, SlideAnnotation, SlideElement, SlidesData, SlideState } from '../types';
+import type { Box, PointerSample, SlideAnnotation, SlideElement, SlidesData, SlideState } from '../types';
 import { AnnotationLayer, type AnnotationLayerHandle } from './AnnotationLayer';
 import {
   crossfadeAt, elementSeekTime, isLightColour, pickElement, pointerAt, slideEndAt, sortStates, stateIndexAt, toolColour,
@@ -19,6 +19,8 @@ import { kindLabel, sameReading, tipTex } from './tip';
 
 export interface SlidesHandle {
   render(t: number): void;
+  /** Outline these slide elements ("s0e1") for a moment: an answer of Ask Muse pointing at them. */
+  highlight(ids: string[]): void;
 }
 
 interface Props {
@@ -31,7 +33,11 @@ interface Props {
   /** Seek to t and play. */
   onSeek(t: number): void;
   onTogglePlay(): void;
+  /** Attach a slide element to an Ask Muse question (Shift+click). */
+  onAsk?(el: SlideElement): void;
 }
+
+const HIGHLIGHT_MS = 2400;
 
 const EMPTY: SlideElement[] = [];
 const NO_ANNOTATIONS: SlideAnnotation[] = [];
@@ -120,7 +126,7 @@ class SlideAnimator {
 // Memoised: the player re-renders on every spoken word, the slides only need to when their props change.
 export const Slides = memo(
   forwardRef<SlidesHandle, Props>(function Slides(props, ref) {
-    const { jobId, slides, timeRef, clipStart, playing, showPointer, onSeek, onTogglePlay } = props;
+    const { jobId, slides, timeRef, clipStart, playing, showPointer, onSeek, onTogglePlay, onAsk } = props;
     const [W, H] = slides.size;
     const u = unitOf(slides.size);
     const stageRef = useRef<HTMLDivElement>(null);
@@ -157,6 +163,9 @@ export const Slides = memo(
     const [cssW, setCssW] = useState(0);
     const [flash, setFlash] = useState<{ key: number; play: boolean } | null>(null);
     const [tipPos, setTipPos] = useState<{ left: number; top: number; below: boolean } | null>(null);
+    const [lit, setLit] = useState<{ key: number; boxes: Box[] } | null>(null);
+    const litTimer = useRef<number | undefined>(undefined);
+    useEffect(() => () => window.clearTimeout(litTimer.current), []);
 
     anim.states = states;
     anim.samples = samples;
@@ -212,8 +221,24 @@ export const Slides = memo(
           anim.render(t);
           annRef.current?.render(t);
         },
+        highlight(ids: string[]) {
+          const boxes: Box[] = [];
+          for (const id of ids) {
+            for (const st of states) {
+              const el = st.elements?.find((e) => e.id === id);
+              if (el) {
+                boxes.push(el.box);
+                break;
+              }
+            }
+          }
+          window.clearTimeout(litTimer.current);
+          if (!boxes.length) return setLit(null);
+          setLit({ key: Date.now(), boxes });
+          litTimer.current = window.setTimeout(() => setLit(null), HIGHLIGHT_MS);
+        },
       }),
-      [anim],
+      [anim, states],
     );
 
     const pick = useCallback(
@@ -253,6 +278,10 @@ export const Slides = memo(
 
     const onClick = (e: React.MouseEvent) => {
       const el = pick(e.clientX, e.clientY);
+      if (el && e.shiftKey && onAsk) {
+        onAsk(el); // Shift+click: attach it to a question
+        return;
+      }
       if (el) {
         onSeek(elementSeekTime(el, state, clipStart));
         return;
@@ -349,6 +378,23 @@ export const Slides = memo(
               <circle data-fill="" r={4.5 * u} stroke="#fff" strokeOpacity={0.85} strokeWidth={1.3 * u} />
             </g>
           </svg>
+
+          {lit && (
+            <div key={lit.key} className="ask-lit-layer" aria-hidden>
+              {lit.boxes.map(([x, y, w, h], i) => (
+                <div
+                  key={i}
+                  className="ask-lit"
+                  style={{
+                    left: `${((x - 6 * u) / W) * 100}%`,
+                    top: `${((y - 5 * u) / H) * 100}%`,
+                    width: `${((w + 12 * u) / W) * 100}%`,
+                    height: `${((h + 10 * u) / H) * 100}%`,
+                  }}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
         {hover && (

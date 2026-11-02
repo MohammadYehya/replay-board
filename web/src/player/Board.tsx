@@ -2,7 +2,7 @@ import {
   forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
   type RefObject,
 } from 'react';
-import type { BoardData, Piece, SlideAnnotation } from '../types';
+import type { BoardData, BoardLine, Box, Piece, SlideAnnotation } from '../types';
 import { AnnotationLayer, type AnnotationLayerHandle, type Veil } from './AnnotationLayer';
 import { BoardRenderer, boardBackground, lineKey } from './boardRenderer';
 import { boardAnnotations, boardArrowBoxes, targetGoneAt, toolColour } from './slideTiming';
@@ -16,6 +16,8 @@ import { kindLabel, sameReading, tipTex } from './tip';
 
 export interface BoardHandle {
   render(t: number): void;
+  /** Outline these pieces (numbers) or lines ("L3") for a moment: an answer of Ask Muse pointing at them. */
+  highlight(ids: (number | string)[]): void;
 }
 
 interface Props {
@@ -29,7 +31,11 @@ interface Props {
   onTogglePlay(): void;
   /** Open the 3D pop-out for a drawn graph or a y = f(x) equation (board lectures only). */
   onPopout?(p: Piece): void;
+  /** Attach a piece to an Ask Muse question: its whole line when that line is finished by now (else line is null). */
+  onAsk?(p: Piece, line: BoardLine | null): void;
 }
+
+const HIGHLIGHT_MS = 2400;
 
 /** Largest font size (board px, at most maxFont) at which the content fits the piece's box. */
 function fitText(inner: HTMLElement, w: number, h: number, maxFont: number): number {
@@ -185,7 +191,7 @@ const TypesetPiece = memo(function TypesetPiece(props: {
 // Memoised: the player re-renders on every spoken word, the board only needs to when its props change.
 export const Board = memo(
   forwardRef<BoardHandle, Props>(function Board(props, ref) {
-    const { jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay, onPopout } = props;
+    const { jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay, onPopout, onAsk } = props;
     const [W, H] = board.size;
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const stageRef = useRef<HTMLDivElement>(null);
@@ -201,6 +207,7 @@ export const Board = memo(
     const [fontsVersion, setFontsVersion] = useState(0);
     const [flash, setFlash] = useState<{ key: number; play: boolean } | null>(null);
     const [tipPos, setTipPos] = useState<{ left: number; top: number; below: boolean } | null>(null);
+    const [lit, setLit] = useState<{ key: number; boxes: Box[] } | null>(null);
     const { css: background, light } = useMemo(() => boardBackground(board), [board]);
     const defaultInk = light ? '#1f2633' : '#f1f1ea';
 
@@ -343,12 +350,14 @@ export const Board = memo(
       setHover(p);
     }, []);
 
-    // A tooltip with a 3D button stays a moment after the pointer leaves its piece, so the pointer can reach it.
+    // A tooltip with buttons (Ask, 3D) stays a moment after the pointer leaves its piece, so the pointer can reach it.
     const onPopoutRef = useRef(onPopout);
     onPopoutRef.current = onPopout;
+    const onAskRef = useRef(onAsk);
+    onAskRef.current = onAsk;
     const hoverTo = (p: Piece | null) => {
       const h = hoverRef.current;
-      if (!p && h && onPopoutRef.current && canPopout(h)) {
+      if (!p && h && (onAskRef.current || (onPopoutRef.current && canPopout(h)))) {
         if (leaveTimer.current === undefined)
           leaveTimer.current = window.setTimeout(() => {
             leaveTimer.current = undefined;
@@ -360,6 +369,8 @@ export const Board = memo(
       changeHover(p);
     };
 
+    const litTimer = useRef<number | undefined>(undefined);
+    useEffect(() => () => window.clearTimeout(litTimer.current), []);
     useImperativeHandle(
       ref,
       () => ({
@@ -371,8 +382,36 @@ export const Board = memo(
           if (h && !r.isVisible(h.id, t)) changeHover(null);
           r.render(t);
         },
+        highlight(ids: (number | string)[]) {
+          const b = latestBoard.current;
+          const boxes: Box[] = [];
+          for (const id of ids) {
+            const box =
+              typeof id === 'number' || /^\d+$/.test(id)
+                ? b.pieces.find((p) => p.id === Number(id))?.box
+                : (b.lines ?? []).find((ln) => ln.id === id)?.box;
+            if (box) boxes.push(box);
+          }
+          window.clearTimeout(litTimer.current);
+          if (!boxes.length) return setLit(null);
+          setLit({ key: Date.now(), boxes });
+          litTimer.current = window.setTimeout(() => setLit(null), HIGHLIGHT_MS);
+        },
       }),
       [changeHover],
+    );
+
+    /** The finished line a piece belongs to at time t (its tooltip reads, and Ask attaches, the whole line). */
+    const lineOf = useCallback(
+      (p: Piece, t: number): BoardLine | null =>
+        (board.lines ?? []).find(
+          (ln) =>
+            ln.pieces.includes(p.id) &&
+            !!(ln.read?.latex?.trim() || ln.read?.text?.trim()) &&
+            isWrittenLine(ln, W) &&
+            t >= ln.t_complete,
+        ) ?? null,
+      [board, W],
     );
 
     const register = useCallback(
@@ -423,10 +462,16 @@ export const Board = memo(
     const onClick = (e: React.MouseEvent) => {
       if (tipRef.current?.contains(e.target as Node)) {
         // a click on the tooltip itself (not its buttons) does what clicking the piece does
-        if (hoverRef.current) onSeekPiece(hoverRef.current);
+        const h = hoverRef.current;
+        if (h && e.shiftKey && onAsk) onAsk(h, lineOf(h, timeRef.current ?? 0));
+        else if (h) onSeekPiece(h);
         return;
       }
       const p = pick(e.clientX, e.clientY);
+      if (p && e.shiftKey && onAsk) {
+        onAsk(p, lineOf(p, timeRef.current ?? 0)); // Shift+click: attach it to a question
+        return;
+      }
       if (p) {
         onSeekPiece(p);
         return;
@@ -437,15 +482,7 @@ export const Board = memo(
 
     const tipTime = hover ? seekTarget(hover, clipStart) : 0;
     // A fragment of a line that is finished by now reads as its whole line ("#1." -> "A = (1+1)^1 = 2").
-    const hoverLine = hover
-      ? (board.lines ?? []).find(
-          (ln) =>
-            ln.pieces.includes(hover.id) &&
-            (ln.read?.latex?.trim() || ln.read?.text?.trim()) &&
-            isWrittenLine(ln, W) &&
-            timeRef.current >= ln.t_complete,
-        )
-      : undefined;
+    const hoverLine = hover ? lineOf(hover, timeRef.current ?? 0) : null;
     const tipRead = hoverLine?.read ?? hover?.read;
     const tipLatex = tipRead?.latex?.trim() ?? '';
     const tipHtml = useMemo(() => tipTex(tipLatex), [tipLatex]);
@@ -464,6 +501,12 @@ export const Board = memo(
       changeHover(null);
       onPopout(h);
     };
+    const ask = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      const h = hoverRef.current;
+      if (h && onAsk) onAsk(h, lineOf(h, timeRef.current ?? 0));
+    };
+    const interactive = can3d || !!onAsk;
 
     return (
       <div
@@ -572,16 +615,29 @@ export const Board = memo(
         {hover && (
           <div
             ref={tipRef}
-            className={`board-tip ${tipPos?.below ? 'below' : ''} ${can3d ? 'interactive' : ''}`}
+            className={`board-tip ${tipPos?.below ? 'below' : ''} ${interactive ? 'interactive' : ''}`}
             style={{ left: tipPos?.left ?? 0, top: tipPos?.top ?? 0, visibility: tipPos ? 'visible' : 'hidden' }}
           >
             <div className="tip-head">
               <span className="tip-kind">{kindLabel(tipRead?.kind)}</span>
               {hover.revealed && !hover.pre_existing && <span className="tip-flag">was hidden</span>}
-              {can3d && (
-                <button className="tip-3d" onClick={open3d} title="View in 3D (made by Muse Spark)">
-                  3D
-                </button>
+              {(onAsk || can3d) && (
+                <span className="tip-btns">
+                  {onAsk && (
+                    <button
+                      className="tip-ask"
+                      onClick={ask}
+                      title={`Ask Muse about ${hoverLine ? 'this line' : 'this'} (Shift+click)`}
+                    >
+                      Ask
+                    </button>
+                  )}
+                  {can3d && (
+                    <button className="tip-3d" onClick={open3d} title="View in 3D (made by Muse Spark)">
+                      3D
+                    </button>
+                  )}
+                </span>
               )}
             </div>
             {tipHtml && <div className="tip-tex" dangerouslySetInnerHTML={{ __html: tipHtml }} />}
@@ -609,6 +665,26 @@ export const Board = memo(
                 <small>Muse Spark</small>
               </button>
             )}
+          </div>
+        )}
+
+        {lit && (
+          <div key={lit.key} className="ask-lit-layer" aria-hidden>
+            {lit.boxes.map(([x, y, w, h], i) => {
+              const pad = Math.max(4, W * 0.006);
+              return (
+                <div
+                  key={i}
+                  className="ask-lit"
+                  style={{
+                    left: `${((x - pad) / W) * 100}%`,
+                    top: `${((y - pad) / H) * 100}%`,
+                    width: `${((w + 2 * pad) / W) * 100}%`,
+                    height: `${((h + 2 * pad) / H) * 100}%`,
+                  }}
+                />
+              );
+            })}
           </div>
         )}
 

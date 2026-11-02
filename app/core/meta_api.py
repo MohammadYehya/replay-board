@@ -7,6 +7,8 @@
 - Uploads are sent as bytes, so a retry resends the whole upload.
 - Every call is recorded (latency, usage, estimated cost) in `client.calls` and in
   `<cache>/calls.jsonl`.
+- `chat_stream` streams an answer as text deltas (server-sent events). It retries only until the first
+  delta arrives; the finished answer is cached like any other.
 """
 from __future__ import annotations
 
@@ -16,10 +18,11 @@ import json
 import random
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 import numpy as np
@@ -56,6 +59,7 @@ class CallRecord:
     usage: dict = field(default_factory=dict)
     cost_usd: float | None = None
     key: str = ""
+    note: str = ""  # e.g. a stream that sent no usage (cost unknown), or an answer cut at max tokens
 
 
 def _hash_bytes(b: bytes) -> str:
@@ -186,25 +190,15 @@ class MetaClient:
                 cost = cost_fn(data) if cost_fn else None
                 self._record(CallRecord(endpoint, model, status, latency, False, attempt, usage, cost, key))
                 if self.use_cache:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = path.with_suffix(".tmp")
-                    tmp.write_text(json.dumps(data), encoding="utf-8")
-                    tmp.replace(path)
+                    _write_cache(path, data)
                 return data
             if resp is not None:
                 last_err = f"HTTP {status}: {_error_text(resp)}"
                 if status not in RETRY_STATUS:
                     self._record(CallRecord(endpoint, model, status, latency, False, attempt, {}, None, key))
                     raise MetaAPIError(f"{endpoint} ({model}) failed: {last_err}")
-            wait = min(20.0, 1.0 * 2 ** (attempt - 1)) * (0.5 + random.random())
-            ra = _retry_after(resp) if resp is not None else None
-            if ra is not None:
-                wait = max(wait, ra)
-            # The budget bounds waiting, not slow attempts: a timed-out call still gets retried.
-            now = time.monotonic()
-            if resp is None and attempt < MIN_NETWORK_TRIES:
-                deadline = max(deadline, now + wait)
-            if now + wait > deadline:
+            wait, deadline = _retry_wait(attempt, resp, deadline)
+            if wait is None:
                 self._record(CallRecord(endpoint, model, status, latency, False, attempt, {}, None, key))
                 raise MetaAPIError(f"{endpoint} ({model}) failed after {attempt} tries: {last_err}")
             time.sleep(wait)
@@ -240,6 +234,149 @@ class MetaClient:
         return self._send("/chat/completions", model, {"body": body},
                           lambda: self.http.post("/chat/completions", json=body),
                           lambda d: _chat_cost(model, d))
+
+    def chat_stream(self, messages: list[dict], *, model: str | None = None, reasoning: str | None = None,
+                    max_tokens: int | None = None, extra: dict | None = None) -> Iterator[str]:
+        """POST /chat/completions with "stream": true. Yields the answer's text as it arrives.
+
+        Retried like chat() (408/429/5xx, network errors, Retry-After), but only until the first text
+        arrives: after that a failure raises MetaAPIError. The finished answer is cached under the same
+        kind of key as chat() (endpoint + model + body), and a cached answer comes back at once, in one
+        piece. Usage (so the cost) comes in the last chunk because we ask for it with stream_options.
+        A stream that ends with no text (not for lack of tokens) is asked again without streaming.
+        """
+        endpoint = "/chat/completions"
+        model = model or self.settings.model_spark
+        body: dict[str, Any] = {"model": model, "messages": messages, "stream": True,
+                                "stream_options": {"include_usage": True}}
+        if max_tokens is not None:
+            body["max_completion_tokens"] = max_tokens
+        if reasoning:
+            body["reasoning_effort"] = reasoning
+        if extra:
+            body.update(extra)
+        key = hashlib.sha256(_canonical({"endpoint": endpoint, "model": model, "body": body}).encode()).hexdigest()
+        path = self._cache_path(key)
+        if self.use_cache and path.exists():
+            try:
+                cached = json.loads(path.read_text(encoding="utf-8"))
+                text = chat_text(cached) if isinstance(cached, dict) else ""
+            except (OSError, json.JSONDecodeError):
+                text = ""
+            if text:
+                finish = ((cached.get("choices") or [{}])[0] or {}).get("finish_reason")
+                self._record(CallRecord(endpoint, model, 200, 0.0, True, 0, cached.get("usage") or {}, 0.0, key,
+                                        "cut at max tokens" if finish == "length" else ""))
+                yield text
+                return
+
+        deadline = time.monotonic() + RETRY_BUDGET_S
+        attempt = 0
+        while True:
+            attempt += 1
+            t0 = time.perf_counter()
+            parts: list[str] = []
+            state: dict[str, Any] = {"usage": {}, "finish": None, "done": False, "first": None}
+            resp: httpx.Response | None = None
+            status, last_err, retry = 0, "", True
+            try:
+                with self.http.stream("POST", endpoint, json=body, headers={"Accept": "text/event-stream"}) as resp:
+                    status = resp.status_code
+                    if status >= 400:
+                        resp.read()
+                        last_err = f"HTTP {status}: {_error_text(resp)}"
+                        retry = status in RETRY_STATUS
+                    elif "json" in resp.headers.get("content-type", ""):
+                        # The server ignored "stream": the whole answer in one JSON reply.
+                        resp.read()
+                        try:
+                            data = resp.json()
+                        except ValueError:
+                            raise MetaAPIError(f"{endpoint}: the reply was not JSON ({resp.text[:120]!r})") from None
+                        text = _chunk_text(data, state)
+                        state["done"] = True
+                        if text:
+                            state["first"] = time.perf_counter() - t0
+                            parts.append(text)
+                            yield text
+                    else:
+                        for payload in sse_data(resp.iter_lines()):
+                            if payload.strip() == "[DONE]":
+                                state["done"] = True
+                                break
+                            try:
+                                chunk = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue  # not a chunk we understand
+                            text = _chunk_text(chunk, state)
+                            if text:
+                                if state["first"] is None:
+                                    state["first"] = time.perf_counter() - t0
+                                parts.append(text)
+                                yield text
+                        state["done"] = state["done"] or bool(state["finish"])
+                        if not state["done"]:
+                            last_err = "the stream ended before the answer did"
+            except httpx.TransportError as e:
+                if state["finish"]:  # the answer was whole (its finish reason came); only what follows it was lost
+                    state["done"] = True
+                else:
+                    last_err = f"network error: {type(e).__name__}"
+                    resp = None
+            except _StreamFailed as e:
+                last_err = f"error in the stream: {e}"
+                retry = e.status in RETRY_STATUS
+            except GeneratorExit:  # the reader stopped (the student pressed Stop): the call still cost something
+                self._record(CallRecord(endpoint, model, status, time.perf_counter() - t0, False, attempt,
+                                        state["usage"], None, key, "stopped by the reader, so the cost is unknown"))
+                raise
+            latency = time.perf_counter() - t0
+            if status < 400 and state["done"] and not last_err:
+                break
+            if parts:  # the student has already seen part of the answer: no retry
+                self._record(CallRecord(endpoint, model, status, latency, False, attempt, state["usage"], None, key,
+                                        "stopped halfway"))
+                raise MetaAPIError(f"the answer stopped halfway ({last_err}); please ask again")
+            if not retry:
+                self._record(CallRecord(endpoint, model, status, latency, False, attempt, {}, None, key))
+                raise MetaAPIError(f"{endpoint} ({model}) failed: {last_err}")
+            wait, deadline = _retry_wait(attempt, resp if status >= 400 else None, deadline)
+            if wait is None:
+                self._record(CallRecord(endpoint, model, status, latency, False, attempt, {}, None, key))
+                raise MetaAPIError(f"{endpoint} ({model}) failed after {attempt} tries: {last_err}")
+            time.sleep(wait)
+
+        text = "".join(parts)
+        usage = state["usage"]
+        notes = [] if usage else ["the stream sent no usage, so the cost is unknown"]
+        if state["finish"] == "length":
+            notes.append("cut at max tokens")
+        if state["first"] is not None:
+            notes.append(f"first text after {state['first']:.1f} s")
+        if not text and state["finish"] != "length":
+            notes.append("empty stream: asked again without streaming")
+        cost = _chat_cost(model, {"usage": usage}) if usage else None
+        self._record(CallRecord(endpoint, model, status, latency, False, attempt, usage, cost, key, "; ".join(notes)))
+        if not text and state["finish"] == "length":
+            raise MetaAPIError(f"{endpoint} ({model}) gave an empty answer (it ran out of tokens while thinking)")
+        if not text:
+            # Seen live (2026-11-01) with images attached: the stream ends at once with finish "stop", no text and
+            # no usage. The same request without streaming is the fallback; its reply comes in one piece.
+            plain = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
+            data = self._send(endpoint, model, {"body": plain}, lambda: self.http.post(endpoint, json=plain),
+                              lambda d: _chat_cost(model, d))
+            text = chat_text(data)
+            if not text:
+                raise MetaAPIError(f"{endpoint} ({model}) gave an empty answer")
+            usage = data.get("usage") or {}
+            state["finish"] = ((data.get("choices") or [{}])[0] or {}).get("finish_reason")
+            if state["finish"] == "length":
+                self.calls[-1].note = "cut at max tokens"  # so the caller can tell the student
+            yield text
+        if self.use_cache:  # after the student has the whole answer, so a cache that cannot be written never costs it
+            reply = {"choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                                  "finish_reason": state["finish"]}], "usage": usage, "streamed": True}
+            _write_cache(path, reply)
 
     def ask(self, prompt: str, images: list | tuple = (), *, schema: dict | None = None, system: str | None = None,
             model: str | None = None, **kw) -> Any:
@@ -345,6 +482,95 @@ def _error_text(resp: httpx.Response) -> str:
     except ValueError:
         pass
     return resp.text[:300].replace("\n", " ")
+
+
+def _write_cache(path: Path, data: dict) -> bool:
+    """Save a reply in the disk cache, best effort: the reply is already paid for and in hand, so a cache file
+    that cannot be written (Windows refuses a replace while another call reads it; a full disk) only costs a
+    later re-run. Each write has its own temporary file, so two identical calls never trip over each other."""
+    tmp = path.with_name(f"{path.stem}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        for i in range(20):
+            try:
+                tmp.replace(path)
+                return True
+            except PermissionError:
+                time.sleep(0.05 * (1 + i % 5))
+    except OSError:
+        pass
+    try:
+        tmp.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return False
+
+
+def _retry_wait(attempt: int, resp: httpx.Response | None, deadline: float) -> tuple[float | None, float]:
+    """(seconds to wait before the next try, or None to give up; the deadline, maybe pushed back)."""
+    wait = min(20.0, 1.0 * 2 ** (attempt - 1)) * (0.5 + random.random())
+    ra = _retry_after(resp) if resp is not None else None
+    if ra is not None:
+        wait = max(wait, ra)
+    # The budget bounds waiting, not slow attempts: a timed-out call still gets retried.
+    now = time.monotonic()
+    if resp is None and attempt < MIN_NETWORK_TRIES:
+        deadline = max(deadline, now + wait)
+    if now + wait > deadline:
+        return None, deadline
+    return wait, deadline
+
+
+def sse_data(lines) -> Iterator[str]:
+    """Server-sent event lines -> the data of each event (several data lines joined with newlines)."""
+    data: list[str] = []
+    for line in lines:
+        if line == "":
+            if data:
+                yield "\n".join(data)
+                data = []
+            continue
+        if line.startswith(":"):
+            continue  # a comment, e.g. a keep-alive
+        name, _, value = line.partition(":")
+        if name == "data":
+            data.append(value[1:] if value.startswith(" ") else value)
+    if data:
+        yield "\n".join(data)
+
+
+class _StreamFailed(Exception):
+    """An error event inside a 200 stream."""
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+def _chunk_text(chunk: Any, state: dict) -> str:
+    """Text of one streamed chat chunk; notes its usage and finish reason in `state`."""
+    if not isinstance(chunk, dict):
+        return ""
+    err = chunk.get("error")
+    if err:
+        msg = (err.get("message") or err.get("detail") or str(err)) if isinstance(err, dict) else str(err)
+        code = err.get("code") if isinstance(err, dict) else None
+        raise _StreamFailed(str(msg)[:300].replace("\n", " "), code if isinstance(code, int) else 0)
+    if isinstance(chunk.get("usage"), dict):
+        state["usage"] = chunk["usage"]
+    out = []
+    for ch in chunk.get("choices") or []:
+        if not isinstance(ch, dict) or ch.get("index", 0) != 0:
+            continue
+        c = (ch.get("delta") or ch.get("message") or {}).get("content")
+        if isinstance(c, list):
+            c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
+        if isinstance(c, str):
+            out.append(c)
+        if ch.get("finish_reason"):
+            state["finish"] = ch["finish_reason"]
+    return "".join(out)
 
 
 def _retry_after(resp: httpx.Response) -> float | None:

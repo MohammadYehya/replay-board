@@ -207,3 +207,61 @@ export interface PopoutScene {
   }[];
   points?: { at: number[]; label?: string }[];
 }
+
+// Ask Muse (app/ask.py): a student's questions about the lecture, answered by Muse Spark with the whole lecture as
+// context. Times are on the original video's clock, like everywhere else.
+
+/** Something from the lecture attached to a question. */
+export type AskItem =
+  | { kind: 'piece'; id: number }
+  | { kind: 'line'; id: string }
+  | { kind: 'element'; id: string }
+  | { kind: 'span'; t0: number; t1: number }
+  | { kind: 'moment'; t: number };
+
+/** An attached item with the chip's label: sent for a span (the selected words) and saved with every turn. */
+export type AskLabelledItem = AskItem & { label?: string };
+
+/** A board or slide item cited in an answer as [#12], [#L3] or [#s0e1]. */
+export interface AskRef {
+  ref: string; // "#12"
+  kind: 'piece' | 'line' | 'element';
+  id: number | string;
+  /** Where to seek to see it explained. */
+  t: number;
+  label: string;
+}
+
+export interface AskRequest {
+  question: string;
+  selection: AskLabelledItem[];
+  history: { q: string; a: string }[];
+  t: number | null;
+}
+
+/** The "done" event of POST /api/jobs/{id}/ask. */
+export interface AskDone {
+  id: string;
+  answer: string;
+  items: AskRef[];
+  times: number[];
+  cost_usd: number | null;
+  cached: boolean;
+  /** False when the server could not save the turn (it will be gone after a reload). */
+  saved: boolean;
+}
+
+/** One saved question and answer (GET /api/jobs/{id}/chat). */
+export interface AskTurn {
+  id: string;
+  q: string;
+  /** What was attached, with the labels the server saved ("The board at 1:23", the selected words...). */
+  selection: AskLabelledItem[];
+  answer: string;
+  items: AskRef[];
+  times: number[];
+  t: number | null;
+  at?: string | number;
+  cost_usd: number | null;
+  cached?: boolean;
+}

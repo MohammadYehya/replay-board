@@ -29,7 +29,10 @@ def _item(read: dict) -> dict | None:
 
 
 def notes_data(replay: dict) -> dict:
-    """{title, chapters: [{t, title, items: [{t, latex, text, drawing, said}]}]}"""
+    """{title, chapters: [{t, title, items: [{t, latex, text, drawing, said, ref}]}]}
+
+    `ref` is the item to attach when asking Muse about it: {kind: piece|line|element, id}, or None.
+    """
     words = (replay.get("transcript") or {}).get("words") or []
     chapters = sorted(replay.get("chapters") or [], key=lambda c: c["t"]) or [{"t": 0.0, "title": "Lecture"}]
     title = replay.get("subject") or replay.get("video", {}).get("file", "Lecture")
@@ -42,6 +45,7 @@ def notes_data(replay: dict) -> dict:
                 key = " ".join(((item or {}).get("latex") or (item or {}).get("text") or "").lower().split())
                 if item and key not in seen:
                     seen.add(key)
+                    item["ref"] = {"kind": "element", "id": e["id"]} if isinstance(e.get("id"), str) else None
                     t = (e.get("spoken") or [{}])[0].get("start", st["t_start"])
                     entries.append((t, item, e.get("spoken") or []))
     else:
@@ -57,6 +61,7 @@ def notes_data(replay: dict) -> dict:
             if ln.get("pre_existing") and not sp:
                 continue
             t = sp[0]["start"] if sp else min(p.get("redraw_at") or p["t_seen"] for p in members)
+            item["ref"] = {"kind": "line", "id": ln["id"]} if isinstance(ln.get("id"), str) else None
             entries.append((t, item, sp))
         for p in replay["board"]["pieces"]:
             if p.get("id") in in_line:
@@ -68,6 +73,7 @@ def notes_data(replay: dict) -> dict:
             if p.get("pre_existing") and not sp:
                 continue  # was on the board before the recording and never discussed
             t = sp[0]["start"] if sp else (p.get("redraw_at") or p["t_seen"])
+            item["ref"] = {"kind": "piece", "id": p["id"]} if isinstance(p.get("id"), int) else None
             entries.append((t, item, sp))
     # A drawing nobody talked about, or a scribble, is noise in notes.
     entries = [e for e in entries if not e[1]["drawing"] or (e[2] and "scribble" not in e[1]["text"].lower())]

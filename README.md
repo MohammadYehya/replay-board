@@ -7,7 +7,8 @@ Click any piece of writing to jump to the moment it was explained, or switch han
 When the teacher points at the board (resting a finger on a line, tapping a result, sweeping under an
 equation), the virtual board shows it as a calm spotlight, circle, underline or arrow on that writing.
 Slide lectures get the same treatment: clean slides, and the teacher's cursor or laser turned into the
-same animations.
+same animations. And you can **ask Muse** about the lecture: attach a formula from the first minute and a
+result from the last, ask how they connect, and get an answer whose times and board items you can click.
 
 Built for the Meta Global AI Developer Hackathon. **Meta models do the understanding**; plain code does
 the per-pixel measurement.
@@ -48,6 +49,7 @@ flowchart LR
 | Where the teacher's hand is | **SAM 3.1 video mode** ("hand") on a 3 fps copy | hand masks; code keeps moments where the hand is stretched out onto visible writing and no new ink follows |
 | Slide changes, clean slides, pointer | slide analysis (code) | states, live regions, cursor/laser track, gesture guesses |
 | What a pointing gesture means | **Muse Spark** with the path drawn on the slide (or on the video frame and the clean board) + the words spoken | spotlight / circle / underline / arrow / pulse, target elements, or "not pointing" |
+| Questions about the lecture | **Muse Spark** with the whole lecture (board or slides, chapters, timed transcript) as a cached prefix, plus images of what the student attached | a streamed answer that cites clickable times and board items |
 | Words | **Muse Voice Transcribe** in parallel pieces | turns |
 | Word times | **MMS forced aligner** (Meta, torchaudio) | per-word start/end |
 | When each element is talked about | **Muse Spark** with elements + timed transcript | spoken ranges, redraw time of hidden writing, chapters |
@@ -140,6 +142,14 @@ data/           videos, job folders and the model cache (never committed)
 ```
 
 ## Also in the box
+- **Ask Muse**: a drawer in the player (button or the A key). Attach anything from any point of the lecture:
+  writing from the board (its tooltip's "Ask", or Shift+click), slide text, a stretch of the transcript (select
+  it), "this moment", or an item from the searchable list of everything in the lecture, including writing that
+  was later erased. Muse Spark gets the whole lecture every time (it fits easily in its context window), so a
+  question can link the first minute to the last. The answer streams in; `[5:44]` times seek the video and item
+  chips show the writing typeset, jump to it and outline it on the board. The conversation is kept per lecture.
+  Cost on the 8-minute lecture: about $0.01 for a first question, $0.006 for a follow-up (Meta's prompt cache
+  reuses the lecture), nothing for a repeated one (disk cache).
 - **Study notes**: the player's Notes page lists every line of writing (or slide element) by chapter, typeset with
   KaTeX, with what was said; each time links back to that moment in the player. Download as Markdown or print.
 - **Typeset by line**: a line written in bursts (several pieces) is read by Muse Spark as one line and typeset whole
