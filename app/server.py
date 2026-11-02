@@ -177,22 +177,32 @@ def job_notes(job_id: str):
 
 @app.post("/api/jobs/{job_id}/popout/{piece_id}")
 def job_popout(job_id: str, piece_id: int, request: Request):
-    """3D scene for one drawn piece (Muse Spark), made on demand and cached in the job folder."""
-    from .core.meta_api import MetaAPIError, MetaClient
-    from .popout import make_scene
+    """The 3D view of one drawn piece (app/popout.py, format 2): a scene with steps on the video's clock, made by
+    Muse Spark on the first request and kept in the job folder. A second request while it is being made waits for
+    it. Every piece of one drawing gets the drawing's scene ("piece" is the asked one). 404 no such job or piece, a
+    piece that is neither a drawing nor a graph's equation, or a slide lecture; 409 not ready (or the word times
+    still being worked out); 502 the model failed: one plain line each."""
+    from . import popout
+    from .core.meta_api import MetaAPIError
+    from .export import NotReady
 
     if _cross_site(request):  # like /ask: other websites must not spend the owner's API credit
-        raise HTTPException(403, "3D pop-outs are only made for the Replay Board player itself")
+        raise HTTPException(403, "3D views are only made for the Replay Board player itself")
     d = _job_dir(job_id)
-    replay = _read_json(d / "replay.json")
-    if replay.get("type") != "board":
-        raise HTTPException(404, "3D pop-out is for board lectures")
     try:
-        return make_scene(MetaClient(), d, replay, piece_id)
-    except KeyError:
-        raise HTTPException(404, "no such piece") from None
+        return JSONResponse(popout.make_scene(_meta_client, d, piece_id), headers=NO_CACHE)
+    except popout.NoScene as e:
+        raise HTTPException(404, popout.plain(e)) from None
+    except NotReady as e:
+        raise HTTPException(409, popout.plain(e)) from None
     except MetaAPIError as e:
-        raise HTTPException(502, str(e)) from None
+        raise HTTPException(502, popout.plain(e)) from None
+    except Exception as e:  # one plain line for the player, the traceback in a log
+        try:
+            (d / "popout-error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        except OSError:
+            pass
+        raise HTTPException(500, popout.plain(e)) from None
 
 
 @app.get("/api/jobs/{job_id}/notes.json")

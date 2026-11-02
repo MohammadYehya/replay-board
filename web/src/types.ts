@@ -178,34 +178,120 @@ export interface JobSummary {
   detail?: string;
 }
 
-// 3D pop-out scene made by Muse Spark for one board piece (app/popout.py, SCENE_SCHEMA and clean_scene).
-// Expressions are in x, y, t and are evaluated by player/expr.ts. Every field is checked again before use.
-export interface PopoutAxis {
+// 3D view made by Muse Spark for one board drawing (app/popout.py), format 2: a scene plus ordered steps, each tied to
+// the moment the teacher explains it. Animations are data from a small fixed set; expressions (E) are strings in the
+// whitelisted grammar of player/expr.ts, checked on the server and compiled again by the player. The player cleans
+// every field before use (player/scene3dState.ts cleanScene): a server older or newer than this one cannot break it.
+// Maths axes: z is up.
+
+/** An expression string: numbers, + - * / ^ ( ), whitelisted functions, pi, e, deg, the scene's parameters and defs
+ *  (a def: the params and the defs before it only) and the variables of its field (graph expr: x; surface expr: x, y; curve x/y/z: t; psurface x/y/z: u, v). */
+export type Expr = string;
+export type Vec3E = [Expr, Expr, Expr];
+export type Vec3 = [number, number, number];
+
+export interface Scene3DAxis {
   min: number;
   max: number;
-  label?: string;
+  label: string;
 }
 
-export interface PopoutScene {
-  kind: 'plot2d' | 'surface' | 'curve3d' | 'solids' | 'none' | string;
-  title?: string;
-  explain?: string;
-  x?: PopoutAxis;
-  y?: PopoutAxis;
-  z?: PopoutAxis;
-  /** plot2d: y = f(x); surface: z = f(x, y). */
-  functions?: { expr: string; color?: string; label?: string }[];
-  /** curve3d: x(t), y(t), z(t). */
-  curves?: { x: string; y: string; z: string; t_min?: number; t_max?: number; color?: string; label?: string }[];
-  solids?: {
-    shape: string; // box | sphere | cylinder | cone | torus | plane | arrow
-    center: number[];
-    size: number[];
-    rotation?: number[]; // degrees about x, y, z
-    color?: string;
-    label?: string;
-  }[];
-  points?: { at: number[]; label?: string }[];
+/** A slider the steps move ("beta" from 90 to 110 degrees). */
+export interface Scene3DParam {
+  name: string;
+  value: number;
+  min: number;
+  max: number;
+  label: string;
+  unit: '' | 'deg';
+}
+
+/** "cx" = "c*cos(beta*deg)": a value the objects share, worked out again whenever a parameter moves. */
+export interface Scene3DDef {
+  name: string;
+  expr: Expr;
+}
+
+export type Scene3DObjectType =
+  | 'point'
+  | 'segment'
+  | 'vector'
+  | 'polygon'
+  | 'box'
+  | 'sphere'
+  | 'cylinder'
+  | 'cone'
+  | 'torus'
+  | 'graph'
+  | 'surface'
+  | 'curve'
+  | 'psurface'
+  | 'label';
+
+/** Flat: every field is present; the unused ones are "" or []. */
+export interface Scene3DObject {
+  id: string;
+  type: Scene3DObjectType;
+  /** point, label: 1; segment, vector: 2 (from, to); polygon: 3..12 corners of a flat face. */
+  points: Vec3E[];
+  /** box, sphere, cylinder, cone, torus. */
+  center: Vec3E | [];
+  /** box [width, depth, height]; sphere [radius]; cylinder, cone [radius, height]; torus [ring radius, tube radius]. */
+  size: Expr[];
+  /** Degrees about x, y, z ([] = none). */
+  rotation: Vec3E | [];
+  /** graph: y = f(x) in the plane z = 0; surface: z = f(x, y). */
+  expr: Expr;
+  /** curve: in t; psurface: in u and v. */
+  x: Expr;
+  y: Expr;
+  z: Expr;
+  /** curve: t range; psurface: u range; graph: x range ([] = the x axis range). */
+  range: [Expr, Expr] | [];
+  /** psurface: v range. */
+  range2: [Expr, Expr] | [];
+  color: string;
+  opacity: number;
+  style: 'solid' | 'wire' | 'dashed';
+  label: string;
+}
+
+export type CameraPreset = 'keep' | 'front' | 'top' | 'side' | 'iso';
+
+export interface Scene3DStep {
+  /** "m:ss" on the video clock when the teacher says it, or "" when the drawing is never talked about. */
+  at: string;
+  /** Seconds on the video clock (from "at", filled in by the server); null when not synced. */
+  t: number | null;
+  /** Seconds the change takes. */
+  over: number;
+  caption: string;
+  show: string[];
+  hide: string[];
+  highlight: string[];
+  set: { param: string; to: number }[];
+  camera: CameraPreset;
+}
+
+export interface Scene3D {
+  format: 2;
+  version: string;
+  piece: number;
+  /** The board pieces that make up the drawing shown (the asked piece first). */
+  pieces: number[];
+  title: string;
+  explain: string;
+  /** True when the steps carry lecture times. */
+  synced: boolean;
+  axes: { show: boolean; x: Scene3DAxis; y: Scene3DAxis; z: Scene3DAxis };
+  params: Scene3DParam[];
+  /** Named values worked out from the params, in order (each may use the params and the defs before it), so a long
+   *  formula is written once: every object's expressions may use their names. */
+  defs: Scene3DDef[];
+  objects: Scene3DObject[];
+  steps: Scene3DStep[];
+  /** [[minx, miny, minz], [maxx, maxy, maxz]] over every state of every step (the server works it out). */
+  bounds: [Vec3, Vec3] | null;
 }
 
 // Ask Muse (app/ask.py): a student's questions about the lecture, answered by Muse Spark with the whole lecture as

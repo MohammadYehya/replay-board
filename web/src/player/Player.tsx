@@ -13,7 +13,7 @@ import { drawable } from './slideTiming';
 import {
   activeWord, chapterAt, formatTime, groupWords, isWrittenLine, lastStartedWord, seekTarget, turnsFromWords,
 } from './timing';
-import { LazyPopout, PopoutFallback } from './popoutLoader';
+import { LazyView3D, View3DFallback } from './popoutLoader';
 import { Chapters, Transcript } from './Transcript';
 
 const SKIP = 5;
@@ -45,7 +45,9 @@ function Shortcuts({ onClose, mode }: { onClose(): void; mode: 'board' | 'slides
           [['A'], 'Ask Muse about the lecture'],
           [['Click writing'], 'Jump to where it is explained'],
           [['Shift+click writing'], 'Attach it to a question'],
-          [['Hover a graph'], 'View it in 3D (3D button)'],
+          [['Hover or tap a drawing'], 'View it in 3D, explained step by step'],
+          [['[', ']'], 'Previous / next step in the 3D view'],
+          [['Esc'], 'Back to the board from the 3D view'],
           [['Click board'], 'Play / pause'],
           [['Click a word'], 'Jump to that word'],
         ];
@@ -163,6 +165,8 @@ export function Player({
   const board = replay.board;
   const slides = board ? undefined : replay.slides;
   const mode = board ? 'board' : slides ? 'slides' : 'none';
+  /** The 3D view of a board drawing is open in place of the board. */
+  const view3d = !!popout && !!board;
 
   // The first version of a replay has proportional word times while MMS still aligns them: watch the job and
   // swap in the rewritten replay (transcript, spoken ranges, chapters, redraw times) as soon as it lands.
@@ -220,7 +224,7 @@ export function Player({
         }
         prev = t;
         timeRef.current = t;
-        boardRef.current?.render(t);
+        if (!popoutOpen.current) boardRef.current?.render(t); // the 3D view reads timeRef itself
         slidesRef.current?.render(t);
         const up = lastStartedWord(words, t);
         const act = activeWord(words, t);
@@ -264,12 +268,16 @@ export function Player({
   const seekWord = useCallback((t: number) => seek(t), [seek]);
   const seekChapter = useCallback((t: number) => seek(t, true), [seek]);
   const seekAndPlay = useCallback((t: number) => seek(t, true), [seek]);
-  // The 3D view is explored with the lecture paused; it does not resume by itself.
-  const openPopout = useCallback((p: Piece) => {
-    videoRef.current?.pause();
-    setPopout(p);
+  // The 3D view takes the board's place while the video keeps playing: its steps follow the video's clock.
+  const boardPanelRef = useRef<HTMLElement>(null);
+  const openPopout = useCallback((p: Piece) => setPopout(p), []);
+  const closePopout = useCallback(() => {
+    // the focus was in the 3D view (or nowhere): give it to the board panel, not to the page
+    const a = document.activeElement as HTMLElement | null;
+    const inside = !a || a === document.body || !!a.closest?.('.v3');
+    setPopout(null);
+    if (inside) requestAnimationFrame(() => boardPanelRef.current?.focus({ preventScroll: true }));
   }, []);
-  const closePopout = useCallback(() => setPopout(null), []);
 
   // ---- Ask Muse ----
   const lecture = useMemo(
@@ -351,7 +359,10 @@ export function Player({
     (r: AskRef) => {
       seek(r.t);
       if (r.kind === 'element') slidesRef.current?.highlight([String(r.id)]);
-      else boardRef.current?.highlight([r.id]);
+      else {
+        setPopout(null); // the board item is shown on the board
+        boardRef.current?.highlight([r.id]);
+      }
     },
     [seek],
   );
@@ -368,7 +379,7 @@ export function Player({
       return !!h && (h.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(h.tagName));
     };
     const down = (e: KeyboardEvent) => {
-      if (popoutOpen.current) return; // the 3D view has the keyboard (Esc closes it)
+      // The 3D view keeps the player's keys (it has no keys of its own); Esc goes back to the board.
       if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
       if ((e.target as HTMLElement | null)?.closest?.('.ask-drawer')) return;
       const v = videoRef.current;
@@ -388,6 +399,7 @@ export function Player({
       } else if (e.key === 'Escape') {
         if (showKeysRef.current) setShowKeys(false);
         else if (askOpenRef.current) closeAsk();
+        else if (popoutOpen.current) closePopout();
         else handled = false;
       } else handled = false;
       if (handled) {
@@ -407,7 +419,7 @@ export function Player({
       window.removeEventListener('keydown', down, true);
       window.removeEventListener('keyup', up, true);
     };
-  }, [seek, togglePlay, openAsk, closeAsk]);
+  }, [seek, togglePlay, openAsk, closeAsk, closePopout]);
 
   const onLoadedMetadata = () => {
     const v = videoRef.current;
@@ -537,7 +549,9 @@ export function Player({
             {videoError && <p className="error-line">{videoError}</p>}
           </section>
 
-          <section className="panel board-panel">
+          <section ref={boardPanelRef} className={`panel board-panel ${view3d ? 'has-3d' : ''}`} tabIndex={-1}>
+            {/* The board stays mounted under the 3D view, so going back to it is instant. */}
+            <div className="board-pane" hidden={view3d}>
             <header className="panel-head">
               <h2>{board || replay.type !== 'slides' ? 'Board' : 'Slides'}</h2>
               {board && (
@@ -607,6 +621,24 @@ export function Player({
               <div className="board-missing">
                 {replay.type === 'slides' ? 'No slides were found in this recording.' : 'This replay has no board.'}
               </div>
+            )}
+            </div>
+            {view3d && popout && board && (
+              <Suspense fallback={<View3DFallback />}>
+                <LazyView3D
+                  key={popout.id}
+                  jobId={jobId}
+                  piece={popout}
+                  boardColor={board.background ?? '#f4f4f2'}
+                  aspect={boardAspect}
+                  timeRef={timeRef}
+                  clipStart={clipStart}
+                  clipEnd={clipEnd}
+                  playing={playing}
+                  onSeek={seek}
+                  onClose={closePopout}
+                />
+              </Suspense>
             )}
           </section>
         </div>
@@ -687,17 +719,6 @@ export function Player({
           onSeek={seekOnly}
           onShowItem={showItem}
         />
-      )}
-
-      {popout && board && (
-        <Suspense fallback={<PopoutFallback />}>
-          <LazyPopout
-            jobId={jobId}
-            piece={popout}
-            boardColor={board.background ?? '#f4f4f2'}
-            onClose={closePopout}
-          />
-        </Suspense>
       )}
 
       {toast && (

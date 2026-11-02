@@ -1,7 +1,7 @@
-// The pop-out's expression compiler: grammar, precedence, functions, and what it must refuse.
+// The 3D view's expression compiler: grammar, precedence, functions, and what it must refuse.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compile, tryCompile, ExprError } from '../src/player/expr.ts';
+import { compile, compileVars, tryCompile, tryCompileVars, ExprError, GRAMMAR_NAMES } from '../src/player/expr.ts';
 
 const ev = (s: string, x = 0, y = 0, t = 0) => compile(s)(x, y, t);
 const near = (a: number, b: number, eps = 1e-12) =>
@@ -129,4 +129,56 @@ test('the cached pop-out expression compiles', () => {
   const f = compile('abs(ln(x))');
   near(f(1, 0, 0), 0);
   near(f(1 / Math.E, 0, 0), 1);
+});
+
+// ---- named variables (format-2 scenes: field variables plus the scene's parameters) ----
+const evv = (s: string, names: string[], vals: number[]) => compileVars(s, names).fn(vals);
+
+test('named variables: field variables and parameters, by position', () => {
+  assert.equal(evv('a + 2b', ['a', 'b'], [1, 3]), 7);
+  assert.equal(evv('c_len * 2', ['c_len'], [1.5]), 3);
+  assert.equal(evv('theta2 + 1', ['theta2'], [4]), 5);
+  near(evv('cos(beta*deg)', ['beta'], [60]), 0.5);
+  near(evv('r cos(v)', ['u', 'v', 'r'], [0, Math.PI, 2]), -2);
+  assert.equal(evv('Beta', ['beta'], [3]), 3); // names are case-insensitive
+  near(evv('deg', [], []), Math.PI / 180);
+  near(evv('180 deg', [], []), Math.PI);
+  assert.equal(evv('2', [], []), 2);
+});
+
+test('which variables an expression reads', () => {
+  assert.deepEqual([...compileVars('x^2 + k*x', ['x', 'k', 'm']).uses].sort(), ['k', 'x']);
+  assert.deepEqual([...compileVars('3 + pi', ['x', 'k']).uses], []);
+  assert.deepEqual([...compileVars('sin(t) * amp', ['t', 'amp']).uses].sort(), ['amp', 't']);
+});
+
+test('names are whole words: no hidden multiplication inside a name', () => {
+  assert.equal(tryCompileVars('x2', ['x']), null); // "x2" is a name, not x times 2
+  assert.equal(evv('2x', ['x'], [3]), 6);
+  assert.equal(evv('2 beta', ['beta'], [3]), 6);
+  assert.equal(tryCompileVars('betax', ['beta', 'x']), null);
+  assert.equal(evv('beta x', ['beta', 'x'], [2, 5]), 10);
+  assert.equal(tryCompileVars('e2', []), null);
+  near(evv('2e', [], []), 2 * Math.E);
+  near(evv('2e3', [], []), 2000);
+});
+
+test('only the given variables: field variables do not leak between fields', () => {
+  assert.equal(tryCompileVars('x + y', ['x']), null); // a graph's expression has no y
+  assert.equal(tryCompileVars('t', ['u', 'v']), null); // a psurface has no t
+  assert.equal(tryCompileVars('k', []), null); // a parameter the scene does not have
+  assert.ok(tryCompileVars('u v', ['u', 'v']));
+});
+
+test('a variable cannot be named like a function or constant', () => {
+  for (const n of ['sin', 'pi', 'e', 'deg', 'log10', 'max']) {
+    assert.ok(GRAMMAR_NAMES.has(n));
+    assert.throws(() => compileVars('1', [n]), ExprError);
+  }
+});
+
+test('object-prototype names are never functions, constants or variables', () => {
+  for (const s of ['constructor(1)', 'toString(1)', 'valueOf(1)', 'hasOwnProperty(1)', '__proto__', 'prototype']) {
+    assert.equal(tryCompileVars(s, ['x']), null, s);
+  }
 });

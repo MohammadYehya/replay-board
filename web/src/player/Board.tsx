@@ -11,7 +11,7 @@ import { cleanLatex } from './texClean';
 import { texLayouts, writtenText } from './texLayout';
 import { formatTime, isWrittenLine, schedule, seekTarget, typesetIds } from './timing';
 import { canPopout } from './popoutable';
-import { preloadPopout } from './popoutLoader';
+import { preloadView3D } from './popoutLoader';
 import { kindLabel, sameReading, tipTex } from './tip';
 
 export interface BoardHandle {
@@ -29,7 +29,7 @@ interface Props {
   playing: boolean;
   onSeekPiece(p: Piece): void;
   onTogglePlay(): void;
-  /** Open the 3D pop-out for a drawn graph or a y = f(x) equation (board lectures only). */
+  /** Open the 3D view (in place of the board) for a drawing or a y = f(x) equation (board lectures only). */
   onPopout?(p: Piece): void;
   /** Attach a piece to an Ask Muse question: its whole line when that line is finished by now (else line is null). */
   onAsk?(p: Piece, line: BoardLine | null): void;
@@ -201,6 +201,9 @@ export const Board = memo(
     const tagEls = useRef(new Map<number, HTMLElement>()).current;
     const hoverRef = useRef<Piece | null>(null);
     const pointerRef = useRef({ x: 0, y: 0 }); // last pointer position in stage CSS pixels
+    /** The last press was a finger (or a pen), and the piece whose tooltip was open then: a touch screen has no
+     *  hover, so a first tap on a piece opens its tooltip (Ask, View in 3D) and a second one plays it. */
+    const touchRef = useRef<{ touch: boolean; open: number | null }>({ touch: false, open: null });
     const [cssW, setCssW] = useState(0);
     const [hover, setHover] = useState<Piece | null>(null);
     const [inks, setInks] = useState<Record<number, { ink: string; cy: number }>>({});
@@ -468,6 +471,16 @@ export const Board = memo(
         return;
       }
       const p = pick(e.clientX, e.clientY);
+      const touch = touchRef.current;
+      if (touch.touch && p && touch.open !== p.id && (onAsk || (onPopout && canPopout(p)))) {
+        cancelLeave();
+        changeHover(p);
+        return;
+      }
+      if (touch.touch && !p && hoverRef.current) {
+        changeHover(null); // a tap beside the writing closes its tooltip first
+        return;
+      }
       if (p && e.shiftKey && onAsk) {
         onAsk(p, lineOf(p, timeRef.current ?? 0)); // Shift+click: attach it to a question
         return;
@@ -491,7 +504,7 @@ export const Board = memo(
     const noSpoken = hover ? !(hover.spoken && hover.spoken.length) : false;
     const can3d = !!onPopout && canPopout(hover);
     useEffect(() => {
-      if (can3d) preloadPopout();
+      if (can3d) preloadView3D();
     }, [can3d]);
     const open3d = (e: React.MouseEvent) => {
       e.stopPropagation();
@@ -522,7 +535,13 @@ export const Board = memo(
           }
           hoverTo(pick(e.clientX, e.clientY));
         }}
-        onPointerLeave={() => hoverTo(null)}
+        onPointerDown={(e) => {
+          touchRef.current = { touch: e.pointerType === 'touch' || e.pointerType === 'pen', open: hoverRef.current?.id ?? null };
+        }}
+        onPointerLeave={(e) => {
+          // a finger leaves when it lifts: the tooltip it opened stays until the next tap
+          if (e.pointerType !== 'touch' && e.pointerType !== 'pen') hoverTo(null);
+        }}
         onClick={onClick}
       >
         <canvas ref={canvasRef} className="board-canvas" />
@@ -633,7 +652,7 @@ export const Board = memo(
                     </button>
                   )}
                   {can3d && (
-                    <button className="tip-3d" onClick={open3d} title="View in 3D (made by Muse Spark)">
+                    <button className="tip-3d" onClick={open3d} title="View in 3D, explained step by step (made by Muse Spark)">
                       3D
                     </button>
                   )}

@@ -1,6 +1,6 @@
 import { cleanChat, readAnswer } from './ask/protocol';
 import { cleanStatus, pptxFileName } from './slides/deck';
-import type { AskDone, AskRequest, AskTurn, JobStatus, JobSummary, PopoutScene, Replay, SlidesStatus } from './types';
+import type { AskDone, AskRequest, AskTurn, JobStatus, JobSummary, Replay, SlidesStatus } from './types';
 
 /** URL of a file inside a job folder (video, piece images). Each path segment is encoded. */
 export function jobFileUrl(jobId: string, path: string): string {
@@ -47,21 +47,33 @@ export async function getReplay(id: string, signal?: AbortSignal): Promise<Repla
 /** Study notes for a job (Markdown), opened in a new tab. */
 export const notesUrl = (id: string) => `/api/jobs/${encodeURIComponent(id)}/notes.md`;
 
-/** The 3D scene Muse Spark makes for one board piece. The first call for a piece takes a few seconds (and a
- *  model call); the server caches the answer, so later ones are instant. */
-export async function getPopout(jobId: string, pieceId: number, signal?: AbortSignal): Promise<PopoutScene> {
+const SERVER_DOWN = 'Cannot reach the Replay Board server. Is `python -m app.server` running?';
+const NO_3D = 'This server cannot make 3D views yet: restart `python -m app.server` with the latest code.';
+
+/** The 3D view Muse Spark makes for one board drawing: a scene with steps tied to the lecture (format 2). The first
+ *  call for a piece takes a while (a model call with the whole lecture); the server caches the answer, so later ones
+ *  are instant. The answer is returned as it came: player/scene3dState.ts cleanScene reads it. Every failure is one
+ *  plain line. */
+export async function getScene3D(jobId: string, pieceId: number, signal?: AbortSignal): Promise<unknown> {
   let r: Response;
   try {
-    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/popout/${pieceId}`, { method: 'POST', signal });
+    r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/popout/${pieceId}`, { method: 'POST', signal, cache: 'no-store' });
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
-    throw new Error('Cannot reach the Replay Board server. Is `python -m app.server` running?');
+    throw new Error(SERVER_DOWN);
   }
-  if (!r.ok) throw new Error(await errorLine(r));
-  const scene = (await r.json()) as PopoutScene;
-  if (!scene || typeof scene !== 'object' || typeof scene.kind !== 'string')
-    throw new Error('The 3D view came back empty.');
-  return scene;
+  if (!r.ok) {
+    const line = await errorLine(r);
+    // a server without the route answers a bare "Not Found" or "Method Not Allowed"
+    if ((r.status === 404 || r.status === 405) && /^(not found\.?|method not allowed)$/i.test(line)) throw new Error(NO_3D);
+    throw new Error(line);
+  }
+  if (!(r.headers.get('content-type') ?? '').includes('json')) throw new Error(NO_3D);
+  try {
+    return await r.json();
+  } catch {
+    throw new Error('The 3D view came back damaged. Try again.');
+  }
 }
 
 export interface UploadOptions {
@@ -103,7 +115,6 @@ export function uploadVideo(file: File, opts: UploadOptions = {}): { promise: Pr
   return { promise, abort: () => xhr.abort() };
 }
 
-const SERVER_DOWN = 'Cannot reach the Replay Board server. Is `python -m app.server` running?';
 const NO_ASK = 'This server has no Ask Muse yet: restart `python -m app.server` with the latest code.';
 
 /**

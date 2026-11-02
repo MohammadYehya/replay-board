@@ -216,3 +216,81 @@ export function stageInk(c: string | undefined | null, fallback: string): string
   if (s < 0.12) return l > 0.78 ? hslToHex(h, s, l) : fallback; // white chalk stays white; black/grey -> accent
   return hslToHex(h, Math.max(s, 0.5), Math.min(0.8, Math.max(l, 0.62)));
 }
+
+/** The stage colour of each object (stageInk), where every black, grey or missing ink colour becomes one palette
+ *  colour, the same for all the objects that have it (the first such ink gets palette[0], the accent): a cube drawn
+ *  in black stays one colour, not one palette colour per edge. */
+export function stageColors(colors: readonly string[], palette: readonly string[]): string[] {
+  const dark = new Map<string, string>();
+  return colors.map((c) => {
+    const lit = stageInk(c, '');
+    if (lit) return lit;
+    const key = (c || '').trim().toLowerCase();
+    let v = dark.get(key);
+    if (v === undefined) {
+      v = palette[dark.size % palette.length];
+      dark.set(key, v);
+    }
+    return v;
+  });
+}
+
+/** Two stage colours that look alike: both coloured with hues less than 28 degrees apart, or both grey and alike. */
+export function looksAlike(a: string, b: string): boolean {
+  const x = parseHex(a);
+  const y = parseHex(b);
+  if (!x || !y) return false;
+  const [h1, s1, l1] = rgbToHsl(...x);
+  const [h2, s2, l2] = rgbToHsl(...y);
+  if (s1 < 0.15 || s2 < 0.15) return s1 < 0.15 && s2 < 0.15 && Math.abs(l1 - l2) < 0.25;
+  const dh = Math.abs(h1 - h2) * 360;
+  return Math.min(dh, 360 - dh) < 28;
+}
+
+function hueGap(a: string, b: string): number {
+  const x = parseHex(a);
+  const y = parseHex(b);
+  if (!x || !y) return 180;
+  const [h1, s1] = rgbToHsl(...x);
+  const [h2, s2] = rgbToHsl(...y);
+  if (s1 < 0.15 || s2 < 0.15) return s1 < 0.15 && s2 < 0.15 ? 0 : 120;
+  const dh = Math.abs(h1 - h2) * 360;
+  return Math.min(dh, 360 - dh);
+}
+
+/**
+ * Labelled curves (an angle's arc, named) get a colour of their own: one that looks like another labelled curve's
+ * or like an edge's (a segment or vector) is changed to the palette colour least like every colour in the scene, or,
+ * when every palette colour is near one in use, to the hue farthest from them all.
+ * test2 #4: its three angle arcs, drawn in black, all became the accent blue of its c edges.
+ */
+export function distinctCurveColors(
+  objects: readonly { type: string; label: string }[],
+  colors: readonly string[],
+  palette: readonly string[],
+): string[] {
+  const out = colors.slice();
+  const line = (t: string) => t === 'segment' || t === 'vector';
+  const hues = Array.from({ length: 36 }, (_, k) => hslToHex(k / 36, 0.7, 0.68));
+  objects.forEach((o, i) => {
+    if (o.type !== 'curve' || !o.label) return;
+    const clash = objects.some(
+      (p, j) => j !== i && (line(p.type) || (p.type === 'curve' && p.label && j < i)) && looksAlike(out[i], out[j]),
+    );
+    if (!clash) return;
+    const gapOf = (c: string) => Math.min(...out.map((u, j) => (j === i ? 180 : hueGap(c, u))));
+    const farthest = (cs: readonly string[]) => {
+      let best = '';
+      let bestGap = -1;
+      for (const c of cs) {
+        const g = gapOf(c);
+        if (g > bestGap + 1e-9) [best, bestGap] = [c, g];
+      }
+      return { best, bestGap };
+    };
+    const fromPalette = farthest(palette);
+    const pick = fromPalette.bestGap >= 28 ? fromPalette : farthest(hues);
+    if (pick.best && pick.bestGap > gapOf(out[i])) out[i] = pick.best;
+  });
+  return out;
+}

@@ -1,7 +1,9 @@
 // Pop-out helpers: sampling y = f(x) around asymptotes and jumps, ticks, ink colours, and which pieces get 3D.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fitRange, formatTick, niceStep, niceTicks, sampleSegments, stageInk } from '../src/player/plotMath.ts';
+import {
+  distinctCurveColors, fitRange, formatTick, looksAlike, niceStep, niceTicks, sampleSegments, stageColors, stageInk,
+} from '../src/player/plotMath.ts';
 import { canPopout, looksLikeGraphEquation } from '../src/player/popoutable.ts';
 import type { Piece } from '../src/types.ts';
 
@@ -112,6 +114,45 @@ test('stage ink: dark board ink is lightened, black and grey become the accent',
   const red = stageInk('#cc2222', accent);
   assert.ok(parseInt(red.slice(1, 3), 16) > parseInt(red.slice(3, 5), 16) + 60, `still red: ${red}`);
   assert.equal(stageInk('#f00', accent), '#ff3d3d'); // short form, already bright: lightness lifted to 0.62
+});
+
+test('stage colours: each dark ink becomes one colour for all its objects, not a rainbow', () => {
+  const palette = ['#accent', '#p1', '#p2'];
+  // twelve black edges of a cube, a grey label, a red arc, black again, an empty colour
+  const colors = [...Array(12).fill('#222222'), '#888888', '#d62728', '#222222', ''];
+  const out = stageColors(colors, palette);
+  assert.deepEqual(new Set(out.slice(0, 12)), new Set(['#accent']));
+  assert.equal(out[12], '#p1'); // a second dark ink: the next palette colour
+  assert.equal(out[13], stageInk('#d62728', '')); // a real colour keeps its hue
+  assert.equal(out[14], '#accent');
+  assert.equal(out[15], '#p2');
+});
+
+test('named arcs get colours of their own, not the colour of each other or of an edge', () => {
+  const palette = ['#7aa7ff', '#ff9f6b', '#6fdc9a', '#f2c94c', '#c792ea', '#5fd4e6', '#ff7aa8', '#b8c4ff'];
+  // test2 #4: red a edges, green b edges, blue c edges, and three black angle arcs (black -> the accent blue)
+  const objects = [
+    { type: 'segment', label: 'a' },
+    { type: 'segment', label: 'b' },
+    { type: 'segment', label: 'c' },
+    { type: 'segment', label: '' },
+    { type: 'curve', label: 'gamma' },
+    { type: 'curve', label: 'beta' },
+    { type: 'curve', label: 'alpha' },
+    { type: 'curve', label: '' }, // an unnamed curve keeps its colour
+    { type: 'point', label: 'O' },
+  ];
+  const before = stageColors(['#e53935', '#43a047', '#1e88e5', '#1e88e5', '#000000', '#000000', '#000000', '#000000', '#000000'], palette);
+  assert.ok(looksAlike(before[2], before[4]), 'the arcs start as blue as the c edges');
+  const out = distinctCurveColors(objects, before, palette);
+  const arcs = out.slice(4, 7);
+  for (const a of arcs) for (const e of out.slice(0, 3)) assert.ok(!looksAlike(a, e), `${a} looks like the edge ${e}`);
+  assert.ok(!looksAlike(arcs[0], arcs[1]) && !looksAlike(arcs[0], arcs[2]) && !looksAlike(arcs[1], arcs[2]), arcs.join());
+  assert.equal(out[7], before[7]);
+  assert.deepEqual(out.slice(0, 4), before.slice(0, 4)); // edges are never changed
+  // a named curve already distinct is left alone
+  const plain = distinctCurveColors([{ type: 'segment', label: '' }, { type: 'curve', label: 'y = ln x' }], ['#e53935', '#43a047'], palette);
+  assert.deepEqual(plain, ['#e53935', '#43a047']);
 });
 
 const piece = (kind: string, text = '', latex = ''): Piece => ({

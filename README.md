@@ -9,6 +9,8 @@ equation), the virtual board shows it as a calm spotlight, circle, underline or 
 Slide lectures get the same treatment: clean slides, and the teacher's cursor or laser turned into the
 same animations. And you can **ask Muse** about the lecture: attach a formula from the first minute and a
 result from the last, ask how they connect, and get an answer whose times and board items you can click.
+Open a drawing **in 3D** and Muse Spark's model of it changes step by step as the teacher explains it, each
+change at the word that names it, beside the video as it plays.
 When you're done, **export the lecture as slides**: Muse Spark writes a deck that teaches the whole lecture
 in order (typeset formulas, worked steps, tables, the teacher's own drawings, key takeaways and a formula
 sheet, with what was said in the speaker notes), downloaded as a real PowerPoint.
@@ -53,6 +55,7 @@ flowchart LR
 | Slide changes, clean slides, pointer | slide analysis (code) | states, live regions, cursor/laser track, gesture guesses |
 | What a pointing gesture means | **Muse Spark** with the path drawn on the slide (or on the video frame and the clean board) + the words spoken | spotlight / circle / underline / arrow / pulse, target elements, or "not pointing" |
 | Questions about the lecture | **Muse Spark** with the whole lecture (board or slides, chapters, timed transcript) as a cached prefix, plus images of what the student attached | a streamed answer that cites clickable times and board items |
+| 3D steps | **Muse Spark** with the drawing (redrawn and the sharp video crop), the writing around it and the timed transcript | a 3D scene as data (shapes, graphs, surfaces, parameters) and up to 12 steps that change it, each with a caption and the teacher's cue word |
 | Slides export | **Muse Spark** with the whole lecture: one call plans the deck, then one call per part writes it (4 at a time) | sections, which writing goes on which slide, then each slide's title, bullets, formulas, worked steps, tables, definitions, figures and notes |
 | Words | **Muse Voice Transcribe** in parallel pieces | turns |
 | Word times | **MMS forced aligner** (Meta, torchaudio) | per-word start/end |
@@ -138,8 +141,10 @@ cd web; npm test
 
 ## Layout
 ```
-app/            pipeline, CLI (app.process), server (app.server), slides export (export, pptx_deck), smoke test
-app/core/       meta_api (one client), board, slides, sam, sam_codec, speech, understand, media, texrender
+app/            pipeline, CLI (app.process), server (app.server), slides export (export, pptx_deck), 3D steps
+                (popout), smoke test
+app/core/       meta_api (one client), board, slides, sam, sam_codec, speech, understand, media, texrender,
+                scene_expr (the 3D maths grammar)
 web/            player: React + Vite + TypeScript + KaTeX
 tests/          generated-lecture self-tests and unit tests
 data/           videos, job folders and the model cache (never committed)
@@ -169,9 +174,17 @@ data/           videos, job folders and the model cache (never committed)
   KaTeX, with what was said; each time links back to that moment in the player. Download as Markdown or print.
 - **Typeset by line**: a line written in bursts (several pieces) is read by Muse Spark as one line and typeset whole
   once it is finished; until then its pieces draw one by one, in time.
-- **3D pop-out** (stretch): for a drawn graph, surface or solid, Muse Spark returns a small JSON scene that the
-  player renders with three.js. The scene is pure data: maths expressions are checked against a whitelist on
-  the server and evaluated by the player's own parser, never as code.
+- **3D steps**: hover a drawing or a graph on the board and click "View in 3D". The 3D view takes the board's
+  place while the video keeps playing, and the model changes as the teacher explains it: in a crystal lecture one
+  cell turns from cubic into tetragonal, orthorhombic, rhombohedral and monoclinic, each at the word. Muse Spark
+  writes the scene as pure data (shapes, graphs, surfaces, curves, parameters, and steps that show, hide,
+  highlight, move the camera or ease a parameter). The server checks every maths expression against a small
+  grammar (the player compiles the same grammar with its own parser, never as code), evaluates every state of
+  every step, and moves each step onto the time of its cue word from the aligner. Step chips and the `[` `]` keys
+  jump the video to a step; "Play the explanation" plays it with the lecture; you can turn the model and reset
+  it. A drawing that is never talked about gets steps you play yourself. One scene per drawing, made on the first
+  open (30–70 s, about $0.03–0.10), then cached; `python -m app.popout <job> <piece>` makes them ahead of time.
+  three.js is loaded only when a 3D view opens.
 
 ## Limits
 - The camera must stay still (a tripod or a fixed classroom camera). Panning or zooming cameras are not handled.
