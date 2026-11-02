@@ -132,7 +132,7 @@ def test_board_gestures_lose_only_the_failed_ones(monkeypatch):
     assert out[0]["from"] == [120.0, 110.0] and out[0]["to"] == [430.0, 110.0]
     assert out[1]["box"] == [320.0, 240.0, 80.0, 10.0]  # narrowed to the line, tightened to its ink
     assert out[2]["box"] == [300.0, 200.0, 200.0, 100.0]  # the whole block
-    assert parts == ["spotlight", "circle"]
+    assert sorted(parts) == ["circle", "spotlight"]  # judged in parallel, any order
     assert said[30.0] == "this to"
 
 

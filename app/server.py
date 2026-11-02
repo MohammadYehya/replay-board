@@ -329,6 +329,67 @@ def job_chat_clear(job_id: str, request: Request):
     return {"turns": []}
 
 
+def _slides_error(d: Path, e: Exception) -> HTTPException:
+    """A failed slides request as one plain line: 409 not processed yet, 502 the model failed, 500 anything else
+    (its traceback in export-error.log)."""
+    from . import export
+    from .core.meta_api import MetaAPIError
+
+    if isinstance(e, export.NotReady):
+        return HTTPException(409, str(e))
+    if isinstance(e, MetaAPIError):
+        return HTTPException(502, export.plain(e))
+    try:
+        (d / "export-error.log").write_text(traceback.format_exc(), encoding="utf-8")
+    except OSError:
+        pass
+    return HTTPException(500, export.plain(e))
+
+
+@app.get("/api/jobs/{job_id}/slides.json")
+def job_slides(job_id: str):
+    """The lecture as a slide deck (app/export.py): built from replay.json by code, with Muse Spark's key points
+    if they were written for this version of the lecture. No model call."""
+    from . import export
+
+    d = _job_dir(job_id)
+    try:
+        return JSONResponse(export.slides_data(d), headers=NO_CACHE)
+    except Exception as e:
+        raise _slides_error(d, e) from None
+
+
+@app.post("/api/jobs/{job_id}/slides/points")
+def job_slides_points(job_id: str, request: Request):
+    """Muse Spark writes each slide's title and key points (one call per deck, saved), then the deck as in
+    slides.json. A model failure is a 502 with one plain line; the deck still works without key points."""
+    from . import export
+
+    if _cross_site(request):  # like /ask: other websites must not spend the owner's API credit
+        raise HTTPException(403, "key points are only written for the Replay Board player itself")
+    d = _job_dir(job_id)
+    try:
+        return JSONResponse(export.slides_data(d, _meta_client), headers=NO_CACHE)
+    except Exception as e:
+        raise _slides_error(d, e) from None
+
+
+@app.get("/api/jobs/{job_id}/slides.pptx")
+def job_slides_pptx(job_id: str):
+    """The deck as a PowerPoint download (key points included when they were written)."""
+    from fastapi.responses import Response
+
+    from . import export
+
+    d = _job_dir(job_id)
+    try:
+        blob, data = export.write_pptx(d)
+    except Exception as e:
+        raise _slides_error(d, e) from None
+    return Response(blob, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    headers={"Content-Disposition": export.content_disposition(data["title"]), **NO_CACHE})
+
+
 @app.get("/api/jobs/{job_id}/files/{path:path}")
 def job_file(job_id: str, path: str):
     d = _job_dir(job_id).resolve()

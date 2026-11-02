@@ -13,3 +13,4 @@ pytest>=8
 meta-sam-parser>=0.1.0,<0.2
 numba>=0.60  # fast SAM mask decoding (app/core/sam_codec.py)
 pypdfium2>=4.30,<6  # optional PDF deck for slide lectures
+python-pptx==1.0.2  # PowerPoint export of the slides (app/export.py)

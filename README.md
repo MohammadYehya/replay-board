@@ -9,6 +9,8 @@ equation), the virtual board shows it as a calm spotlight, circle, underline or 
 Slide lectures get the same treatment: clean slides, and the teacher's cursor or laser turned into the
 same animations. And you can **ask Muse** about the lecture: attach a formula from the first minute and a
 result from the last, ask how they connect, and get an answer whose times and board items you can click.
+When you're done, **export the lecture as slides**: one slide per board (or slide) the teacher built, with
+Muse Spark's title and key points, to present, save as PDF or download as PowerPoint.
 
 Built for the Meta Global AI Developer Hackathon. **Meta models do the understanding**; plain code does
 the per-pixel measurement.
@@ -50,6 +52,7 @@ flowchart LR
 | Slide changes, clean slides, pointer | slide analysis (code) | states, live regions, cursor/laser track, gesture guesses |
 | What a pointing gesture means | **Muse Spark** with the path drawn on the slide (or on the video frame and the clean board) + the words spoken | spotlight / circle / underline / arrow / pulse, target elements, or "not pointing" |
 | Questions about the lecture | **Muse Spark** with the whole lecture (board or slides, chapters, timed transcript) as a cached prefix, plus images of what the student attached | a streamed answer that cites clickable times and board items |
+| Slides export | **Muse Spark** with the whole lecture plus each slide's writing and what was said (one call per lecture) | a title and 2–4 key points per slide |
 | Words | **Muse Voice Transcribe** in parallel pieces | turns |
 | Word times | **MMS forced aligner** (Meta, torchaudio) | per-word start/end |
 | When each element is talked about | **Muse Spark** with elements + timed transcript | spoken ranges, redraw time of hidden writing, chapters |
@@ -150,6 +153,13 @@ data/           videos, job folders and the model cache (never committed)
   chips show the writing typeset, jump to it and outline it on the board. The conversation is kept per lecture.
   Cost on the 8-minute lecture: about $0.01 for a first question, $0.006 for a follow-up (Meta's prompt cache
   reuses the lecture), nothing for a repeated one (disk cache).
+- **Slides export**: the player's Slides button turns the lecture into a deck. Code cuts the board into pages
+  where the teacher starts a new chapter or wipes a big part of the board, crops each page to what was written
+  (or talked about) in it, and fades the older writing around it. Slide lectures give one page per slide, shown
+  with its build steps complete. Muse Spark writes each page's title and key points in one call ($0.014 on the
+  8-minute lecture, cached after that). Then: **Present** (full screen, arrow keys), **Save as PDF** (the
+  browser's print, one landscape slide per page), or **Download PowerPoint** (16:9, with the time range, key points
+  and what was said in the speaker notes). A Typeset view shows each page's writing as KaTeX instead of the picture.
 - **Study notes**: the player's Notes page lists every line of writing (or slide element) by chapter, typeset with
   KaTeX, with what was said; each time links back to that moment in the player. Download as Markdown or print.
 - **Typeset by line**: a line written in bursts (several pieces) is read by Muse Spark as one line and typeset whole

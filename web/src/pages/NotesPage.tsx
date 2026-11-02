@@ -8,6 +8,7 @@ import { lectureIndex, matchNote, type LectureIndex } from '../ask/items';
 import { addEntry, cleanItem, loadTray, openKey, saveTray, session, shortLabel, type TrayEntry } from '../ask/tray';
 import { texHtml } from '../player/tex';
 import { formatTime, isWrittenLine } from '../player/timing';
+import { SlidesIcon } from '../slides/icons';
 
 interface NoteItem {
   t: number;
@@ -111,6 +112,10 @@ export function NotesPage({ jobId }: { jobId: string }) {
           ← Back to the lecture
         </a>
         <div className="notes-actions">
+          <a className="ghost-btn" href={`#/job/${encodeURIComponent(jobId)}/slides`} title="This lecture as a slide deck">
+            <SlidesIcon />
+            Slides
+          </a>
           <a className="ghost-btn" href={notesUrl(jobId)} download={`${jobId}-notes.md`}>
             Download Markdown
           </a>

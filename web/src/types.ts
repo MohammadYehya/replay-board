@@ -265,3 +265,42 @@ export interface AskTurn {
   cost_usd: number | null;
   cached?: boolean;
 }
+
+// Slides export (app/export.py, GET /api/jobs/{id}/slides.json): a deck of what the teacher presented, one page per
+// stretch of the lecture, with Muse Spark's title and key points once they are written.
+
+/** Something on a slide: a piece of writing ("#12"), a written line ("#L3") or a slide element ("#s0e1"). */
+export interface DeckItem {
+  ref: string;
+  kind: string;
+  text: string;
+  latex: string;
+  /** Where the player should seek to see it explained (video clock). */
+  t: number;
+  /** A graph, diagram, arrow...: named in plain text in the Typeset view. */
+  drawing?: boolean;
+}
+
+export interface DeckPage {
+  id: string; // "p1"
+  t0: number;
+  t1: number;
+  chapter: string;
+  title: string;
+  /** Path inside the job folder ("export/page_001.png"); '' when there is no image. */
+  image: string;
+  image_size: [number, number] | null;
+  items: DeckItem[];
+  /** What was said during the slide, as plain text (cut with "..."). */
+  said: string;
+  /** Muse Spark's key points (plain text), or null until they are written. */
+  points: string[] | null;
+}
+
+export interface Deck {
+  type: 'board' | 'slides';
+  title: string;
+  version: string;
+  points_ready: boolean;
+  pages: DeckPage[];
+}

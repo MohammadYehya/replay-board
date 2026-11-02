@@ -5,6 +5,7 @@ import { SparkIcon } from '../ask/icons';
 import { lectureIndex } from '../ask/items';
 import { spanEntry, type SpanPick } from '../ask/selection';
 import { addEntry, loadTray, openKey, saveTray, session, TRAY_MAX, type TrayEntry } from '../ask/tray';
+import { SlidesIcon } from '../slides/icons';
 import type { AskRef, BoardLine, Piece, Replay, SlideElement } from '../types';
 import { Board, type BoardHandle } from './Board';
 import { Slides, type SlidesHandle } from './Slides';
@@ -468,6 +469,15 @@ export function Player({
               />
             </svg>
             Notes
+          </a>
+          <a
+            className="ghost-btn slides-btn"
+            aria-label="Slides"
+            href={`#/job/${encodeURIComponent(jobId)}/slides`}
+            title="This lecture as a slide deck: present it, save it as a PDF or download a PowerPoint"
+          >
+            <SlidesIcon />
+            <span className="slides-btn-label">Slides</span>
           </a>
           <button className={`ghost-btn keys-btn ${showKeys ? 'on' : ''}`} onClick={() => setShowKeys((x) => !x)}>
             <kbd>?</kbd> Shortcuts
