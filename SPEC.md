@@ -87,7 +87,7 @@ Writing stays where it is; the teacher moves.
 **What's in front (hidden pixels keep their state)**
 - Primary: SAM 3.1 person mask, dilated.
 - Fallback 1, large dark things: keep a per-pixel `bg_ref`, initialised to `closed` and then updated each step as `max(closed, bg_ref - 0.5)`. Where `bg_ref - closed > 45`, dilate by an ellipse of 15 px.
-- Fallback 2, too thick to be a pen stroke: where the distance transform of the ink exceeds `max_stroke/2` (max_stroke = 11 px), dilate by an ellipse of 31 px.
+- Fallback 2, too thick to be a pen stroke: where the distance transform of the ink exceeds `max_stroke/2` (max_stroke = 11 px), dilate by an ellipse of 31 px. Except thick ink that stays put: a thick pixel whose contrast against the clean board changes by at most 10 levels for 3 samples in a row is writing (a filled arrowhead, a heavy underline, strokes crossing), and it and thick pixels within 9 px of it leave this mask. Its count may only start while the whole thick shape is more than 6 px from the dilated person mask and the large-dark mask, so a still hand or sleeve that SAM missed never counts. Shapes wider than the closing (21 px) are not ink at all.
 
 **Accepting and removing pixels**
 

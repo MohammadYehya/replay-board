@@ -51,15 +51,17 @@ SIZE = (1280, 720)
 W, H = SIZE
 FPS = 25
 GEN_VERSION = 1                 # bump whenever the rendering or the scripts change (the video is made again)
-TRUTH_VERSION = 2               # bump when only the truth JSON changes: it is rewritten, the video is kept
+TRUTH_VERSION = 3              # bump when only the truth JSON changes: it is rewritten, the video is kept
 LECTURES = ("vector3d", "cylinder", "saddle")
 # The piece to open "View in 3D" on in each processed job (data/jobs/synth3d-<name>, made 2026-11-02 by
 # app.process), the other pieces that open the same scene, and a point on the piece's ink clear of other ink (as a
 # fraction of the board) to hover. Piece ids change if a job is processed again: tests/test_gen_scene_lectures.py
 # checks them against the job folder.
-OPEN_ON = {"vector3d": {"piece": 8, "same_scene": [13], "hover": [0.3638, 0.5644]},
-           "cylinder": {"piece": 5, "same_scene": [7], "hover": [0.2288, 0.5671]},
-           "saddle": {"piece": 23, "same_scene": [8, 11, 12, 17], "hover": [0.3113, 0.6877]}}
+# The piece to hover for "View in 3D", the drawing (scene) it opens and the other pieces that open the same scene,
+# as processed on 2026-11-03 (arrowheads captured, so a sketch can be several pieces; processing again renumbers).
+OPEN_ON = {"vector3d": {"piece": 8, "drawing": 8, "same_scene": [6, 12, 13], "hover": [0.3638, 0.5644]},
+           "cylinder": {"piece": 5, "drawing": 21, "same_scene": [7, 13, 21], "hover": [0.2288, 0.5671]},
+           "saddle": {"piece": 22, "drawing": 22, "same_scene": [8, 11, 16], "hover": [0.3113, 0.6877]}}
 VOICE = "Microsoft David Desktop"
 VOICE_RATE = 0                  # SAPI rate, -10..10
 AUDIO_RATE = 16000              # SAPI's word positions are right only at 16 kHz (at 22.05 kHz they run 1.38x fast)
@@ -1392,9 +1394,9 @@ def truth_dict(lec: Lecture, pl: dict, scene: Scene | None = None, seed: int = 0
     }
     if lec.name in OPEN_ON:
         o = OPEN_ON[lec.name]
-        out["pipeline"].update(open_piece=o["piece"], same_scene_from=o["same_scene"],
+        out["pipeline"].update(open_piece=o["piece"], open_drawing=o["drawing"], same_scene_from=o["same_scene"],
                                hover_board_fraction=o["hover"],
-                               open_note="piece ids of the job as processed on 2026-11-02; processing it again "
+                               open_note="piece ids of the job as processed on 2026-11-03; processing it again "
                                          "renumbers them")
     if scene is not None:
         fig = [scene.pix[k].box for k in pl["inks"] if lec.ink[k].figure]

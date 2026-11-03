@@ -133,6 +133,8 @@ _PARAM = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
 _COLOR = re.compile(r"^#([0-9a-f]{6}|[0-9a-f]{3})$")
 _AT = re.compile(r"\[?\s*(\d{1,3}):([0-5]\d)(?::([0-5]\d))?\s*\]?")
 _FIGURE = re.compile(r"\b(graph|diagram|figure|plot|sketch|drawing|chart|curve)s?\b", re.I)
+_ARROW = re.compile(r"\b(arrow|vector|axis|axes)s?\b", re.I)
+_SPATIAL = re.compile(r"\b(axis|axes|vectors?|coordinates?)\b", re.I)
 _EQUATION = re.compile(r"\b(equation|formula|function)s?\b", re.I)
 _HEADING = re.compile(r"\b(heading|title)s?\b", re.I)
 _GRAPH_EQ = re.compile(r"^(?:y|z|[fgh]\s*\(\s*x\s*(?:,\s*y\s*)?\))\s*=\s*(.+)$", re.I | re.S)
@@ -340,8 +342,14 @@ def _text(p: dict) -> str:
     return _flat(read.get("text")) or _flat(read.get("latex"))
 
 
+def is_drawing(kind: str, text: str) -> bool:
+    """Graphs, diagrams, sketches..., and arrows that are axes or vectors: drawn with their heads, axes and vectors
+    are read as "arrow" ("x-axis and y-axis arrows", "red vector arrow labeled v"). A lone arrow is not one."""
+    return bool(_FIGURE.search(kind) or (_ARROW.search(kind) and _SPATIAL.search(text)))
+
+
 def is_figure(p: dict) -> bool:
-    return bool(_FIGURE.search(_kind(p)))
+    return is_drawing(_kind(p), _text(p))
 
 
 def looks_like_graph_equation(s: Any) -> bool:
@@ -365,7 +373,7 @@ def can_popout(p: Any) -> bool:
     if not isinstance(read, dict):
         return False
     kind = read.get("kind") if isinstance(read.get("kind"), str) else ""
-    if _FIGURE.search(kind):
+    if is_drawing(kind, read.get("text") if isinstance(read.get("text"), str) else ""):
         return True
     if not _EQUATION.search(kind):
         return False
@@ -392,7 +400,10 @@ def gather(replay: dict, piece_id: int) -> tuple[dict, dict, list[dict], list[di
             continue
         if anchor is asked or _area(qb) < _area(_box(anchor)):
             anchor = q
-    nb = _box(anchor)
+    group = figure_group(pieces, anchor, clip0)
+    if len(group) > 1:  # one drawing in several pieces (axes and a vector drawn one after another): the biggest
+        anchor = max(group, key=lambda g: (_area(_box(g)), -g["id"]))
+    nb = _union([_box(g) for g in group])
     side = min(nb[2], nb[3])
     pad, near_label = max(4.0, 0.06 * side), max(12.0, 0.2 * side)
     near_text = min(60.0, max(30.0, 0.6 * side))
@@ -411,8 +422,51 @@ def gather(replay: dict, piece_id: int) -> tuple[dict, dict, list[dict], list[di
             nearby.append((gap, q))
     parts.sort(key=lambda t: (t[0], t[1], t[2]["id"]))
     nearby.sort(key=lambda t: (t[0], t[1]["id"]))
-    drawing = [asked] + ([anchor] if anchor is not asked else []) + [q for _, _, q in parts[:10]]
+    members = [g for g in group if g is not asked and g is not anchor]
+    drawing = [asked] + ([anchor] if anchor is not asked else []) + members + [
+        q for _, _, q in parts if q not in members][:max(0, 10 - len(members))]
     return asked, anchor, drawing, [q for _, q in nearby[:6]]
+
+
+GROUP_SHARE = 0.15  # figure pieces overlapping by this share of the smaller box are parts of one drawing
+GROUP_WITHIN = 60.0  # s between when they were drawn, at most
+
+
+def _union(boxes: list) -> tuple[float, float, float, float]:
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def _overlap(a, b) -> float:
+    """The overlap of two boxes as a share of the smaller one."""
+    w = min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0])
+    h = min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1])
+    return max(0.0, w) * max(0.0, h) / max(1e-9, min(_area(a), _area(b)))
+
+
+def figure_group(pieces: list[dict], anchor: dict, clip0: float) -> list[dict]:
+    """The anchor and the figure pieces drawn with it as one drawing: on the board together, drawn within a minute
+    of it, and overlapping it or another member (the z axis, the x and y axes and the vector of one 3D sketch are
+    separate pieces once their arrowheads show). The anchor first; just the anchor when it is not a figure."""
+    if not is_figure(anchor):
+        return [anchor]
+
+    def drawn(p: dict) -> float:
+        return clip0 if p.get("pre_existing") else float(p.get("t_seen", clip0) or clip0)
+
+    group, t0 = [anchor], drawn(anchor)
+    grew = True
+    while grew:
+        grew = False
+        for q in pieces:
+            if any(q is g for g in group) or not is_figure(q) or not _together(q, anchor, clip0) \
+                    or abs(drawn(q) - t0) > GROUP_WITHIN:
+                continue
+            if any(_overlap(_box(q), _box(g)) >= GROUP_SHARE for g in group):
+                group.append(q)
+                grew = True
+    return group
 
 
 def drawing_id(replay: dict, piece_id: int) -> int:

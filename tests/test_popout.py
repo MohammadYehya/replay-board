@@ -435,6 +435,35 @@ def test_the_drawing_is_its_piece_with_its_labels_and_nothing_else():
         popout.gather(replay, 99)
 
 
+def test_a_sketch_drawn_in_several_pieces_is_one_drawing():
+    """synth3d-vector3d once the arrowheads were captured: the z axis, the x and y axes and the vector became
+    separate "arrow" pieces, and each half opened its own scene."""
+    replay = board_replay()
+
+    def p(i, box, kind, text, t):
+        return {"id": i, "box": list(box), "image": f"pieces/{i:03d}.png", "t_seen": t, "t_shown": t,
+                "written_after": t, "removed_at": None, "pre_existing": False,
+                "read": {"kind": kind, "text": text, "latex": ""}, "spoken": [], "redraw_at": None}
+
+    replay["board"]["pieces"] = [
+        p(1, (200, 20, 20, 90), "arrow", "z-axis arrow labeled z", 20),
+        p(2, (150, 90, 140, 60), "arrow", "x-axis and y-axis arrows labeled x and y", 25),
+        p(3, (180, 40, 45, 60), "arrow", "red vector arrow labeled v", 35),
+        p(4, (185, 95, 40, 30), "diagram", "components 3, 2, 4 of v", 45),
+        p(5, (60, 100, 40, 12), "arrow", "arrow from the sum to the result", 30),  # not a figure
+        p(6, (170, 80, 150, 80), "graph", "graph of y = x^2", 200),  # over it, minutes later
+        p(7, (330, 20, 60, 60), "diagram", "a cube", 30),  # drawn at the same time, elsewhere
+    ]
+    replay["video"]["end"] = 260.0
+    whole = {popout.drawing_id(replay, i) for i in (1, 2, 3, 4)}
+    assert whole == {2}  # the biggest piece of the sketch
+    asked, anchor, pieces, _ = popout.gather(replay, 1)
+    assert anchor["id"] == 2 and [q["id"] for q in pieces][0] == 1 and {q["id"] for q in pieces} >= {1, 2, 3, 4}
+    assert 6 not in {q["id"] for q in pieces} and popout.drawing_id(replay, 6) == 6
+    assert popout.drawing_id(replay, 7) == 7
+    assert not popout.can_popout(replay["board"]["pieces"][4])
+
+
 GOOD = answer([obj("cone", "cone", center=["0", "0", "1"], size=["r", "2"]),
                obj("axis", "segment", points=[["0", "0", "0"], ["0", "0", "2"]], style="dashed")],
               [step("0:30", caption="The cone", show=["axis"]),
@@ -754,6 +783,9 @@ def test_a_caption_naming_an_angle_nothing_shows_is_logged():
     ("equation", "y = ln|x|", "y=\\ln|x|", True), ("equation", "z = x^2 + y^2", "", True),
     ("formula", "", "f(x) = e^{-x}", True), ("function", "", "$y = mx + c$", True),
     ("equation", "", "f(x, y) = \\sin x \\cos y", True),
+    ("arrow", "x-axis and y-axis arrows labeled x and y", "", True), ("arrow", "red vector arrow labeled v", "", True),
+    ("arrow", "z-axis arrow labeled Z", "", True), ("arrow", "arrow from the sum to the result", "", False),
+    ("arrow", "y = ln x", "y = \\ln x", False),
     ("equation", "A = P(1+r)^n", "A = P(1+r)^n", False), ("equation", "e = 2.71828", "e = 2.71828", False),
     ("equation", "y = 3", "", False), ("equation", "y = \\exp(2)", "", False), ("equation", "x = 3", "", False),
 ])

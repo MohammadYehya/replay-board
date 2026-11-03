@@ -166,6 +166,10 @@ test('which pieces get a 3D view', () => {
     assert.ok(canPopout(piece(k)), k);
   for (const k of ['text', 'arrow', 'number', 'label', 'other', 'scribble', 'box', 'underline'])
     assert.ok(!canPopout(piece(k, 'y = ln x', 'y = \\ln x')), k);
+  assert.ok(canPopout(piece('arrow', 'x-axis and y-axis arrows labeled x and y')));
+  assert.ok(canPopout(piece('arrow', 'red vector arrow labeled v')));
+  assert.ok(canPopout(piece('arrow', 'z-axis arrow labeled Z')));
+  assert.ok(!canPopout(piece('arrow', 'arrow from the sum to the result')));
   assert.ok(canPopout(piece('equation', 'y = |ln x| = |log_e x|', 'y = |\\ln x| = |\\log_e x|')));
   assert.ok(canPopout(piece('equation', 'y = ln|x|', 'y=\\ln|x|')));
   assert.ok(canPopout(piece('equation', 'z = x^2 + y^2', '')));

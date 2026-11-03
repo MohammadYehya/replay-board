@@ -37,6 +37,14 @@ class BoardParams:
     dark_dilate: int = 15
     max_stroke: float = 11.0
     thick_dilate: int = 31
+    # Writing stays put: too-thick ink (an arrowhead, a dot, where strokes cross) that keeps the
+    # same spot and grey for `stay_n` samples is writing, not something in front. 0 = never.
+    stay_n: int = 3
+    stay_tol: float = 10.0  # contrast levels (vs the clean board) a staying thick pixel may change between samples
+    stay_zone: float = 9.0  # thick pixels this close (diameter) to staying ones stay too (edges flicker)
+    # A thick shape starts its count only while all of it is more than this far (px at 800) from
+    # anything else in front: a still hand, wrist or sleeve SAM missed is joined to the teacher.
+    stay_clear: float = 6.0
     person_dilate: int = 15
     accept_n: int = 3
     remove_n: int = 6
@@ -237,6 +245,18 @@ def _roi(ys: np.ndarray, xs: np.ndarray, pad: int, H: int, W: int) -> tuple[int,
             max(0, int(xs.min()) - pad), min(W, int(xs.max()) + pad + 1))
 
 
+def _rect(mask: np.ndarray, ox: int = 0, oy: int = 0):
+    """(x0, y0, x1, y1) around the nonzero pixels of a bool/uint8 mask (offset by ox, oy), or None."""
+    x, y, w, h = cv2.boundingRect(mask.view(np.uint8) if mask.dtype == bool else mask)
+    return (ox + x, oy + y, ox + x + w, oy + y + h) if w else None
+
+
+def _union(a, b):
+    if a is None or b is None:
+        return a or b
+    return min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])
+
+
 def _middle(gray: np.ndarray) -> np.ndarray:
     h, w = gray.shape
     return gray[h // 4: h - h // 4, w // 4: w - w // 4]
@@ -279,6 +299,10 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     W8, H8 = (800, max(8, int(round(H / s)))) if s > 1.05 else (W, H)
     sc = 1.0 if s > 1.05 else s
     k_dark_c, k_thick_c, k_person_c = _ellipse(p.dark_dilate * sc), _ellipse(p.thick_dilate * sc), _ellipse(p.person_dilate * sc)
+    k_zone = _ellipse(p.stay_zone * s) if p.stay_zone > 0 else None
+    k_comp = _ellipse(5 * s)
+    clear_px = p.stay_clear * s
+    clear_pad = int(np.ceil(clear_px + 5 * s)) + 2
     k_max = np.ones((max(1, int(np.ceil(s))),) * 2, np.uint8)  # keep thin thick-marks when shrinking
     geom8 = BoardGeometry(info, corners, W8, p.decode_width) if s > 1.05 else geom
     k_drift = _ellipse(2 * p.drift_r * s + 1)
@@ -298,10 +322,20 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     cur_add = np.full((H, W), -1, np.int64)
     piece_img = np.zeros((H, W), np.float32)  # float so cv2.dilate can max it
     bg_ref = None
+    # Thick ink that stays put: how many samples each thick pixel has kept its spot and grey.
+    stay_run = np.zeros((H, W), np.uint8)
+    stay_grey = np.zeros((H, W), np.uint8)  # its grey when last in view
+    stay_box = None  # (x0, y0, x1, y1) around every nonzero run
+    # Ink in view but held back by the thick mask alone: since when (inf = not held). The wait
+    # before thick ink counts must not make it look written while hidden.
+    held_t = np.full((H, W), np.inf, np.float32)
+    held_box = None
+    held_pad = int(np.ceil(p.thick_dilate * s / 2 + 2 * s)) + 2  # reach of the thick mask around thick ink
 
     pieces: dict[int, Piece] = {}
     next_piece = 1
     add_t, add_idx, add_piece, add_col = [], [], [], []
+    add_seen = []  # per add: when it would have been accepted without the thick mask's wait
     add_drift = []  # True for ink re-accepted next to old ink (camera drift), not new writing
     n_adds = 0
     rem_add, rem_t = [], []  # removal events: which add, when the clean run began
@@ -376,26 +410,82 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
         else:
             np.maximum(closed_f, bg_ref - p.bg_decay, out=bg_ref)
         front = cv2.dilate(((bg_ref - closed_f) > p.dark_thr).astype(np.uint8), k_dark_c)
-        dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 3)
-        thick = (dist > (p.max_stroke * s) / 2).astype(np.uint8)
-        if thick.any():
-            if coarse:
-                thick = cv2.resize(cv2.dilate(thick, k_max), (W8, H8), interpolation=cv2.INTER_NEAREST)
-            front = cv2.max(front, cv2.dilate(thick, k_thick_c))
         if person_mask is not None:
             pm = person_mask(t)
             if pm is not None:
                 pw = (geom8 if coarse else geom).warp_mask(pm).astype(np.uint8)
                 front = cv2.max(front, cv2.dilate(pw, k_person_c))
+        # In view unless something other than too-thick ink is in front.
+        visible_nt = (cv2.resize(front, (W, H), interpolation=cv2.INTER_NEAREST) if coarse else front) == 0
+        dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 3)
+        core = dist > (p.max_stroke * s) / 2
+        core_box = _rect(core)
+        if p.stay_n > 0 and (core_box or stay_box):
+            # Writing stays put; the teacher moves. A thick pixel in view that was thick when last
+            # in view, with the same grey, extends its run; one that just turned thick starts at 1.
+            # Behind the teacher the run waits, like the ink counters. (Only around thick pixels.)
+            bx0, by0, bx1, by1 = _union(core_box, stay_box)
+            sl = np.s_[by0:by1, bx0:bx1]
+            run, vis, c = stay_run[sl], visible_nt[sl], core[sl]
+            if core_box:
+                start = c
+                if p.stay_clear > 0:
+                    # A count starts only while all of its thick shape is clear of the teacher and
+                    # dark things (a still wrist, sleeve or fingers SAM missed are joined to them).
+                    # A count that began while clear keeps going, so ink written just before the
+                    # teacher came near still settles.
+                    gx0, gy0 = max(0, bx0 - clear_pad), max(0, by0 - clear_pad)
+                    gx1, gy1 = min(W, bx1 + clear_pad), min(H, by1 + clear_pad)
+                    cc = cv2.dilate(core[gy0:gy1, gx0:gx1].view(np.uint8), k_comp)
+                    _, lab = cv2.connectedComponents(cc, connectivity=8)
+                    gap = cv2.distanceTransform(visible_nt[gy0:gy1, gx0:gx1].view(np.uint8), cv2.DIST_L2, 3)
+                    bad = np.unique(lab[(gap <= clear_px) & (cc > 0)])
+                    bad = bad[bad > 0]
+                    if bad.size:
+                        start = c & ~np.isin(lab[by0 - gy0:by1 - gy0, bx0 - gx0:bx1 - gx0], bad)
+                # Compare contrast with the clean board, not raw grey: exposure jumps move both.
+                con = np.clip(contrast[sl], 0, 255).astype(np.uint8)
+                same = c & (run > 0) & (cv2.absdiff(con, stay_grey[sl]) <= p.stay_tol)
+                np.copyto(run, np.where(same, cv2.add(run, 1), start.view(np.uint8)), where=vis)
+                np.copyto(stay_grey[sl], con, where=vis)
+            else:
+                run[vis] = 0
+            stay_box = _rect(run, bx0, by0)
+            if core_box and stay_box:
+                settled = run >= p.stay_n
+                if k_zone is not None and settled.any():
+                    settled = cv2.dilate(settled.view(np.uint8), k_zone) > 0
+                c &= ~settled  # a view: thick ink that stays put leaves `core`
+                core_box = _rect(core)
+        thick = None
+        if core_box:
+            thick = core.astype(np.uint8)
+            if coarse:
+                thick = cv2.resize(cv2.dilate(thick, k_max), (W8, H8), interpolation=cv2.INTER_NEAREST)
+            front = cv2.max(front, cv2.dilate(thick, k_thick_c))
         if coarse:
             front = cv2.resize(front, (W, H), interpolation=cv2.INTER_NEAREST)
-        visible = front == 0
+        visible = (front == 0) if thick is not None else visible_nt
 
         # Drift tolerance: accepted pixels stay ink while faint ink lies within ~2 px.
         near = cv2.dilate(faint.astype(np.uint8), k_drift) > 0
         is_ink = np.where(accepted, near, ink)
         upd_ink = visible & is_ink
         upd_clean = visible & ~is_ink
+        # Ink held back by the thick mask alone: remember since when, while it stays in view.
+        if held_box:
+            sl = np.s_[held_box[1]:held_box[3], held_box[0]:held_box[2]]
+            np.copyto(held_t[sl], np.float32(np.inf), where=~(visible_nt[sl] & is_ink[sl]))
+            if np.isinf(held_t[sl]).all():
+                held_box = None
+        if thick is not None:
+            x0, y0, x1, y1 = core_box
+            x0, y0, x1, y1 = max(0, x0 - held_pad), max(0, y0 - held_pad), min(W, x1 + held_pad), min(H, y1 + held_pad)
+            sl = np.s_[y0:y1, x0:x1]
+            hold = visible_nt[sl] & ~visible[sl] & is_ink[sl] & ~accepted[sl] & np.isinf(held_t[sl])
+            if hold.any():
+                held_t[sl][hold] = t
+                held_box = _union(held_box, _rect(hold, x0, y0))
         on = np.where(upd_ink, cv2.add(on, 1), np.where(upd_clean, np.uint8(0), on))
         off = np.where(upd_clean, cv2.add(off, 1), np.where(upd_ink, np.uint8(0), off))
         np.copyto(last_clean, np.float32(t), where=upd_clean)
@@ -558,6 +648,8 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             acc_time[ys, xs] = t
             cur_add[ys, xs] = ids
             piece_img[ys, xs] = pid.astype(np.float32)
+            add_seen.append(np.minimum(np.float32(t), held_t[ys, xs] + np.float32((p.accept_n - 1) * dt)))
+            held_t[ys, xs] = np.inf
             add_t.append(np.full(nnew, t, np.float32))
             add_idx.append((ys * W + xs).astype(np.int64))
             add_piece.append(pid)
@@ -573,7 +665,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
 
     add_piece = [np.array([resolve(int(v)) for v in a], np.int64) if alias else a for a in add_piece]
     res = _finish(p, geom, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift, rem_add, rem_t,
-                  accepted, last_board, t_settle, s1)
+                  accepted, last_board, t_settle, s1, add_seen)
     res.stats.update(steps=steps, seconds=time.perf_counter() - t_wall, typical_brightness=typical,
                      clip_seconds=s1 - s0, speed=(s1 - s0) / max(1e-6, time.perf_counter() - t_wall))
     if progress is not None:
@@ -586,10 +678,11 @@ def _cat(lst, dtype, shape=(0,)):
 
 
 def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift,
-            rem_add, rem_t, accepted, last_board, t_settle, t_end) -> BoardResult:
+            rem_add, rem_t, accepted, last_board, t_settle, t_end, add_seen=None) -> BoardResult:
     W, H = geom.width, geom.height
     s = W / 800.0
     A_t = _cat(add_t, np.float64)
+    A_seen = _cat(add_seen, np.float64) if add_seen else A_t
     A_idx = _cat(add_idx, np.int64)
     A_pid = _cat(add_piece, np.int64)
     A_drift = _cat(add_drift, bool)
@@ -642,6 +735,10 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
         times = np.sort(A_t[written if written.size else kept])
         t_seen = float(times[int(np.floor(p.seen_frac * (times.size - 1)))])
         t_shown = float(times[int(np.floor(0.95 * (times.size - 1)))])
+        # Written while hidden is judged from when the ink was in view, before any wait for
+        # thick ink to show it stays put.
+        in_view = np.sort(A_seen[written if written.size else kept])
+        t_view = float(in_view[int(np.floor(p.seen_frac * (in_view.size - 1)))])
         shown = kept[~A_drift[kept]] if (~A_drift[kept]).any() else kept
         rem = shown_removed[shown]
         removed = rem[np.isfinite(rem)]
@@ -654,7 +751,7 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
             "id": int(u), "box": [int(kxs.min()), int(kys.min()), int(kxs.max() - kxs.min() + 1), int(kys.max() - kys.min() + 1)],
             "t_seen": round(t_seen, 2), "t_commit": round(t_seen, 2), "t_shown": round(t_shown, 2),
             "written_after": round(wa, 2),
-            "revealed": bool(not q.pre_existing and t_seen - wa > p.reveal_gap),
+            "revealed": bool(not q.pre_existing and t_view - wa > p.reveal_gap),
             "removed_at": None if rem_when is None else round(rem_when, 2),
             "pre_existing": bool(q.pre_existing), "pixels": int(kept.size),
         })

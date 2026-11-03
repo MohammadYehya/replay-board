@@ -28,6 +28,8 @@ CASES = {
     "drift": ("drift", 800, False),
     "base@1200": ("base", 1200, False),
     "base+person": ("base", 800, True),
+    "arrows": ("arrows", 800, False),
+    "arrows+person": ("arrows", 800, True),
 }
 
 
@@ -73,7 +75,8 @@ def run_case(case: str, verbose: bool = False) -> Score:
         return geom.warp_mask(mask)
 
     items = {it["id"]: it for it in gen.ITEMS}
-    item_ink = {i: _dilate(to_board(gen.item_ink(i)), 2) for i in items}
+    item_ink = {i: _dilate(to_board(gen.item_ink(i, variant)), 2) for i in items}
+    uncover = gen.uncover_t(variant)
     events = [p for p in res.pieces if not p["pre_existing"]]
     if verbose:
         for p in res.pieces:
@@ -105,12 +108,26 @@ def run_case(case: str, verbose: bool = False) -> Score:
             continue
         p = ps[0]
         if i == gen.HIDDEN_ITEM:
-            ok = p["revealed"] and gen.UNCOVER_T - 0.5 <= p["t_seen"] <= gen.UNCOVER_T + 3.0
+            ok = p["revealed"] and uncover - 0.5 <= p["t_seen"] <= uncover + 3.0
             sc.check(f"item {i} hidden, shown on uncover", ok,
-                     f"t_seen {p['t_seen']} uncover {gen.UNCOVER_T:.2f} revealed {p['revealed']} written_after {p['written_after']}")
+                     f"t_seen {p['t_seen']} uncover {uncover:.2f} revealed {p['revealed']} written_after {p['written_after']}")
         else:
-            ok = it["t_start"] <= p["t_seen"] <= it["t_end"] + 1.5 and not p["revealed"]
+            # In "arrows" the heavy underline (item 5) is written with the teacher's hand on it and
+            # then walked over: thick ink touching the teacher can't start showing it stays put
+            # (a still wrist SAM missed looks the same), so it waits until the teacher moves off
+            # (measured: 33.0 s without the oracle person mask, 34.0 s with it). Same 3 s as "uncover".
+            late = 3.0 if variant == "arrows" and it.get("kind") == "underline" else 1.5
+            ok = it["t_start"] <= p["t_seen"] <= it["t_end"] + late and not p["revealed"]
             sc.check(f"item {i} on time", ok, f"t_seen {p['t_seen']} written {it['t_start']}-{it['t_end']} revealed {p['revealed']}")
+    # Every item whole on the board soon after it is written (or uncovered): thick ink (arrowheads,
+    # dots, crossings, heavy lines) must not be lost as "something in front of the board".
+    for i, it in items.items():
+        T = (uncover if i == gen.HIDDEN_ITEM else it["t_end"]) + 3.0
+        if i == gen.ERASE_ITEM:
+            T = min(T, gen.ERASE_T[0] - 0.5)
+        truth = to_board(gen.truth_ink(T, variant)) & _dilate(to_board(gen.item_ink(i, variant)), 4)
+        rec, _ = pixel_scores(res.ink_at(T), truth)
+        sc.check(f"item {i} whole at {T:.1f}s", rec >= 0.97, f"recall {rec:.3f}")
     sc.check("no extra pieces", not extras, ", ".join(f"#{p['id']} t={p['t_seen']} box={p['box']}" for p in extras))
 
     er = res.erases
@@ -123,7 +140,10 @@ def run_case(case: str, verbose: bool = False) -> Score:
     gone = [p for p in matched[gen.ERASE_ITEM] if p["removed_at"] is not None]
     sc.check("item 1 marked removed", len(gone) == 1, f"removed_at {[p['removed_at'] for p in matched[gen.ERASE_ITEM]]}")
 
-    for T in (32.0, gen.DURATION - 0.1):
+    # In "arrows" the heavy underline ends at 31.5 s and the teacher walks over it at 32.2 s:
+    # thick ink waits stay_n - 1 more samples than thin ink to show it stays put, so it is not
+    # on the board at 32 s yet (its own "whole" check above covers it). Check before it instead.
+    for T in ((29.0 if variant == "arrows" else 32.0), gen.DURATION - 0.1):
         truth = to_board(gen.truth_ink(T, variant))
         rec, prec = pixel_scores(res.ink_at(T), truth)
         sc.check(f"pixels at {T:.1f}s", rec >= 0.85 and prec >= 0.9, f"recall {rec:.3f} precision {prec:.3f}")

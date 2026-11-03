@@ -11,6 +11,11 @@ Variants (all share the scene and, for a given seed, the camera noise):
   chalk  every base frame negated (255 - frame), like ffmpeg `negate`
   fade   base with a fade-in from black over 0..1.5 s
   drift  the whole camera image shifted by `drift_offset(t)` (sub-pixel)
+  arrows the same lecture and teacher, but every item is thick writing in the same place:
+         1 an arrow with a filled head (later erased), 2 thick strokes crossing (X and +),
+         3 an arrow with a filled head written while hidden, 4 a filled dot then "= 2",
+         5 a heavy underline. Thick ink like this is what the "too thick = in front" rule
+         must not lose (see `item_ink(i, "arrows")`, `uncover_t("arrows")`).
 
 Usage:
     .venv\\Scripts\\python.exe -m tests.gen_board            # all variants -> data\\selftest\\
@@ -40,8 +45,9 @@ import numpy as np
 SIZE = (1280, 720)            # (width, height)
 FPS = 25
 DURATION = 38.0
-VARIANTS = ("base", "chalk", "fade", "drift")
+VARIANTS = ("base", "chalk", "fade", "drift", "arrows")
 GEN_VERSION = 2               # bump whenever the rendering or the truth changes
+ARROWS_REV = 1                # bump whenever the "arrows" variant's thick writing changes
 
 HIDDEN_ITEM = 3
 ERASE_ITEM = 1
@@ -179,6 +185,65 @@ def _check_layout() -> None:
 
 _check_layout()
 
+
+# --------------------------------------------------------------------------------------
+# "arrows" variant: thick writing inside the same item boxes (same pen, teacher, eraser)
+# --------------------------------------------------------------------------------------
+# Sizes in video px; the board is 1100 px wide, so x0.727 at the 800 px analysis width,
+# where capture treats ink wider than 11 px (here ~15 px) as something in front of the board.
+def _aa(draw) -> np.ndarray:
+    cov = np.zeros((H, W), np.uint8)
+    draw(cov)
+    return cov
+
+
+def _P16(pts) -> np.ndarray:
+    return np.round(np.asarray(pts, np.float64) * 16.0).astype(np.int32)
+
+
+def _arrow(x0: float, x1: float, y: float, head_len: float, head_half: float, shaft_w: int) -> np.ndarray:
+    """A right-pointing arrow: a normal shaft and a filled triangular head (tip at x1)."""
+    def draw(c):
+        cv2.line(c, tuple(_P16((x0, y))), tuple(_P16((x1 - head_len + 2, y))), 255, shaft_w, cv2.LINE_AA, 4)
+        cv2.fillPoly(c, [_P16([(x1, y), (x1 - head_len, y - head_half), (x1 - head_len, y + head_half)])],
+                     255, cv2.LINE_AA, 4)
+    return _aa(draw)
+
+
+def _strokes(segs, w: int) -> np.ndarray:
+    def draw(c):
+        for a, b in segs:
+            cv2.line(c, tuple(_P16(a)), tuple(_P16(b)), 255, w, cv2.LINE_AA, 4)
+    return _aa(draw)
+
+
+def _build_arrow_covs() -> dict[int, np.ndarray]:
+    covs = {}
+    # 1: arrow, head ~34 x 40 (inscribed circle ~8 px at 800): thick only at the head
+    covs[1] = _arrow(158, 284, 145, 34, 20, 6)
+    # 2: two 11 px strokes (8 px at 800: not thick) crossing as X and as +: thick only where they cross
+    covs[2] = _strokes([((416, 132), (448, 162)), ((416, 162), (448, 132)),
+                        ((484, 147), (532, 147)), ((508, 133), (508, 161))], 11)
+    # 3: arrow written while the teacher hides it
+    covs[3] = _arrow(602, 680, 404, 34, 20, 6)
+    # 4: a filled dot (20 px across) with "= 2" in normal ink right next to it
+    dot = _aa(lambda c: cv2.circle(c, tuple(_P16((768, 393))), 10 * 16, 255, -1, cv2.LINE_AA, 4))
+    covs[4] = np.maximum(dot, _render_text("= 2", 1.5, 792, 375))
+    # 5: a heavy (17 px) underline along the same curve, 8 px lower
+    xs, ys = _UL_CURVE
+    pts = _P16(np.stack([xs, ys + 8.0], 1))
+    covs[5] = _aa(lambda c: cv2.polylines(c, [pts], False, 255, 17, cv2.LINE_AA, 4))
+    for k, cov in covs.items():
+        x, y, w, h = _ink_box(cov)
+        bx, by, bw, bh = _ITEM[k]["box"]
+        if k != 5:  # inside the item's box, so the pen, the teacher and the eraser fit it
+            assert bx <= x and by <= y and x + w <= bx + bw and y + h <= by + bh, (k, (x, y, w, h), _ITEM[k]["box"])
+    y4 = _ink_box(covs[4])[1] + _ink_box(covs[4])[3] - 1
+    assert _ink_box(covs[5])[1] - y4 >= 12
+    total = sum((c > 0).astype(np.int32) for c in covs.values())
+    assert total.max() <= 1
+    return covs
+
 # --------------------------------------------------------------------------------------
 # Pen and eraser paths, per-pixel reveal and erase times
 # --------------------------------------------------------------------------------------
@@ -238,13 +303,14 @@ def _eraser_rect(cx: float, cy: float) -> tuple[int, int, int, int]:
     return x0, y0, x0 + _ERASER_W, y0 + _ERASER_H
 
 
-def _build_timing():
+def _build_timing(covs=None):
+    covs = _COV if covs is None else covs
     alpha = np.zeros((H, W), np.float32)
     col = np.zeros((H, W, 3), np.float32)
     reveal = np.full((H, W), np.inf)
     cols = np.arange(W, dtype=np.float64)
     for it in ITEMS:
-        cov = _COV[it["id"]]
+        cov = covs[it["id"]]
         m = cov > 0
         alpha[m] = cov[m] / 255.0
         col[m] = it["bgr"]
@@ -273,6 +339,25 @@ _INK_RT, _INK_ET = _REVEAL[_INK_YS, _INK_XS], _ERASE[_INK_YS, _INK_XS]
 # item 1 (every anti-aliased pixel of it) must be gone by the end of the erase
 assert np.all(_ERASE[_COV[ERASE_ITEM] > 0] <= ERASE_T[1] + _EPS)
 assert np.all(np.isinf(_ERASE[(_ALPHA > 0) & (_COV[ERASE_ITEM] == 0)]))
+
+
+class _Ink:
+    """Per-pixel ink, colour, reveal and erase times of one set of item coverages."""
+
+    def __init__(self, covs):
+        self.cov = covs
+        self.item_ink = {k: (c >= 128) for k, c in covs.items()}
+        self.alpha, self.col, self.reveal, self.erase = _build_timing(covs)
+        self.ys, self.xs = np.nonzero(self.alpha > 0)
+        self.a, self.c = self.alpha[self.ys, self.xs], self.col[self.ys, self.xs]
+        self.rt, self.et = self.reveal[self.ys, self.xs], self.erase[self.ys, self.xs]
+        assert np.all(self.erase[covs[ERASE_ITEM] > 0] <= ERASE_T[1] + _EPS)
+        assert np.all(np.isinf(self.erase[(self.alpha > 0) & (covs[ERASE_ITEM] == 0)]))
+
+
+@functools.lru_cache(maxsize=1)
+def _arrows() -> _Ink:
+    return _Ink(_build_arrow_covs())
 
 
 def _visible(t: float) -> np.ndarray:
@@ -466,8 +551,8 @@ def _draw_teacher(frame: np.ndarray, t: float) -> None:
         sub += a[..., None] * (c - sub)
 
 
-def _compute_uncover_t() -> float:
-    ink = _ITEM_INK[HIDDEN_ITEM]
+def _compute_uncover_t(item_ink_map=None) -> float:
+    ink = (item_ink_map or _ITEM_INK)[HIDDEN_ITEM]
     x, y, w, h = _ITEM[HIDDEN_ITEM]["box"]
     sub = ink[y:y + h, x:x + w]
     k0 = int(math.ceil(_ITEM[HIDDEN_ITEM]["t_end"] * FPS - 1e-6))
@@ -479,6 +564,13 @@ def _compute_uncover_t() -> float:
 
 
 UNCOVER_T = _compute_uncover_t()
+
+
+@functools.lru_cache(maxsize=None)
+def uncover_t(variant: str = "base") -> float:
+    """When the hidden item is first fully in view (its own ink decides, so per variant)."""
+    _check_variant(variant)
+    return UNCOVER_T if variant != "arrows" else _compute_uncover_t(_arrows().item_ink)
 
 # --------------------------------------------------------------------------------------
 # Public truth functions
@@ -515,6 +607,9 @@ def _shift(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
 def truth_ink(t: float, variant: str = "base") -> np.ndarray:
     """Every ink pixel on the board at t (written, not erased), occluded or not; drift applied."""
     _check_variant(variant)
+    if variant == "arrows":
+        ink = _arrows()
+        return (ink.alpha >= 0.5) & (ink.reveal <= t + _EPS) & (ink.erase > t + _EPS)
     dx, dy = drift_offset(t, variant)
     vis = _visible(t)
     if dx == 0.0 and dy == 0.0:
@@ -533,9 +628,10 @@ def teacher_mask(t: float, variant: str = "base") -> np.ndarray:
     return _shift(a.astype(np.float32) * (1.0 / 255.0), dx, dy) > (0.5 / 255.0)
 
 
-def item_ink(item_id: int) -> np.ndarray:
+def item_ink(item_id: int, variant: str = "base") -> np.ndarray:
     """Final full ink (alpha >= 0.5) of one item, no drift."""
-    return _ITEM_INK[item_id].copy()
+    _check_variant(variant)
+    return (_arrows().item_ink if variant == "arrows" else _ITEM_INK)[item_id].copy()
 
 
 # --------------------------------------------------------------------------------------
@@ -601,13 +697,18 @@ def _background() -> np.ndarray:
     return img
 
 
-def _scene(t: float) -> np.ndarray:
+def _scene(t: float, arrows: bool = False) -> np.ndarray:
     """Clean float32 frame at t: background, ink, teacher (no camera effects)."""
     f = _background().copy()
-    vis = (_INK_RT <= t + _EPS) & (_INK_ET > t + _EPS)
-    ys, xs = _INK_YS[vis], _INK_XS[vis]
+    if arrows:
+        a = _arrows()
+        iys, ixs, ia, ic, irt, iet = a.ys, a.xs, a.a, a.c, a.rt, a.et
+    else:
+        iys, ixs, ia, ic, irt, iet = _INK_YS, _INK_XS, _INK_A, _INK_C, _INK_RT, _INK_ET
+    vis = (irt <= t + _EPS) & (iet > t + _EPS)
+    ys, xs = iys[vis], ixs[vis]
     under = f[ys, xs]
-    f[ys, xs] = under + _INK_A[vis][:, None] * (_INK_C[vis] - under)
+    f[ys, xs] = under + ia[vis][:, None] * (ic[vis] - under)
     _draw_teacher(f, t)
     return f
 
@@ -653,6 +754,8 @@ def _render_frame(i: int, seed: int, variants: tuple[str, ...]) -> dict[str, np.
         dx, dy = drift_offset(t, "drift")
         moved = scene if (dx == 0.0 and dy == 0.0) else _shift(scene, dx, dy)
         out["drift"] = cv2.convertScaleAbs(cv2.scaleAdd(moved, wob, noise))
+    if "arrows" in variants:
+        out["arrows"] = cv2.convertScaleAbs(cv2.scaleAdd(_scene(t, arrows=True), wob, noise))
     return out
 
 
@@ -694,9 +797,16 @@ class _Encoder:
             self.tmp.unlink(missing_ok=True)
 
 
+def _version(variant: str):
+    return GEN_VERSION if variant != "arrows" else f"{GEN_VERSION}.arrows{ARROWS_REV}"
+
+
 def _truth_summary(variant: str, seed: int) -> dict:
+    items = ITEMS
+    if variant == "arrows":
+        items = [dict(it, kind="thick", text="", box=_ink_box(_arrows().cov[it["id"]])) for it in ITEMS]
     return {
-        "GEN_VERSION": GEN_VERSION,
+        "GEN_VERSION": _version(variant),
         "variant": variant,
         "seed": seed,
         "SIZE": list(SIZE),
@@ -705,9 +815,9 @@ def _truth_summary(variant: str, seed: int) -> dict:
         "n_frames": N_FRAMES,
         "board_type": "chalk" if variant == "chalk" else "whiteboard",
         "corners": board_corners(),
-        "items": [{k: (list(v) if isinstance(v, tuple) else v) for k, v in it.items()} for it in ITEMS],
+        "items": [{k: (list(v) if isinstance(v, tuple) else v) for k, v in it.items()} for it in items],
         "HIDDEN_ITEM": HIDDEN_ITEM,
-        "UNCOVER_T": UNCOVER_T,
+        "UNCOVER_T": uncover_t(variant),
         "ERASE_ITEM": ERASE_ITEM,
         "ERASE_T": list(ERASE_T),
         "drift_steps": ([{"t0": a, "t1": b, "dx": dx, "dy": dy} for a, b, dx, dy in DRIFT_STEPS]
@@ -730,7 +840,7 @@ def _up_to_date(out_dir: Path, variant: str, seed: int) -> bool:
         info = json.loads(meta.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return info.get("GEN_VERSION") == GEN_VERSION and info.get("seed", seed) == seed
+    return info.get("GEN_VERSION") == _version(variant) and info.get("seed", seed) == seed
 
 
 def _generate(out_dir, variants, seed: int = 0, force: bool = False, workers: int | None = None) -> list[str]:

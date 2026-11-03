@@ -68,7 +68,8 @@ cache keyed by model + request, so re-running a lecture costs nothing. Measured 
 ### Board capture: "writing stays put, the teacher moves"
 Frames are flattened onto the board at 3 fps. Ink is what morphological closing removes; each pixel keeps
 counters that only move while the board is visible there (SAM person mask, plus built-in detectors for
-large dark things and too-thick strokes). A pixel is accepted after 1 s of ink and removed after 2 s of
+large dark things and too-thick strokes; a thick shape that stays put for 1 s, clear of the teacher, is writing:
+a filled arrowhead, a heavy underline, two strokes crossing). A pixel is accepted after 1 s of ink and removed after 2 s of
 clean board. New pixels are grouped into pieces of writing; removals into erases. Writing that appears
 long after its spot was last seen blank was written while hidden, and is redrawn when it was talked about.
 Camera drift of a pixel or two is tolerated rather than treated as erase-and-rewrite. The result is a
@@ -87,11 +88,11 @@ annotations are drawn on the virtual board only; the original video is never mar
 
 ### Self-tests on generated lectures
 `tests/gen_board.py` and `tests/gen_slides.py` render lectures with known answers (a teacher who walks in
-front of what he writes, an eraser, chalk, fade-ins, camera drift, a webcam corner, a parked cursor, a
-laser...). The analysis is scored against them:
+front of what he writes, an eraser, chalk, fade-ins, camera drift, filled arrowheads and crossing strokes, a
+webcam corner, a parked cursor, a laser...). The analysis is scored against them:
 
 ```text
-python -m tests.selftest_board    ->  72/72 checks (6 variants)
+python -m tests.selftest_board    ->  136/136 checks (8 variants)
 python -m tests.selftest_slides   ->  47/47 checks (4 variants)
 ```
 

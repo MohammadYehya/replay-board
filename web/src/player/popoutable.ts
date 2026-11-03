@@ -4,6 +4,9 @@
 import type { Box, Piece } from '../types';
 
 const DRAWING = /\b(graph|diagram|figure|plot|sketch|drawing|chart|curve)s?\b/i;
+// Axes and vectors drawn with their heads are read as "arrow" ("x-axis and y-axis arrows"); a lone arrow is not one.
+const ARROW = /\b(arrow|vector|axis|axes)s?\b/i;
+const SPATIAL = /\b(axis|axes|vectors?|coordinates?)\b/i;
 const EQUATION = /\b(equation|formula|function)s?\b/i;
 
 /** "y = |ln x|", "z = x^2 + y^2", "f(x) = e^{-x}", "f(x, y) = ..." (LaTeX or plain), with x on the right. */
@@ -24,7 +27,7 @@ export function canPopout(p: Piece | null | undefined): boolean {
   const read = p?.read;
   if (!read) return false;
   const kind = read.kind ?? '';
-  if (DRAWING.test(kind)) return true;
+  if (DRAWING.test(kind) || (ARROW.test(kind) && SPATIAL.test(read.text ?? ''))) return true;
   if (!EQUATION.test(kind)) return false;
   return looksLikeGraphEquation(read.latex ?? '') || looksLikeGraphEquation(read.text ?? '');
 }

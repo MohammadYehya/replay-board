@@ -266,9 +266,9 @@ def test_open_piece_in_the_processed_job(name):
     p = pieces[o["piece"]]
     assert replay["type"] == "board"
     assert popout.can_popout(p) and popout.is_figure(p)
-    assert popout.drawing_id(replay, o["piece"]) == o["piece"]
+    assert popout.drawing_id(replay, o["piece"]) == o["drawing"]
     for q in o["same_scene"]:
-        assert popout.can_popout(pieces[q]) and popout.drawing_id(replay, q) == o["piece"], q
+        assert popout.can_popout(pieces[q]) and popout.drawing_id(replay, q) == o["drawing"], q
     # it lies on the figure: its box, in video px, is mostly inside the truth's figure box
     bw, bh = replay["board"]["size"]
     hm = cv2.getPerspectiveTransform(np.float32([[0, 0], [bw, 0], [bw, bh], [0, bh]]),
