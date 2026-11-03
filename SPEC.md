@@ -88,6 +88,7 @@ Writing stays where it is; the teacher moves.
 - Primary: SAM 3.1 person mask, dilated.
 - Fallback 1, large dark things: keep a per-pixel `bg_ref`, initialised to `closed` and then updated each step as `max(closed, bg_ref - 0.5)`. Where `bg_ref - closed > 45`, dilate by an ellipse of 15 px.
 - Fallback 2, too thick to be a pen stroke: where the distance transform of the ink exceeds `max_stroke/2` (max_stroke = 11 px), dilate by an ellipse of 31 px. Except thick ink that stays put: a thick pixel whose contrast against the clean board changes by at most 10 levels for 3 samples in a row is writing (a filled arrowhead, a heavy underline, strokes crossing), and it and thick pixels within 9 px of it leave this mask. Its count may only start while the whole thick shape is more than 6 px from the dilated person mask and the large-dark mask, so a still hand or sleeve that SAM missed never counts. Shapes wider than the closing (21 px) are not ink at all.
+  - The replay shows ink this mask held back from when it would have been accepted as thin ink: a second count like `on`, in view of everything except this mask, and the pixel is shown from when it reached 3 (never later than its real acceptance, which still waits for the shape to stay put). That count restarts when the contrast of the pixel, or of any counted pixel within a 9 px ellipse around it (`jump_zone`: covers a replacing stroke up to 8 px wide), changes by more than 10 levels between samples (a stroke replacing a thing of another width or darkness changes only some of its rows). It is dropped for ink that was part of a too-thick thing whose middle turned into clean board without being accepted (a hand or sleeve SAM missed). Behind the teacher it waits, like `on`. Not caught: a thing SAM missed that is replaced by ink of exactly its width and darkness.
 
 **Accepting and removing pixels**
 
@@ -111,9 +112,9 @@ A global image alignment was tried and did **not** help: the drift is not a pure
 - A component joins a piece updated within the last 3 s whose box, padded by 25 px, touches it. Otherwise it starts a new piece.
 - A component under 25 px joins any touching piece, however old.
 - Each piece records:
-  - `t_seen` and `t_commit`, both taken from when **10% of its pixels** were accepted, so one stray early pixel doesn't set the time;
+  - `t_seen` and `t_commit`, both taken from when **10% of its pixels** are shown in the replay (see Fallback 2), so one stray early pixel doesn't set the time, and `t_shown` from when 95% are;
   - `written_after` (the median `last_clean` of its pixels; the minimum across batches);
-  - `revealed`, true when `t_seen - written_after > 3 s`, meaning it was written while hidden.
+  - `revealed`, true when the 10% point of when its pixels were in view as ink (before any wait for thick ink to stay put) is more than 3 s after `written_after`, meaning it was written while hidden.
 
 **Not writing (drop it)**
 
@@ -130,7 +131,7 @@ When replaying, also leave out any mark that will be removed within 6 s, since t
 - Discard an erase if more than 60% of its pixels lived less than 6 s.
 
 **Output**
-- A per-step replay log of `(t, added pixel ids, their piece ids, their colours, removed pixel ids)`. The board at any time is rebuilt from it; ink colour is the original darkened ×0.72.
+- A per-step replay log of `(t, added pixel ids, their piece ids, their colours, removed pixel ids)`. The board at any time is rebuilt from it; ink colour is the original darkened ×0.72. An add's `t` is when it is shown (Fallback 2), never later than when it was accepted; lifetimes (`min_life`), removals, erases and drift go by acceptance time.
 - Speed is 9–15x real time at 800 px.
 
 ### 5.2 Slides: states, clean slides, pointer

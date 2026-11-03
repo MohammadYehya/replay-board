@@ -634,6 +634,12 @@ def item_ink(item_id: int, variant: str = "base") -> np.ndarray:
     return (_arrows().item_ink if variant == "arrows" else _ITEM_INK)[item_id].copy()
 
 
+def write_time(variant: str = "base") -> np.ndarray:
+    """When the pen writes each pixel (video px, seconds; inf where no item ever has ink), no drift."""
+    _check_variant(variant)
+    return (_arrows().reveal if variant == "arrows" else _REVEAL).copy()
+
+
 # --------------------------------------------------------------------------------------
 # Rendering
 # --------------------------------------------------------------------------------------

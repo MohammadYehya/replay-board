@@ -97,9 +97,13 @@ def test_ink_held_back_only_by_the_thick_mask_is_not_written_while_hidden(tmp_pa
     lines = [p for p in res.pieces if p["box"][1] <= 150 <= p["box"][1] + p["box"][3]]
     assert len(lines) == 1
     p = lines[0]
-    # It shows only after the blob leaves, more than reveal_gap after its spot was last seen clean...
-    assert p["t_seen"] >= 9.0 and p["t_seen"] - p["written_after"] > BoardParams().reveal_gap
-    # ...but it was in view the whole time, so it was not written while hidden.
+    # It is accepted only after the blob leaves, but it was in view and stayed put the whole time: the replay
+    # shows it from when thin ink would have shown (accept_n samples after it was written)...
+    assert 4.0 <= p["t_seen"] <= 5.5
+    line = np.zeros((H, W), bool)
+    line[149:152, 205:316] = True
+    assert res.ink_at(5.5)[line].mean() > 0.95
+    # ...and not as written while hidden.
     assert not p["revealed"]
 
 

@@ -112,12 +112,10 @@ def run_case(case: str, verbose: bool = False) -> Score:
             sc.check(f"item {i} hidden, shown on uncover", ok,
                      f"t_seen {p['t_seen']} uncover {uncover:.2f} revealed {p['revealed']} written_after {p['written_after']}")
         else:
-            # In "arrows" the heavy underline (item 5) is written with the teacher's hand on it and
-            # then walked over: thick ink touching the teacher can't start showing it stays put
-            # (a still wrist SAM missed looks the same), so it waits until the teacher moves off
-            # (measured: 33.0 s without the oracle person mask, 34.0 s with it). Same 3 s as "uncover".
-            late = 3.0 if variant == "arrows" and it.get("kind") == "underline" else 1.5
-            ok = it["t_start"] <= p["t_seen"] <= it["t_end"] + late and not p["revealed"]
+            # In "arrows" too, though thick ink (the heavy underline, item 5, is written with the teacher's
+            # hand on it) is accepted only once it has stayed put clear of the teacher: the replay shows it
+            # from when thin ink written with it would show (measured 31.67 s, with or without the oracle mask).
+            ok = it["t_start"] <= p["t_seen"] <= it["t_end"] + 1.5 and not p["revealed"]
             sc.check(f"item {i} on time", ok, f"t_seen {p['t_seen']} written {it['t_start']}-{it['t_end']} revealed {p['revealed']}")
     # Every item whole on the board soon after it is written (or uncovered): thick ink (arrowheads,
     # dots, crossings, heavy lines) must not be lost as "something in front of the board".
@@ -140,10 +138,9 @@ def run_case(case: str, verbose: bool = False) -> Score:
     gone = [p for p in matched[gen.ERASE_ITEM] if p["removed_at"] is not None]
     sc.check("item 1 marked removed", len(gone) == 1, f"removed_at {[p['removed_at'] for p in matched[gen.ERASE_ITEM]]}")
 
-    # In "arrows" the heavy underline ends at 31.5 s and the teacher walks over it at 32.2 s:
-    # thick ink waits stay_n - 1 more samples than thin ink to show it stays put, so it is not
-    # on the board at 32 s yet (its own "whole" check above covers it). Check before it instead.
-    for T in ((29.0 if variant == "arrows" else 32.0), gen.DURATION - 0.1):
+    # In "arrows" the heavy underline ends at 31.5 s and the teacher walks over it at 32.2 s: it is on the
+    # board at 32 s like thin ink, though it is accepted only after the teacher has moved off.
+    for T in (32.0, gen.DURATION - 0.1):
         truth = to_board(gen.truth_ink(T, variant))
         rec, prec = pixel_scores(res.ink_at(T), truth)
         sc.check(f"pixels at {T:.1f}s", rec >= 0.85 and prec >= 0.9, f"recall {rec:.3f} precision {prec:.3f}")

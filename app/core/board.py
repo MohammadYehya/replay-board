@@ -45,6 +45,10 @@ class BoardParams:
     # A thick shape starts its count only while all of it is more than this far (px at 800) from
     # anything else in front: a still hand, wrist or sleeve SAM missed is joined to the teacher.
     stay_clear: float = 6.0
+    # Ink held back by the thick mask is shown from when thin ink would be, unless its contrast, or that of
+    # counted ink within this ellipse (diameter, px at 800), jumped since: a stroke (measured up to 8 px wide)
+    # that replaces a thing of another width or darkness changes at least its edge rows.
+    jump_zone: float = 9.0
     person_dilate: int = 15
     accept_n: int = 3
     remove_n: int = 6
@@ -159,7 +163,7 @@ class BoardResult:
     fps: float
     pieces: list  # dicts, see _finish
     erases: list  # dicts {t, box}
-    # replay log, kept marks only: adds sorted by time, removes sorted by time
+    # replay log, kept marks only: adds sorted by when they are shown, removes sorted by time
     add_t: np.ndarray
     add_idx: np.ndarray
     add_piece: np.ndarray
@@ -331,11 +335,31 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     held_t = np.full((H, W), np.inf, np.float32)
     held_box = None
     held_pad = int(np.ceil(p.thick_dilate * s / 2 + 2 * s)) + 2  # reach of the thick mask around thick ink
+    # Shown when thin ink would be: the same count as `on`, but in view of everything except the thick mask.
+    # When it reaches accept_n is when the pixel would have been accepted without waiting for thick ink to
+    # show it stays put; the replay shows the pixel from then (if it is accepted at all, which still waits).
+    # Never the teacher drawn earlier, nor writing before it was written: the count restarts when the contrast
+    # jumps at the pixel or within `jump_zone` of it (something else came or went: a stroke that replaces
+    # a thing of another width or darkness, even unseen behind the teacher, changes only some of its rows, as a
+    # blurred edge has every contrast), and is dropped for ink that was part of a thick thing that left without
+    # being accepted (a hand, wrist or sleeve SAM missed): what lay under it was not in view. Behind the teacher
+    # the count waits, like `on`, so ink the teacher walks over later keeps its time. Not caught: a thing SAM
+    # missed that is replaced by ink of exactly its width and darkness (seen or behind the teacher).
+    on_nt = np.zeros((H, W), np.uint8)
+    con_nt = np.zeros((H, W), np.int16)  # contrast when last counted
+    due_t = np.full((H, W), np.inf, np.float32)  # when on_nt reached accept_n (inf = not yet)
+    nt_box = None  # where on_nt is kept (elsewhere the thick mask held nothing back: `on` is the same count)
+    # Unaccepted too-thick things when last in view: their thick core, and all of their ink.
+    core_seen = np.zeros((H, W), bool)
+    body_seen = np.zeros((H, W), bool)
+    k_body = _ellipse(p.max_stroke * s + 2)  # from a thick core out to the edges of its ink
+    k_jump = _ellipse(p.jump_zone * s)  # a contrast jump restarts the count across a stroke's width
 
     pieces: dict[int, Piece] = {}
     next_piece = 1
     add_t, add_idx, add_piece, add_col = [], [], [], []
-    add_seen = []  # per add: when it would have been accepted without the thick mask's wait
+    add_seen = []  # per add: when it was in view without the thick mask's wait (for "written while hidden")
+    add_show = []  # per add: when the replay shows it (see on_nt)
     add_drift = []  # True for ink re-accepted next to old ink (camera drift), not new writing
     n_adds = 0
     rem_add, rem_t = [], []  # removal events: which add, when the clean run began
@@ -420,6 +444,13 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
         dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 3)
         core = dist > (p.max_stroke * s) / 2
         core_box = _rect(core)
+        if core_box:
+            x0, y0, x1, y1 = core_box
+            r = k_body.shape[0] // 2 + 1
+            bs = np.s_[max(0, y0 - r):y1 + r, max(0, x0 - r):x1 + r]
+            seen = visible_nt[bs] & ~accepted[bs]
+            core_seen[bs] |= core[bs] & seen
+            body_seen[bs] |= (cv2.dilate(core[bs].view(np.uint8), k_body) > 0) & ink[bs] & seen
         if p.stay_n > 0 and (core_box or stay_box):
             # Writing stays put; the teacher moves. A thick pixel in view that was thick when last
             # in view, with the same grey, extends its run; one that just turned thick starts at 1.
@@ -486,6 +517,51 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             if hold.any():
                 held_t[sl][hold] = t
                 held_box = _union(held_box, _rect(hold, x0, y0))
+        # The count without the thick mask's wait (see on_nt), kept around thick ink and wherever it still
+        # counts or a thick thing was seen.
+        reach = None
+        if core_box:
+            x0, y0, x1, y1 = core_box
+            reach = (max(0, x0 - held_pad), max(0, y0 - held_pad), min(W, x1 + held_pad), min(H, y1 + held_pad))
+        box = _union(reach, nt_box)
+        if box:
+            x0, y0, x1, y1 = box
+            sl = np.s_[y0:y1, x0:x1]
+            c_on, c_con, c_due = on_nt[sl], con_nt[sl], due_t[sl]
+            if box != nt_box:
+                # Pixels new to the box start from `on`: so far they were counted in full view.
+                fresh = np.ones(c_on.shape, bool)
+                if nt_box:
+                    a0, b0, a1, b1 = nt_box
+                    fresh[max(b0, y0) - y0:min(b1, y1) - y0, max(a0, x0) - x0:min(a1, x1) - x0] = False
+                np.copyto(c_on, np.where(accepted[sl], np.uint8(0), on[sl]), where=fresh)
+                np.copyto(c_con, contrast[sl], where=fresh)
+                c_due[fresh] = np.inf
+            vis, ink_b = visible_nt[sl], is_ink[sl]
+            vi = vis & ink_b & ~accepted[sl]
+            vc = vis & ~ink_b
+            cs, bs = core_seen[sl], body_seen[sl]
+            gone = vc & cs  # the middle of a thick thing is clean board now: it left
+            if gone.any():
+                # It left without being accepted: what lay under it was not in view, so drop the counts of the
+                # ink that was part of it when last seen.
+                n_lab, lab = cv2.connectedComponents(cs.view(np.uint8), connectivity=8)
+                hit = np.zeros(n_lab, np.uint8)
+                hit[lab[gone]] = 1
+                left = hit[lab]
+                drop = (cv2.dilate(left, k_body) > 0) & bs & (c_on > 0)
+                c_on[drop] = 0
+                c_due[drop] = np.inf
+                cs[vc] = False
+            bs[vc] = False
+            jump = vi & (c_on > 0) & (cv2.absdiff(contrast[sl], c_con) > p.stay_tol)
+            if jump.any():
+                jump = vi & (c_on > 0) & (cv2.dilate(jump.view(np.uint8), k_jump) > 0)
+            c_on[:] =np.where(vi, np.where(jump, np.uint8(1), cv2.add(c_on, 1)), np.where(vc, np.uint8(0), c_on))
+            np.copyto(c_due, np.float32(np.inf), where=vc | jump)
+            np.copyto(c_due, np.float32(t), where=(c_on >= p.accept_n) & np.isinf(c_due))
+            np.copyto(c_con, contrast[sl], where=vi)
+            nt_box = _union(reach, _rect((c_on > 0) | cs | bs, x0, y0))
         on = np.where(upd_ink, cv2.add(on, 1), np.where(upd_clean, np.uint8(0), on))
         off = np.where(upd_clean, cv2.add(off, 1), np.where(upd_ink, np.uint8(0), off))
         np.copyto(last_clean, np.float32(t), where=upd_clean)
@@ -650,6 +726,11 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             piece_img[ys, xs] = pid.astype(np.float32)
             add_seen.append(np.minimum(np.float32(t), held_t[ys, xs] + np.float32((p.accept_n - 1) * dt)))
             held_t[ys, xs] = np.inf
+            add_show.append(np.minimum(np.float32(t), due_t[ys, xs]))
+            on_nt[ys, xs] = 0
+            due_t[ys, xs] = np.inf
+            core_seen[ys, xs] = False
+            body_seen[ys, xs] = False
             add_t.append(np.full(nnew, t, np.float32))
             add_idx.append((ys * W + xs).astype(np.int64))
             add_piece.append(pid)
@@ -665,7 +746,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
 
     add_piece = [np.array([resolve(int(v)) for v in a], np.int64) if alias else a for a in add_piece]
     res = _finish(p, geom, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift, rem_add, rem_t,
-                  accepted, last_board, t_settle, s1, add_seen)
+                  accepted, last_board, t_settle, s1, add_seen, add_show)
     res.stats.update(steps=steps, seconds=time.perf_counter() - t_wall, typical_brightness=typical,
                      clip_seconds=s1 - s0, speed=(s1 - s0) / max(1e-6, time.perf_counter() - t_wall))
     if progress is not None:
@@ -678,11 +759,12 @@ def _cat(lst, dtype, shape=(0,)):
 
 
 def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift,
-            rem_add, rem_t, accepted, last_board, t_settle, t_end, add_seen=None) -> BoardResult:
+            rem_add, rem_t, accepted, last_board, t_settle, t_end, add_seen=None, add_show=None) -> BoardResult:
     W, H = geom.width, geom.height
     s = W / 800.0
-    A_t = _cat(add_t, np.float64)
+    A_t = _cat(add_t, np.float64)  # accepted: lifetimes, removals, erases and drift go by this
     A_seen = _cat(add_seen, np.float64) if add_seen else A_t
+    A_show = _cat(add_show, np.float64) if add_show else A_t  # shown in the replay (<= A_t)
     A_idx = _cat(add_idx, np.int64)
     A_pid = _cat(add_piece, np.int64)
     A_drift = _cat(add_drift, bool)
@@ -732,7 +814,7 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
             continue
         # Timing from writing, not from ink re-accepted after the camera drifted.
         written = kept[~A_drift[kept]]
-        times = np.sort(A_t[written if written.size else kept])
+        times = np.sort(A_show[written if written.size else kept])
         t_seen = float(times[int(np.floor(p.seen_frac * (times.size - 1)))])
         t_shown = float(times[int(np.floor(0.95 * (times.size - 1)))])
         # Written while hidden is judged from when the ink was in view, before any wait for
@@ -776,7 +858,7 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
 
     keep = ~short & np.array([keep_piece.get(int(v), False) for v in A_pid], bool) if n else np.zeros(0, bool)
     kept_ids = np.nonzero(keep)[0]
-    o = np.argsort(A_t[kept_ids], kind="stable")
+    o = np.argsort(A_show[kept_ids], kind="stable")
     kept_ids = kept_ids[o]
     col = np.clip(A_col[kept_ids].astype(np.float32) * p.darken, 0, 255).astype(np.uint8)
     rmask = np.isfinite(removed_at[kept_ids])
@@ -793,7 +875,7 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
         width=W, height=H, mode=mode, corners=[[round(float(x), 1), round(float(y), 1)] for x, y in geom.corners_video],
         background=bg, t_start=float(t_settle), t_end=float(t_end), fps=p.fps,
         pieces=out_pieces, erases=out_erases,
-        add_t=A_t[kept_ids], add_idx=A_idx[kept_ids], add_piece=A_pid[kept_ids], add_color=col,
+        add_t=A_show[kept_ids], add_idx=A_idx[kept_ids], add_piece=A_pid[kept_ids], add_color=col,
         rem_t=removed_at[rem_ids], rem_idx=A_idx[rem_ids],
         add_drift=A_drift[kept_ids], add_gone=shown_removed[kept_ids],
         stats={"pieces_raw": len(pieces), "pieces_kept": len(out_pieces), "erases": len(out_erases)},
