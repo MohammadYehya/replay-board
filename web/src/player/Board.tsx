@@ -72,7 +72,7 @@ interface Candidate {
 
 /** The spotlight's veil: a soft dark veil on a light board (black would look like the lights went out), the
  *  slides' half-black on chalk. */
-const VEIL_LIGHT: Veil = { colour: '#0f172a', opacity: 0.3 };
+const VEIL_LIGHT: Veil = { colour: '#1b1810', opacity: 0.3 }; // warm ink, like the page
 const VEIL_DARK: Veil = { colour: '#000', opacity: 0.5 };
 
 /** When a piece starts showing on the board (an arrow keeps off what is there by then). */

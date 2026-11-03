@@ -3,8 +3,9 @@
 export function SparkIcon({ size = 14 }: { size?: number }) {
   return (
     <svg viewBox="0 0 16 16" width={size} height={size} aria-hidden className="spark-icon">
-      <path d="M8 1.2l1.7 4.6 4.6 1.7-4.6 1.7L8 13.8 6.3 9.2 1.7 7.5l4.6-1.7z" fill="currentColor" />
-      <path d="M13.2 11.2l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z" fill="currentColor" opacity="0.7" />
+      {/* a speech balloon with two lines in it: asking, and Muse Spark's answers (not a sparkle) */}
+      <path d="M2 2.5h12v8.5H7.2L4.2 14v-3H2z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="miter" />
+      <path d="M4.8 5.6h6.4M4.8 8h4" stroke="currentColor" strokeWidth="1.4" />
     </svg>
   );
 }

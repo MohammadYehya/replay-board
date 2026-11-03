@@ -46,12 +46,13 @@ export function drawable(a: SlideAnnotation | null | undefined): a is SlideAnnot
 export const toolOf = (tool: string | undefined): 'cursor' | 'laser' =>
   tool === 'laser' || tool === 'l' ? 'laser' : 'cursor';
 
-/** The teacher's hand on a filmed board: a calm teal, apart from the cursor's amber and the laser's red. Deeper on a
- *  light board (a brighter teal fades into a grey-white board), brighter on dark chalk. */
-export const HAND_ON_LIGHT = '#0d9488';
-export const HAND_ON_DARK = '#2dd4bf';
+/** The teacher's hand on a filmed board: the player's chalk yellow, the colour of "now" (and apart from the cursor's
+ *  amber and the laser's red). Deep ochre on a light board (chalk yellow fades into a grey-white board), chalk on a
+ *  dark one. */
+export const HAND_ON_LIGHT = '#8a6a12';
+export const HAND_ON_DARK = '#e8c25a';
 
-/** Warm amber for the mouse cursor, red for a laser pointer, teal for the teacher's hand (light: the background). */
+/** Warm amber for the mouse cursor, red for a laser pointer, chalk for the teacher's hand (light: the background). */
 export const toolColour = (tool: string | undefined, light = true) =>
   tool === 'hand' ? (light ? HAND_ON_LIGHT : HAND_ON_DARK) : toolOf(tool) === 'laser' ? '#ef4444' : '#f59e0b';
 

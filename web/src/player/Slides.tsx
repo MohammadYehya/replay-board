@@ -296,8 +296,8 @@ export const Slides = memo(
     const tipText = tipHtml && sameReading(rawText, tipLatex) ? '' : rawText || (tipHtml ? '' : tipLatex);
     const spokenHover = !!hover?.spoken?.some((s) => Number.isFinite(s.start));
     const tipTime = hover ? elementSeekTime(hover, state, clipStart) : 0;
-    const hoverStroke = light ? 'rgba(37, 99, 235, 0.85)' : 'rgba(122, 167, 255, 0.9)';
-    const hoverFill = light ? 'rgba(76, 141, 255, 0.10)' : 'rgba(122, 167, 255, 0.16)';
+    const hoverStroke = light ? 'rgba(27, 24, 16, 0.78)' : 'rgba(237, 231, 216, 0.85)';
+    const hoverFill = light ? 'rgba(27, 24, 16, 0.06)' : 'rgba(237, 231, 216, 0.09)';
 
     return (
       <div

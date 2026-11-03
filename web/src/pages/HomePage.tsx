@@ -199,7 +199,9 @@ export function HomePage() {
       </header>
       <main className="narrow home">
         <section className="hero">
-          <h1>Rewatch the lecture. See the whole board.</h1>
+          <h1>
+            Rewatch the lecture. <em>See the whole board.</em>
+          </h1>
           <p>
             Upload a recorded lecture. Replay Board plays the original video untouched, next to a clean board that
             redraws every stroke in time with the voice, including writing the teacher was standing in front of.
@@ -220,7 +222,7 @@ export function HomePage() {
           {!file ? (
             <button className="drop-target" onClick={() => inputRef.current?.click()}>
               <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden>
-                <rect x="5" y="9" width="38" height="26" rx="4" fill="none" stroke="currentColor" strokeWidth="2.5" />
+                <rect x="5" y="9" width="38" height="26" fill="none" stroke="currentColor" strokeWidth="2" />
                 <path d="M24 30V16m0 0l-6 6m6-6l6 6" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
                 <path d="M17 41h14" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
               </svg>
@@ -231,7 +233,7 @@ export function HomePage() {
             <div className="chosen">
               <div className="file-row">
                 <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
-                  <rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+                  <rect x="3" y="5" width="18" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" />
                   <path d="M10 9.5v5l4.5-2.5z" fill="var(--accent)" />
                 </svg>
                 <div className="file-meta">

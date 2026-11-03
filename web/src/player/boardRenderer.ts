@@ -295,7 +295,7 @@ export class BoardRenderer {
     const hover = this.hoverId != null ? this.byId.get(this.hoverId) : undefined;
     if (hover && hover.p > 0 && hover.a > 0) {
       const [x, y, w, h] = hover.piece.box;
-      ctx.fillStyle = this.light ? 'rgba(76, 141, 255, 0.13)' : 'rgba(122, 167, 255, 0.16)';
+      ctx.fillStyle = this.light ? 'rgba(27, 24, 16, 0.07)' : 'rgba(237, 231, 216, 0.09)';
       ctx.beginPath();
       ctx.roundRect(x - 5, y - 4, w + 10, h + 8, 6);
       ctx.fill();
@@ -315,7 +315,7 @@ export class BoardRenderer {
 
     if (hover && hover.p > 0 && hover.a > 0) {
       const [x, y, w, h] = hover.piece.box;
-      ctx.strokeStyle = this.light ? 'rgba(37, 99, 235, 0.85)' : 'rgba(122, 167, 255, 0.9)';
+      ctx.strokeStyle = this.light ? 'rgba(27, 24, 16, 0.78)' : 'rgba(237, 231, 216, 0.85)';
       ctx.lineWidth = 1.5 / this.cssScale;
       ctx.beginPath();
       ctx.roundRect(x - 5, y - 4, w + 10, h + 8, 6);

@@ -10,6 +10,9 @@
     "test": "node --test tests/timing.test.ts tests/texLayout.test.ts tests/slideTiming.test.ts tests/expr.test.ts tests/scene3dState.test.ts tests/scene3dStage.test.ts tests/labelLayout.test.ts tests/keys.test.ts tests/angle3d.test.ts tests/sceneText.test.ts tests/popout.test.ts tests/boardAnnotations.test.ts tests/askMarkdown.test.ts tests/askSse.test.ts tests/askTray.test.ts tests/askSelection.test.ts tests/askItems.test.ts tests/route.test.ts tests/slides.test.ts"
   },
   "dependencies": {
+    "@fontsource-variable/newsreader": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
     "@resvg/resvg-js": "2.6.2",
     "katex": "^0.16.22",
     "mathjax-full": "3.2.2",

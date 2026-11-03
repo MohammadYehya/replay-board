@@ -754,17 +754,11 @@ export function Player({
 
 export function Logo() {
   return (
-    <svg className="logo" viewBox="0 0 32 32" width="22" height="22" aria-hidden>
-      <rect x="2" y="5" width="28" height="19" rx="3.5" fill="none" stroke="currentColor" strokeWidth="2" />
-      <path
-        d="M7 18c3-6 5-6 7-2s4 4 7-4"
-        fill="none"
-        stroke="var(--accent)"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path d="M12 28h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    <svg className="logo" viewBox="0 0 32 32" width="24" height="24" aria-hidden>
+      {/* a board with two lines of chalk on it, and its ledge */}
+      <rect x="2.5" y="5.5" width="27" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M7 11.5h11M7 16.5h6.5" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+      <path d="M1 27h30" stroke="currentColor" strokeWidth="1.7" />
     </svg>
   );
 }

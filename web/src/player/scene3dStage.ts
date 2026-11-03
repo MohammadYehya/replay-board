@@ -66,9 +66,9 @@ export interface Stage3D {
 
 // ---------------------------------------------------------------- sizes (world units; the scene is about L wide)
 const L = 2.4;
-const BG = '#101319';
-const AXIS = '#aab4c6';
-const GRID = '#8d98ad';
+const BG = '#161512';
+const AXIS = '#b3ab9a';
+const GRID = '#7f786b';
 const TUBE = 0.018;
 const ROD = 0.017;
 const HEAD_LEN = 0.11;
@@ -1922,7 +1922,7 @@ function groundTexture(): CanvasTexture {
   g.fillRect(0, 0, n, n);
   const grid = make();
   const k = grid.getContext('2d')!;
-  k.strokeStyle = 'rgba(170, 182, 205, 0.22)';
+  k.strokeStyle = 'rgba(205, 195, 175, 0.22)';
   k.lineWidth = 1.2;
   k.beginPath();
   for (let i = 1; i < 14; i++) {

@@ -53,9 +53,6 @@ type Load =
   | { status: 'old' }
   | { status: 'ready'; scene: Scene3D };
 
-const cssVar = (name: string, fallback: string) =>
-  getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
-
 const OLD_SERVER =
   'This server still makes the old kind of 3D view: restart `python -m app.server` with the latest code.';
 
@@ -193,7 +190,7 @@ export default function View3D(props: Props) {
     let stage: Stage3D;
     try {
       stage = mountScene(host, scene, {
-        accent: cssVar('--accent', '#7aa7ff'),
+        accent: '#7aa7ff', // the model's first colour (black or grey ink), not the page's "now" yellow
         reducedMotion: reduced,
         // What covers the stage where it is laid over it (a wide view): the caption at the bottom, the values at the
         // top, the open sliders at the left. On a narrow view they are above and under the canvas and cover nothing.
