@@ -204,3 +204,6 @@ data/           videos, job folders and the model cache (never committed)
 ## Privacy and video rules
 The original video is never altered: no outlining, blurring or removing the teacher. Videos and anything
 made from them stay in `data/`, which is not committed.
+
+## License
+MIT, see [LICENSE](LICENSE).
