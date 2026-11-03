@@ -2,7 +2,10 @@
 // bisector. Every box and arc is made up for the test.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { arcLabelAt, circumcentre, placeLabels, type LabelBox } from '../src/player/labelLayout.ts';
+import {
+  arcLabelAt, besideCenter, circumcentre, glide, KEEP_SLACK, originCenter, placeLabels, tickCenter, tickSide, TICK_GAP,
+  type Glide, type LabelBox,
+} from '../src/player/labelLayout.ts';
 
 const box = (x: number, y: number, w = 40, h = 18, movable = true): LabelBox => ({ x, y, w, h, movable });
 const STAGE = { width: 600, height: 400 };
@@ -68,6 +71,53 @@ test('last frame\'s nudge is kept while its spot is free, so labels do not hop f
   assert.deepEqual(placeLabels(boxes, { ...STAGE, prev })[1], { dx: 0, dy: -24, dim: false });
   // when it is no longer needed, the label goes back to its own place
   assert.deepEqual(placeLabels([box(100, 100), box(300, 104)], { ...STAGE, prev })[1], { dx: 0, dy: 0, dim: false });
+});
+
+test('a kept spot taken by a hair moves the label a hair, not to the spot nearest home and back (test2 #4 step 3)', () => {
+  // The cell coming to rest, as the view measured it: "b" creeps right while beta's name, kept just right of it,
+  // creeps left. Searching from home sent beta 31 px up once they touched; the layout at rest put it back.
+  const avoid = [{ x: 313, y: 214, w: 10, h: 22 }, { x: 313, y: 214, w: 22, h: 29 }, { x: 313, y: 223, w: 45, h: 22 }];
+  const opts = { width: 700, height: 390, avoid };
+  const at = (k: number) => [
+    box(348.7, 224.8, 20, 22), // a
+    box(346.4 + 0.02 * k, 188.8, 21, 22), // b
+    box(311.7, 184.9, 44, 22), // alpha
+    box(338.0 - 0.01 * k, 196, 43, 22), // beta
+    box(373.9, 216.3, 43, 22), // gamma
+    box(311.1, 138.4, 20, 22), // c
+  ];
+  let prev = placeLabels(at(0), opts).map((q, i) =>
+    i === 2 ? { dx: -15, dy: 0, dim: false } : i === 3 ? { dx: 346.4 + 21 + 2 - 338, dy: 0, dim: false } : i === 4 ? { dx: 0, dy: 4, dim: false } : q,
+  );
+  let worst = 0;
+  for (let k = 1; k <= 20; k++) {
+    const now = placeLabels(at(k), { ...opts, prev });
+    assert.equal(overlaps(at(k), now), 0);
+    worst = Math.max(worst, Math.hypot(now[3].dx - prev[3].dx, now[3].dy - prev[3].dy));
+    prev = now;
+  }
+  assert.ok(worst < 0.5, `beta moved ${worst.toFixed(1)} px in one frame`);
+  // and where it ends is where the layout at rest puts it: nothing left to slide
+  const rest = placeLabels(at(20), opts)[3];
+  assert.ok(Math.hypot(rest.dx - prev[3].dx, rest.dy - prev[3].dy) < 0.5, JSON.stringify([rest, prev[3]]));
+});
+
+test('a label keeps near its last spot only while that is about as near its own place: it never drifts far off', () => {
+  // the saddle turning (step 3): "z = x²" is laid out first; the axis name "y" sits on it and slides left under it.
+  // Kept beside "z = x²", it followed it 39 px right while a spot 9 px above its place was free, then slid back.
+  const z = box(386.8, 155.8, 43, 22);
+  const y = (k: number) => box(412.3 - 0.95 * k, 150.4 - 0.25 * k, 8, 17);
+  let prev = [undefined, { dx: 386.8 + 43 + 2 - 412.3, dy: 0, dim: false }];
+  for (let k = 0; k <= 20; k++) {
+    const now = placeLabels([z, y(k)], { ...STAGE, prev })[1];
+    const fresh = placeLabels([z, y(k)], STAGE)[1];
+    const d = Math.hypot(now.dx, now.dy);
+    assert.ok(!now.dim && d <= Math.hypot(fresh.dx, fresh.dy) + KEEP_SLACK + 1e-9, `frame ${k}: ${JSON.stringify(now)} vs ${JSON.stringify(fresh)}`);
+    prev = [undefined, now];
+  }
+  // at the end it is a few pixels from where the layout at rest puts it (a short slide, not 39 px back)
+  const rest = placeLabels([z, y(20)], STAGE)[1];
+  assert.ok(Math.hypot(prev[1]!.dx - rest.dx, prev[1]!.dy - rest.dy) <= KEEP_SLACK, JSON.stringify([prev[1], rest]));
 });
 
 test('many labels stay quick to lay out (it runs on every frame that is drawn)', () => {
@@ -139,4 +189,123 @@ test("a label that has to move never lands on an angle's mark (test2 #7: beta's 
   const walls = [{ x: 0, y: 0, w: 600, h: 99 }, { x: 0, y: 123, w: 600, h: 277 }, { x: 0, y: 0, w: 99, h: 400 }, { x: 151, y: 0, w: 449, h: 400 }];
   const [, e] = placeLabels(boxes, { ...STAGE, avoid: walls });
   assert.deepEqual(e, { dx: 0, dy: 0, dim: true });
+});
+
+test('a label slides to its new place, starting and ending gently, never past it, and ends exactly on it (no hop)', () => {
+  // test2 #4: placed afresh once the drawing was still, a label hopped up to 32 px in one frame
+  const to = { dx: 0, dy: -32 };
+  for (const fps of [60, 30]) {
+    let at: Glide = { dx: 0, dy: 0, vx: 0, vy: 0 };
+    let frames = 0;
+    let biggest = 0;
+    let first = 0;
+    for (; frames < 120; frames++) {
+      const g = glide(at, to, 1 / fps);
+      const step = Math.hypot(g.dx - at.dx, g.dy - at.dy);
+      if (!frames) first = step;
+      biggest = Math.max(biggest, step);
+      assert.ok(g.dy >= to.dy - 1e-9 && g.dy <= 0, 'never past its place');
+      at = g;
+      if (g.done) break;
+    }
+    assert.deepEqual([at.dx, at.dy, at.vx, at.vy], [0, -32, 0, 0], 'exactly on its place at the end, still');
+    assert.ok(frames / fps <= 0.4, `on its place within 0.4 s (${frames} frames at ${fps} fps)`);
+    assert.ok(first < 32 * 0.15, `a gentle start (${first.toFixed(1)} px in the first frame at ${fps} fps)`);
+    assert.ok(biggest < 32 * 0.25, `no frame moves it more than a quarter of the way (${biggest.toFixed(1)} px)`);
+  }
+  // a label not on screen last frame, or no time to slide (reduced motion): straight to its place
+  assert.deepEqual(glide(undefined, { dx: 5, dy: 6 }, 1 / 60), { dx: 5, dy: 6, vx: 0, vy: 0, done: true });
+  assert.deepEqual(glide({ dx: 0, dy: 0, vx: 0, vy: 0 }, { dx: 5, dy: 6 }, 1 / 60, 0), { dx: 5, dy: 6, vx: 0, vy: 0, done: true });
+  // already there, or within half a pixel and still: done
+  assert.deepEqual(glide({ dx: 5, dy: 6.3, vx: 0, vy: 0 }, { dx: 5, dy: 6 }, 1 / 60), { dx: 5, dy: 6, vx: 0, vy: 0, done: true });
+  // a long frame (a busy tab) covers more of the way, never past it
+  const long = glide({ dx: 0, dy: 0, vx: 0, vy: 0 }, { dx: 100, dy: 0 }, 0.1);
+  assert.ok(long.dx > 30 && long.dx < 100, `${long.dx}`);
+  // the place changes while it moves: it turns smoothly towards the new one and gets there
+  let at: Glide = { dx: 0, dy: 0, vx: 0, vy: 0 };
+  for (let i = 0; i < 6; i++) at = glide(at, { dx: 40, dy: 0 }, 1 / 60);
+  for (let i = 0; i < 60 && !glide(at, { dx: -10, dy: 0 }, 1 / 60).done; i++) at = glide(at, { dx: -10, dy: 0 }, 1 / 60);
+  assert.deepEqual(glide(at, { dx: -10, dy: 0 }, 1 / 60).dx, -10);
+});
+
+test("an axis' numbers sit beside it as seen, below one across the screen and left of one up it", () => {
+  const w = 14;
+  const h = 12;
+  // where the label's box is, from its centre (CSS2DObject.center) with the anchor (the tick) at 0, 0
+  const boxAt = ([cx, cy]: [number, number]) => ({ x0: -cx * w, y0: -cy * h, x1: (1 - cx) * w, y1: (1 - cy) * h });
+  // x across the screen: below it, centred, its top TICK_GAP under the axis
+  const x = boxAt(tickCenter(300, 0, w, h));
+  assert.ok(Math.abs(x.y0 - TICK_GAP) < 1e-9 && Math.abs(x.x0 + x.x1) < 1e-9);
+  // seen from behind (x pointing left): still below
+  assert.ok(Math.abs(boxAt(tickCenter(-300, 0, w, h)).y0 - TICK_GAP) < 1e-9);
+  // y up the screen (a graph seen from the top): left of it, its right edge TICK_GAP off the axis, never across it
+  // (test-full #3: "-2", "-4" sat on the y axis, under the dashed asymptote x = 0 drawn along it)
+  const y = boxAt(tickCenter(0, -300, w, h));
+  assert.ok(Math.abs(y.x1 + TICK_GAP) < 1e-9 && Math.abs(y.y0 + y.y1) < 1e-9);
+  // and down the screen: left too
+  assert.ok(Math.abs(boxAt(tickCenter(0, 300, w, h)).x1 + TICK_GAP) < 1e-9);
+  // any slant: the box keeps TICK_GAP off the axis line on one side of it
+  for (let deg = 0; deg < 360; deg += 5) {
+    const d = [Math.cos((deg * Math.PI) / 180), Math.sin((deg * Math.PI) / 180)];
+    const b = boxAt(tickCenter(d[0] * 200, d[1] * 200, w, h));
+    const corners = [[b.x0, b.y0], [b.x1, b.y0], [b.x0, b.y1], [b.x1, b.y1]];
+    const side = corners.map(([px, py]) => d[0] * py - d[1] * px); // signed distance from the axis line
+    assert.ok(side.every((s) => s >= TICK_GAP - 1e-6) || side.every((s) => s <= -TICK_GAP + 1e-6), `${deg} degrees: ${side}`);
+  }
+  // an axis seen end on (no direction on screen): centred, as before
+  assert.deepEqual(tickCenter(0, 0, w, h), [0.5, 0.5]);
+  assert.equal(tickSide(0, 0), null);
+  // the origin's number (kept on x) goes out between x's side and y's, clear of both axes (gest-test #10: the "0"
+  // sat under the asymptote x = 0 running down the y axis past it)
+  const xs = tickSide(300, 0)!;
+  const ys = tickSide(0, -300)!;
+  const o = boxAt(besideCenter(xs[0] + ys[0], xs[1] + ys[1], w, h));
+  assert.ok(o.x1 <= -3 && o.y0 >= 3, `${JSON.stringify(o)}`); // left of the y axis and under the x axis
+});
+
+/** The box (relative to the anchor) a label w x h takes with the renderer's centre c, and how near it comes to rays
+ *  from the anchor (each 600 px long), worked out by stepping along them. */
+function originBox(c: [number, number], w: number, h: number) {
+  const x = -c[0] * w;
+  const y = -c[1] * h;
+  return { x, y, w, h };
+}
+function nearestRay(b: { x: number; y: number; w: number; h: number }, rays: [number, number][]) {
+  let best = Infinity;
+  for (const [rx, ry] of rays) {
+    const n = Math.hypot(rx, ry);
+    for (let s = 0; s <= 600; s += 0.25) {
+      const px = (rx / n) * s;
+      const py = (ry / n) * s;
+      const dx = Math.max(b.x - px, 0, px - (b.x + b.w));
+      const dy = Math.max(b.y - py, 0, py - (b.y + b.h));
+      best = Math.min(best, Math.hypot(dx, dy));
+    }
+  }
+  return best;
+}
+
+test("the origin's number sits in a gap between all the axes as seen, clear of each, below-left when it can", () => {
+  const w = 9;
+  const h = 13;
+  // graph paper: x across, y up, both running on past the origin: below-left of the crossing, 6 px off each axis
+  const paper: [number, number][] = [[200, 0], [-200, 0], [0, -150], [0, 150]];
+  const b = originBox(originCenter(paper, w, h), w, h);
+  assert.ok(b.x + b.w <= -TICK_GAP + 1e-6 && b.y >= TICK_GAP - 1e-6, JSON.stringify(b));
+  assert.ok(nearestRay(b, paper) >= TICK_GAP - 0.05);
+  assert.ok(Math.hypot(b.x + b.w, b.y) < TICK_GAP * Math.SQRT2 + 3, 'near the crossing');
+  // x and y from the origin only (a first quadrant): below-left still, out of the way of both
+  const quad: [number, number][] = [[200, 0], [0, -150]];
+  const q = originBox(originCenter(quad, w, h), w, h);
+  assert.ok(q.x + q.w / 2 < 0 && q.y + q.h / 2 > 0 && nearestRay(q, quad) >= TICK_GAP - 0.05, JSON.stringify(q));
+  // in space, seen from the iso corner: x to the lower left, y to the lower right, z up, each both ways
+  const iso: [number, number][] = [[-160, 100], [160, -100], [180, 80], [-180, -80], [0, -170], [0, 170]];
+  const i = originBox(originCenter(iso, w, h), w, h);
+  assert.ok(nearestRay(i, iso) >= TICK_GAP - 0.05, JSON.stringify(i));
+  // the saddle from the front: x across, z up, y running almost straight away (a short stub)
+  const front: [number, number][] = [[200, 0], [-200, 0], [0, -160], [0, 160], [6, 3], [-6, -3]];
+  const f = originBox(originCenter(front, w, h), w, h);
+  assert.ok(nearestRay(f, front) >= TICK_GAP - 0.05, JSON.stringify(f));
+  // nothing to keep clear of: below-left, as before
+  assert.deepEqual(originCenter([], w, h), besideCenter(-Math.SQRT1_2, Math.SQRT1_2, w, h));
 });

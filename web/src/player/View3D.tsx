@@ -12,8 +12,8 @@ import type { Piece, Scene3D, Scene3DParam } from '../types';
 import { fieldTakesKey } from './keys';
 import { mountScene, type Insets, type Stage3D } from './scene3dStage';
 import {
-  beforeLine, chipCaption, drawingFrom, dwell, playFrom, sceneLoader, sceneState, seekTimeFor, stepHeading,
-  type SceneState,
+  beforeLine, chipCaption, drawingFrom, drawnWith, dwell, playFrom, sceneLoader, sceneState, seekTimeFor, shapeGuard,
+  stepHeading, tryValue, type SceneState, type ShapeGuard,
 } from './scene3dState';
 import { displayName, formatValue, sliderStep, viewTitle } from './sceneText';
 import { formatTime } from './timing';
@@ -102,6 +102,11 @@ export default function View3D(props: Props) {
   playingRef.current = playing;
   /** The viewer's own values ("Try it"), read by the stage on every frame. */
   const overridesRef = useRef<Record<string, number>>({});
+  /** The scene's check that its angles make a shape that exists (null: nothing to check), and every value as last
+   *  drawn with the viewer's values it was drawn with: a slider stops where the shape would stop existing with the
+   *  other values as they are. */
+  const guardRef = useRef<ShapeGuard | null>(null);
+  const drawnRef = useRef<{ params: Record<string, number>; own: Record<string, number> }>({ params: {}, own: {} });
   const valueEls = useRef(new Map<string, ValueEls>()).current;
   /** What the values show now (name -> "text|changing|mine"), so a frame touches only what changed. */
   const painted = useRef(new Map<string, string>()).current;
@@ -165,8 +170,9 @@ export default function View3D(props: Props) {
         if (s) {
           // the slider follows the lecture until the viewer takes it (never while they hold it). It follows it with
           // the focus too: [ ] work from a slider and give the values back to the lecture (its thumb stayed where
-          // the viewer left it, under the lecture's value), and the arrow keys then start from the value shown.
-          if (!own && heldRef.current !== p.name) s.value = String(v);
+          // the viewer left it, under the lecture's value), and the arrow keys then start from the value shown. The
+          // viewer's own value follows too when the lecture moves another angle so far that theirs gives way.
+          if (heldRef.current !== p.name && (!own || Math.abs(Number(s.value) - v) > 1e-9)) s.value = String(v);
           s.setAttribute('aria-valuetext', text);
         }
       }
@@ -185,7 +191,11 @@ export default function View3D(props: Props) {
     overridesRef.current = {};
     setMine(false);
     painted.clear();
+    guardRef.current = null;
+    drawnRef.current = { params: {}, own: {} };
     if (!scene || !host || !scene.objects.length) return;
+    const guard = shapeGuard(scene);
+    guardRef.current = guard;
     vstep.current = { index: -1, since: performance.now() };
     let stage: Stage3D;
     try {
@@ -207,10 +217,11 @@ export default function View3D(props: Props) {
         },
         insetElements: () => [captionRef.current, valuesRef.current],
         frame: (now) => {
-          const opts = { reducedMotion: reduced, overrides: overridesRef.current };
+          const opts = { reducedMotion: reduced, overrides: overridesRef.current, guard };
           const st = scene.synced
             ? sceneState(scene, { clock: timeRef.current ?? 0 }, opts)
             : sceneState(scene, { step: vstep.current.index, elapsed: (now - vstep.current.since) / 1000 }, opts);
+          drawnRef.current = { params: st.params, own: opts.overrides };
           if (st.index !== indexRef.current) {
             indexRef.current = st.index;
             setIndex(st.index);
@@ -261,12 +272,26 @@ export default function View3D(props: Props) {
     overridesRef.current = {};
     setMine(false);
   }, []);
-  /** A slider moved: that value is the viewer's from now on (on top of the lecture), until they go back. */
-  const override = useCallback((p: Scene3DParam, value: number) => {
-    if (!Number.isFinite(value)) return;
-    overridesRef.current = { ...overridesRef.current, [p.name]: value };
-    setMine(true);
-  }, []);
+  /** A slider moved: that value is the viewer's from now on (on top of the lecture), until they go back. An angle
+   *  that would make a shape that cannot exist with the other values as they are stops at the last one that can, on
+   *  the slider's steps, and so does its slider (test2 #7: with gamma at 120, alpha goes as far as the cell lets it);
+   *  the viewer's other angles stay where they are shown (tryValue). */
+  const override = useCallback(
+    (p: Scene3DParam, value: number) => {
+      if (!Number.isFinite(value)) return;
+      const grid = { min: Math.min(p.min, p.max), step: sliderStep(p.min, p.max, p.unit) };
+      const own = overridesRef.current;
+      const next = tryValue(guardRef.current, own, drawnWith(drawnRef.current, own), p.name, value, grid);
+      const v = next[p.name];
+      if (v !== value) {
+        const s = valueEls.get(p.name)?.slider;
+        if (s) s.value = String(v);
+      }
+      overridesRef.current = next;
+      setMine(true);
+    },
+    [valueEls],
+  );
 
   const n = scene?.steps.length ?? 0;
   /** Go to step i (-1: before the first). Synced: the video seeks there and keeps playing or stays paused (one

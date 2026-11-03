@@ -15,7 +15,8 @@ import type {
   CameraPreset, Scene3D, Scene3DAxis, Scene3DDef, Scene3DObject, Scene3DObjectType, Scene3DParam, Scene3DStep, Vec3,
   Vec3E,
 } from '../types';
-import { GRAMMAR_NAMES, tryCompileVars } from './expr.ts';
+import { measureAngle } from './angle3d.ts';
+import { GRAMMAR_NAMES, tryCompileVars, type VarsFn } from './expr.ts';
 import { formatTime } from './timing.ts';
 
 export const OBJECT_TYPES: readonly Scene3DObjectType[] = [
@@ -381,6 +382,9 @@ export interface StateOptions {
   /** "Try it": values the viewer set with the sliders, on top of the lecture's (each kept inside its parameter's
    *  range). A parameter in here does not move with the steps until the overrides end. */
   overrides?: Readonly<Record<string, number>>;
+  /** The scene's check that its angles make a shape that exists (shapeGuard): the viewer's values are applied only
+   *  as far as they do with the lecture's values of the moment (fitToShape). */
+  guard?: ShapeGuard | null;
 }
 
 export type Camera = Exclude<CameraPreset, 'keep'>;
@@ -496,24 +500,30 @@ export function sceneState(scene: Scene3D, at: Moment, opts: StateOptions = {}):
   }
 
   let moving = false;
-  const params: Record<string, number> = {};
+  let params: Record<string, number> = {};
   const changing: string[] = [];
   const overridden: string[] = [];
   const own = opts.overrides ?? {};
+  const lecture: Record<string, number> = {};
+  const mineNow: Record<string, number> = {};
   for (const p of scene.params) {
     const seg = pseg.get(p.name)!;
+    lecture[p.name] = segAt(seg, clock);
     const mine = Object.prototype.hasOwnProperty.call(own, p.name) ? own[p.name] : undefined;
     if (typeof mine === 'number' && Number.isFinite(mine)) {
-      params[p.name] = clamp(mine, Math.min(p.min, p.max), Math.max(p.min, p.max));
+      params[p.name] = mineNow[p.name] = clamp(mine, Math.min(p.min, p.max), Math.max(p.min, p.max));
       overridden.push(p.name);
       continue;
     }
-    params[p.name] = segAt(seg, clock);
+    params[p.name] = lecture[p.name];
     if (segMoving(seg, clock)) {
       moving = true;
       changing.push(p.name);
     }
   }
+  // The lecture may move an angle the viewer left alone into one that, with theirs, makes no shape (they set beta
+  // with gamma at 90, then the hexagon step takes gamma to 120): theirs then give way, as little as it takes.
+  if (opts.guard && overridden.length) params = fitToShape(opts.guard, lecture, mineNow);
   const vis: Record<string, number> = {};
   for (const [id, seg] of vseg) {
     vis[id] = segAt(seg, clock);
@@ -656,5 +666,206 @@ export function stepFraming(scene: Scene3D): { visible: string[]; from: Record<s
     vis = [...new Set([...vis, ...s.show])].filter((id) => !hide.has(id));
     out.push({ visible: vis, from, to: params });
   }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// "Try it": only shapes that can exist
+
+/** Degrees an angle may measure off the parameter it is named after (app/popout.py ANGLE_TOL). */
+export const ANGLE_TOL = 0.5;
+/** Three edges from one corner whose unit directions' determinant, squared, is under this lie nearly in one plane:
+ *  a flat plate, past which no cell has those angles (app/popout.py FLAT_MIN). */
+export const FLAT_MIN = 0.45;
+
+const GREEK: Record<string, string> = {
+  α: 'alpha', β: 'beta', γ: 'gamma', δ: 'delta', θ: 'theta', φ: 'phi', ψ: 'psi', ω: 'omega', λ: 'lambda', μ: 'mu',
+  σ: 'sigma', ρ: 'rho', τ: 'tau', ς: 'sigma', ϕ: 'phi', ϑ: 'theta', µ: 'mu',
+};
+const GREEK_NAMES = new Set(Object.values(GREEK));
+
+/** Lower case, Greek letters as their names, in words (app/popout.py plain_words). */
+export function plainWords(s: string): string[] {
+  return [...s.toLowerCase()].map((c) => (GREEK[c] ? ` ${GREEK[c]} ` : c)).join('').split(/\s+/).filter(Boolean);
+}
+
+/** The check a scene's angles get while a student moves them (`ok`), and the parameters it reads. */
+export interface ShapeGuard {
+  /** The angle parameters it guards ("deg" parameters an angle object is named after). */
+  params: string[];
+  /** Whether these values (every parameter; a missing one at its starting value) make a shape that exists. */
+  ok(values: Readonly<Record<string, number>>): boolean;
+}
+
+/**
+ * The server's check of a cell's angles (app/popout.py narrow_angle_ranges), for any values: every angle object
+ * named after an angle parameter ("beta" for param beta) measures that parameter's value within ANGLE_TOL, and three
+ * edges from one corner never lie nearly in one plane (FLAT_MIN). The server keeps each slider's range to what that
+ * angle can take with the others at the lecture's values; this keeps every mix of them a shape that exists. Null
+ * when no angle object is named after an angle parameter (nothing to guard).
+ */
+export function shapeGuard(scene: Scene3D): ShapeGuard | null {
+  const deg = scene.params.filter((p) => p.unit === 'deg');
+  if (!deg.length) return null;
+  const names = [...scene.params.map((p) => p.name), ...(scene.defs ?? []).map((d) => d.name)];
+  const defs = (scene.defs ?? []).map((d) => tryCompileVars(d.expr, names)?.fn ?? null);
+  if (defs.some((f) => !f)) return null;
+  const pairs: { pts: VarsFn[][]; radius: VarsFn | null; param: string; at: number }[] = [];
+  for (const o of scene.objects) {
+    if (o.type !== 'angle' || o.points.length !== 3) continue;
+    const greek = plainWords(o.label).filter((w) => GREEK_NAMES.has(w));
+    if (!greek.length) continue;
+    const p = deg.find((q) => {
+      const words = new Set([...q.name.split(/[\s_]+/).flatMap(plainWords), ...plainWords(q.label)]);
+      return greek.some((w) => words.has(w));
+    });
+    if (!p) continue;
+    const pts = o.points.map((pt) => pt.map((s) => tryCompileVars(s, names)?.fn ?? null));
+    const radius = o.size.length ? (tryCompileVars(o.size[0], names)?.fn ?? null) : null;
+    if (pts.some((pt) => pt.some((f) => !f)) || (o.size.length && !radius)) continue;
+    pairs.push({ pts: pts as VarsFn[][], radius, param: p.name, at: names.indexOf(p.name) });
+  }
+  if (!pairs.length) return null;
+  const start = scene.params.map((p) => p.value);
+  const np = scene.params.length;
+  const buf = new Float64Array(names.length);
+  const ok = (values: Readonly<Record<string, number>>): boolean => {
+    scene.params.forEach((p, i) => {
+      const v = values[p.name];
+      buf[i] = typeof v === 'number' && Number.isFinite(v) ? v : start[i];
+    });
+    defs.forEach((f, k) => (buf[np + k] = f!(buf)));
+    const corners = new Map<string, number[][]>();
+    for (const { pts, radius, param } of pairs) {
+      const [v, a, b] = pts.map((pt) => pt.map((f) => f(buf)) as Vec3);
+      const deg = measureAngle(v, a, b);
+      if (deg === null || !(Math.abs(deg - buf[names.indexOf(param)]) <= ANGLE_TOL)) return false;
+      if (radius) {
+        const r = radius(buf);
+        if (!(Number.isFinite(r) && r > 0)) return false;
+      }
+      const key = v.map((x) => Math.round(x * 1e6) / 1e6).join(',');
+      let dirs = corners.get(key);
+      if (!dirs) corners.set(key, (dirs = []));
+      for (const p of [a, b]) {
+        const d = [p[0] - v[0], p[1] - v[1], p[2] - v[2]];
+        const n = Math.hypot(d[0], d[1], d[2]);
+        if (!(n > 1e-9)) continue;
+        const u = d.map((x) => x / n);
+        if (dirs.every((w) => u[0] * w[0] + u[1] * w[1] + u[2] * w[2] < 1 - 1e-9)) dirs.push(u);
+      }
+    }
+    for (const d of corners.values()) {
+      if (d.length !== 3) continue;
+      const [a, b, c] = d;
+      const det = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+      if (det * det < FLAT_MIN) return false;
+    }
+    return true;
+  };
+  return { params: [...new Set(pairs.map((p) => p.param))], ok };
+}
+
+const SEARCH = 24; // halvings: under a millionth of the way
+
+/**
+ * The value parameter `name` takes when the viewer asks for `wanted` with every other value as it is now
+ * (`values`): `wanted` when it makes a shape that exists, else the farthest point towards it from the value now that
+ * does (the slider stops at the wall). When the values now make no shape already, `wanted` (nothing to keep).
+ */
+export function clampToShape(guard: ShapeGuard | null, values: Readonly<Record<string, number>>, name: string, wanted: number): number {
+  if (!guard) return wanted;
+  const at = (v: number) => guard.ok({ ...values, [name]: v });
+  const from = values[name];
+  if (at(wanted) || typeof from !== 'number' || !Number.isFinite(from) || !at(from)) return wanted;
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < SEARCH; i++) {
+    const m = (lo + hi) / 2;
+    if (at(from + (wanted - from) * m)) lo = m;
+    else hi = m;
+  }
+  return from + (wanted - from) * lo;
+}
+
+/**
+ * The viewer's values (`own`) on top of the lecture's of the moment, applied as far as they make a shape that
+ * exists. Only the angles the guard checks give way: each moves from the lecture's value towards the viewer's by
+ * the same share, the largest that does (all of it, mostly); anything else they set (a length) stays as they set it
+ * (test2 #7: c set to 6 read 5.42 once the hexagon step took gamma to 120). When the lecture's angles make no shape
+ * with the viewer's other values (mid-change), the viewer's are applied as they are.
+ */
+export function fitToShape(
+  guard: ShapeGuard | null,
+  lecture: Readonly<Record<string, number>>,
+  own: Readonly<Record<string, number>>,
+): Record<string, number> {
+  const all: Record<string, number> = { ...lecture, ...own };
+  if (!guard || guard.ok(all)) return all;
+  const angles = guard.params.filter((k) => k in own && k in lecture);
+  const base = { ...all };
+  for (const k of angles) base[k] = lecture[k];
+  if (!angles.length || !guard.ok(base)) return all;
+  const mix = (f: number) => {
+    const out = { ...base };
+    for (const k of angles) out[k] = lecture[k] + (own[k] - lecture[k]) * f;
+    return out;
+  };
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < SEARCH; i++) {
+    const m = (lo + hi) / 2;
+    if (guard.ok(mix(m))) lo = m;
+    else hi = m;
+  }
+  return mix(lo);
+}
+
+/**
+ * Every value as the view last drew it (`frame.params`), for tryValue, when that frame was drawn with the viewer's
+ * values as they are now (`frame.own` is `own`, the same object); else those values over it, as the viewer set them.
+ * Two sliders moved before the next frame (End on alpha, then on beta) put alpha back to the 90 last drawn.
+ */
+export function drawnWith(
+  frame: { params: Readonly<Record<string, number>>; own: Readonly<Record<string, number>> },
+  own: Readonly<Record<string, number>>,
+): Record<string, number> {
+  return frame.own === own ? { ...frame.params } : { ...frame.params, ...own };
+}
+
+/**
+ * The viewer's values once they move slider `name` towards `wanted` ("Try it"), from their values so far (`own`)
+ * and every value as last drawn (`drawn`):
+ * - their angles that gave way to the lecture (fitToShape) are kept where they are shown, so moving one slider never
+ *   moves another they did not touch (test2 #7: with alpha shown at 71.6, moving beta to 75 drew beta 77.9 and sent
+ *   alpha to 65.7, back towards the 60 they had set before the hexagon step), and the one moved starts from there;
+ * - the value stops where the shape would stop existing with the others as they are (clampToShape), on the slider's
+ *   own steps (`grid`: its min and step) on the side where the shape still exists, so the thumb, the value shown and
+ *   the label agree (it stopped at 85.1 with the thumb at 85).
+ */
+export function tryValue(
+  guard: ShapeGuard | null,
+  own: Readonly<Record<string, number>>,
+  drawn: Readonly<Record<string, number>>,
+  name: string,
+  wanted: number,
+  grid?: { min: number; step: number },
+): Record<string, number> {
+  const out: Record<string, number> = { ...own };
+  for (const k of guard?.params ?? []) {
+    const d = drawn[k];
+    if (k in own && typeof d === 'number' && Number.isFinite(d)) out[k] = d;
+  }
+  const now = { ...drawn, ...out };
+  let v = clampToShape(guard, now, name, wanted);
+  const from = now[name];
+  if (v !== wanted && guard && grid && grid.step > 0 && typeof from === 'number' && Number.isFinite(from)) {
+    const n = (v - grid.min) / grid.step;
+    const up = wanted > from;
+    const r = grid.min + (up ? Math.floor(n + 1e-9) : Math.ceil(n - 1e-9)) * grid.step;
+    const on = Math.round(r * 1e9) / 1e9;
+    if ((up ? on >= from && on <= v : on <= from && on >= v) && guard.ok({ ...now, [name]: on })) v = on;
+  }
+  out[name] = v;
   return out;
 }

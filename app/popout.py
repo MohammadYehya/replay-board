@@ -497,8 +497,16 @@ def first_talked(replay: dict, pieces: list[dict]) -> float | None:
     return min(max(clip0, min(starts)), clip1) if starts else None
 
 
+PART_PHOTOS = 3  # photos of a drawing's other figure pieces sent besides its main piece's, at most
+
+
 def drawing_images(job_dir: Path, replay: dict, anchor: dict, pieces: list[dict]) -> list[tuple[str, np.ndarray, str]]:
-    """(caption, image, format): the drawing's strokes on the board colour, and the sharp crop from the video."""
+    """(caption, image, format): the drawing's strokes on the board colour, the sharp crop from the video of its main
+    piece, and the crop of each other figure piece of it (at most PART_PHOTOS, in the order they were drawn). A
+    piece's photo is taken once that piece is written, with the writing around it faded, so the main piece's photo
+    leaves out what was drawn after it: synth3d-vector3d's is its x and y axes (#8) alone, taken before the vector
+    (#12) and its components (#13) were drawn, and the strokes image lost most of the vector's shaft, so no image
+    Muse Spark saw showed the vector."""
     out = []
     try:
         img = ask.compose_pieces(job_dir, replay, pieces, pad=12)
@@ -507,15 +515,28 @@ def drawing_images(job_dir: Path, replay: dict, anchor: dict, pieces: list[dict]
     if img is not None and img.size:
         out.append(("the drawing as captured from the board (its strokes on the board's colour)",
                     ask.fit_image(img, IMAGE_SIDE), ".png"))
-    crop = job_dir / "crops" / f"{anchor['id']:03d}.jpg"
-    if crop.is_file():
+
+    def photo(p: dict) -> np.ndarray | None:
+        crop = job_dir / "crops" / f"{p['id']:03d}.jpg"
+        if not crop.is_file():
+            return None
         try:
             img = imread(crop, cv2.IMREAD_COLOR)
         except Exception:
-            img = None
-        if img is not None and img.size:
-            out.append(("a photo of the drawing from the video (other writing is faded, and the teacher may stand "
-                        "in front of it)", ask.fit_image(img, IMAGE_SIDE), ".jpg"))
+            return None
+        return ask.fit_image(img, IMAGE_SIDE) if img is not None and img.size else None
+
+    main = photo(anchor)
+    if main is not None:
+        out.append(("a photo of the drawing from the video (other writing is faded, and the teacher may stand "
+                    "in front of it)", main, ".jpg"))
+    _, clip0, _ = ask._video(replay)
+    parts = sorted((q for q in pieces if q is not anchor and is_figure(q)), key=lambda q: (_span(q, clip0)[0], q["id"]))
+    for q in parts[:PART_PHOTOS]:
+        img = photo(q)
+        if img is not None:
+            out.append((f"a photo of one part of the drawing, {_text(q)[:80] or _kind(q)} (#{q['id']}), from the "
+                        f"video once it was drawn (the rest of the drawing is faded)", img, ".jpg"))
     return out
 
 
@@ -1341,6 +1362,7 @@ def clean_scene(raw: Any, *, piece: int, pieces: list[int], version: str, clip: 
                            "show": [], "hide": [], "highlight": [o["id"] for o in scene["objects"]], "set": [],
                            "camera": "iso"}]
         scene["synced"] = t is not None
+    label_edges(scene, notes)
     fit_ranges(scene, notes)
     narrow_angle_ranges(scene, notes)
     nest_shared_angles(scene, notes)
@@ -1499,14 +1521,120 @@ def nest_shared_angles(scene: dict, notes: list[str]) -> None:
                      f"shortest arm, so their marks do not lie on each other")
 
 
+EDGE_NEAR = 0.5  # a label naming a length is about an edge of that length within this share of the edge's length
+EDGE_TOL = 1e-4  # an edge "is" a length param when it measures its value within this share in every resting state
+
+
+def _seg_dist(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    """The distance from p to the segment ab."""
+    d = b - a
+    dd = float(np.dot(d, d))
+    t = 0.0 if dd <= 1e-18 else min(1.0, max(0.0, float(np.dot(p - a, d)) / dd))
+    return float(np.linalg.norm(p - (a + t * d)))
+
+
+def label_edges(scene: dict, notes: list[str]) -> None:
+    """A loose label that names a length param ("c" for param c) beside a side of a polygon that is that long in
+    every resting state (the start and after each step) becomes that edge: a segment between the side's two corners
+    (their expressions, so it follows the params), in the label's colour, with the label on it, under the label's id,
+    so a step that shows or points at the label shows or points at the edge. test2 #4's cell is six faces with a, b
+    and c as loose labels: "c" sat mid-face, 0.6 off its edge and 1.2 once the cell leaned, and every edge was the
+    faces' one blue; now a, b and c are the cell's edges, each in its own colour, with its name on it (as test2 #7's
+    are). The nearest such side, at the start, within EDGE_NEAR of its length; it runs from the corner nearer the
+    origin (where a cell's angles are). A side already drawn as a segment or vector of its own (the same two ends in
+    every resting state) is left to it, and a label nearer to a drawn segment or vector of that length than to the
+    side names that one (a regular hexagon's dashed radius "r", whose sides are r long too), so it stays a label."""
+    lengths = {p["name"]: p for p in scene["params"] if p["unit"] != "deg"}
+    loose = [o for o in scene["objects"] if o["type"] == "label" and o["label"].strip() in lengths]
+    polys = [o for o in scene["objects"] if o["type"] == "polygon"]
+    if not loose or not polys:
+        return
+    names = _names(scene)
+    envs = _envs(scene, param_states(scene["params"], scene["steps"], finals=True))
+    corners_at: dict[tuple, list[np.ndarray | None]] = {}
+
+    def at(pt: list[str]) -> list[np.ndarray | None]:
+        key = tuple(pt)
+        if key not in corners_at:
+            out = []
+            for env in envs:
+                try:
+                    v = np.array([float(np.asarray(sx.evaluate(sx.parse(e, names), env), dtype=float)) for e in pt])
+                    out.append(v if np.all(np.isfinite(v)) else None)
+                except (sx.ExprError, ValueError, TypeError, FloatingPointError, ZeroDivisionError):
+                    out.append(None)
+            corners_at[key] = out
+        return corners_at[key]
+
+    def same(u: list[np.ndarray | None], v: list[np.ndarray | None]) -> bool:  # one point in every resting state
+        return all(x is not None and y is not None
+                   and float(np.linalg.norm(x - y)) <= 1e-6 * max(1.0, float(np.linalg.norm(x))) for x, y in zip(u, v))
+
+    def measures(pa: list[np.ndarray | None], pb: list[np.ndarray | None], name: str) -> list[float] | None:
+        """Its length in each resting state when that is param `name` in every one, else None."""
+        lens = [None if u is None or v is None else float(np.linalg.norm(v - u)) for u, v in zip(pa, pb)]
+        if any(n is None or abs(n - env[name]) > EDGE_TOL * max(1.0, abs(env[name])) for n, env in zip(lens, envs)):
+            return None
+        return lens
+
+    drawn = [(at(o["points"][0]), at(o["points"][1])) for o in scene["objects"]
+             if o["type"] in ("segment", "vector") and len(o["points"]) == 2]
+    sides: dict[tuple, tuple[list[str], list[str]]] = {}
+    for o in polys:
+        pts = o["points"]
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i + 1) % len(pts)]
+            key = tuple(sorted((tuple(a), tuple(b))))
+            if key in sides:
+                continue
+            pa, pb = at(a), at(b)
+            if any((same(pa, qa) and same(pb, qb)) or (same(pa, qb) and same(pb, qa)) for qa, qb in drawn):
+                continue  # drawn already, as a segment or vector of its own
+            sides[key] = (a, b)
+
+    taken = set()
+    for o in loose:
+        name = o["label"].strip()
+        try:
+            spot = np.array([float(np.asarray(sx.evaluate(sx.parse(e, names), envs[0]), dtype=float))
+                             for e in o["points"][0]])
+        except (sx.ExprError, ValueError, TypeError, FloatingPointError, ZeroDivisionError):
+            continue
+        best = None
+        for key, (a, b) in sides.items():
+            if key in taken:
+                continue
+            pa, pb = at(a), at(b)
+            lens = measures(pa, pb, name)
+            if lens is None:
+                continue
+            d = _seg_dist(spot, pa[0], pb[0])
+            if d <= EDGE_NEAR * lens[0] and (best is None or d < best[0]):
+                best = (d, key, a, b, pa[0], pb[0])
+        if best is None:
+            continue
+        if any(measures(qa, qb, name) is not None and _seg_dist(spot, qa[0], qb[0]) < best[0] for qa, qb in drawn):
+            continue  # it names a segment or vector of that length nearer to it
+        d, key, a, b, pa, pb = best
+        if float(np.linalg.norm(pb)) < float(np.linalg.norm(pa)) - 1e-9:
+            a, b = b, a
+        taken.add(key)
+        o.update(type="segment", points=[list(a), list(b)], style="solid", opacity=1.0)
+        notes.append(f"object {o['id']}: the label {name!r} is the edge {name} beside it ({d:.2g} off it), drawn in "
+                     f"its colour")
+
+
 def narrow_angle_ranges(scene: dict, notes: list[str]) -> None:
-    """Angle params a student explores together must make a shape that can exist: at the corners of their ranges'
-    box (each one at its min or max, the other params as the lecture has them at the start and after each step),
-    every angle object named like one of them ("beta" for param beta or beta_d) must measure that param's value,
-    within ANGLE_TOL, and three edges from one corner must not lie nearly in one plane (FLAT_MIN). test2 #4 let
-    alpha = beta = gamma = 120 (60..120 each): the cell is then flat, its def clamps a height to sqrt(0.2) and the
-    labels read 119.9 while the sliders said 120. When a corner fails, every such range is narrowed towards the
-    values the lecture uses (the widest that passes, whole degrees), never below them."""
+    """Each angle param's slider keeps to what that angle can take with the other values as the lecture has them
+    (at the start and after each step): a shape that exists, where every angle object named like one of the params
+    ("beta" for param beta or beta_d) measures that param's value, within ANGLE_TOL, and three edges from one corner
+    never lie nearly in one plane (FLAT_MIN). test2 #4 let alpha = beta = gamma = 120 (60..120 each): the cell is then
+    flat, its def clamps a height to sqrt(0.2) and the labels read 119.9 while the sliders said 120. A range is
+    narrowed (whole degrees) to the widest such values, never below the lecture's own. A mix of a student's values
+    is checked by the player as they move a slider, with the same test (scene3dState.ts shapeGuard): a slider stops
+    where the shape would stop existing with the others as they are. (One box of ranges whose every corner made a
+    shape shrank all the angles together: test2 #7's alpha explored only 77..94, because gamma had to reach 120 in
+    the same box.)"""
     deg = [p for p in scene["params"] if p["unit"] == "deg"]
     if not deg:
         return
@@ -1523,58 +1651,56 @@ def narrow_angle_ranges(scene: dict, notes: list[str]) -> None:
     if not pairs:
         return
     group = list({p["name"]: p for _, p in pairs}.values())
-    states = param_states(scene["params"], scene["steps"], finals=True)
-    need = {p["name"]: (min(s[p["name"]] for s in states), max(s[p["name"]] for s in states)) for p in group}
-    bases = list({tuple(sorted((k, v) for k, v in s.items() if k not in need)): s for s in states}.values())
+    states = list({tuple(sorted(s.items())): s for s in param_states(scene["params"], scene["steps"],
+                                                                       finals=True)}.values())
     defs = _parsed_defs(scene)
 
-    def ok(rng: dict[str, tuple[float, float]]) -> bool:
-        for base in bases:
-            for corner in itertools.product(*(rng[p["name"]] for p in group)):
-                env = {**base, **dict(zip(need, corner))}
-                env = with_defs(defs, env) if defs else env
-                corners: dict[tuple, list[np.ndarray]] = {}
-                for shape, p in pairs:
-                    try:
-                        arms = shape.arms(env)
-                        a = shape.angle_at(env)
-                    except (sx.ExprError, ValueError, TypeError, FloatingPointError, ZeroDivisionError):
-                        arms = a = None
-                    if arms is None or a is None or abs(a - env[p["name"]]) > ANGLE_TOL:
-                        return False
-                    dirs = corners.setdefault(tuple(np.round(arms[0], 6)), [])
-                    for u in (_unit_vec(arms[1]), _unit_vec(arms[2])):
-                        if u is not None and all(float(np.dot(u, w)) < 1 - 1e-9 for w in dirs):
-                            dirs.append(u)
-                # three edges from one corner (a cell's a, b, c) that lie nearly in one plane: a flat plate, the
-                # limit past which no shape has those angles (alpha = beta = gamma = 120 on test2 #4)
-                for dirs in corners.values():
-                    if len(dirs) == 3 and float(np.linalg.det(np.array(dirs))) ** 2 < FLAT_MIN:
-                        return False
-        return True
+    def ok(state: dict[str, float]) -> bool:
+        env = with_defs(defs, dict(state)) if defs else dict(state)
+        corners: dict[tuple, list[np.ndarray]] = {}
+        for shape, p in pairs:
+            try:
+                arms = shape.arms(env)
+                a = shape.angle_at(env)
+            except (sx.ExprError, ValueError, TypeError, FloatingPointError, ZeroDivisionError):
+                arms = a = None
+            if arms is None or a is None or abs(a - env[p["name"]]) > ANGLE_TOL:
+                return False
+            dirs = corners.setdefault(tuple(np.round(arms[0], 6)), [])
+            for u in (_unit_vec(arms[1]), _unit_vec(arms[2])):
+                if u is not None and all(float(np.dot(u, w)) < 1 - 1e-9 for w in dirs):
+                    dirs.append(u)
+        # three edges from one corner (a cell's a, b, c) that lie nearly in one plane: a flat plate, the limit past
+        # which no shape has those angles (alpha = beta = gamma = 120 on test2 #4)
+        return all(len(d) != 3 or float(np.linalg.det(np.array(d))) ** 2 >= FLAT_MIN for d in corners.values())
 
-    def at(f: float) -> dict[str, tuple[float, float]]:
-        return {p["name"]: (need[p["name"]][0] - f * (need[p["name"]][0] - p["min"]),
-                            need[p["name"]][1] + f * (p["max"] - need[p["name"]][1])) for p in group}
+    def reach(state: dict[str, float], name: str, limit: float) -> float:
+        """How far `name` goes from its value in `state` towards `limit` with every other value as it is there."""
+        start = state[name]
+        if ok({**state, name: limit}):
+            return limit
+        lo, hi = 0.0, 1.0
+        for _ in range(14):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if ok({**state, name: start + (limit - start) * mid}) else (lo, mid)
+        return start + (limit - start) * lo
 
-    if ok(at(1.0)):
+    good = [s for s in states if ok(s)]
+    if len(good) < len(states):
+        notes.append(f"angles {', '.join(p['name'] for p in group)}: the lecture's own values make no shape at "
+                     f"{len(states) - len(good)} of its resting states; the ranges keep to the others")
+    if not good:
         return
-    if not ok(at(0.0)):
-        notes.append(f"angles {', '.join(p['name'] for p in group)}: the lecture's own values do not make the "
-                     f"shape at some corner of their ranges; ranges left as they are")
-        return
-    lo_f, hi_f = 0.0, 1.0
-    for _ in range(14):
-        mid = (lo_f + hi_f) / 2
-        lo_f, hi_f = (mid, hi_f) if ok(at(mid)) else (lo_f, mid)
-    rng = at(lo_f)
     for p in group:
-        a, b = rng[p["name"]]
-        a = min(need[p["name"]][0], float(math.ceil(a - 1e-9)))
-        b = max(need[p["name"]][1], float(math.floor(b + 1e-9)))
+        need = (min(s[p["name"]] for s in states), max(s[p["name"]] for s in states))
+        a = min(reach(s, p["name"], p["min"]) for s in good)
+        b = max(reach(s, p["name"], p["max"]) for s in good)
+        a = min(need[0], float(math.ceil(a - 1e-9)))
+        b = max(need[1], float(math.floor(b + 1e-9)))
         if (a, b) != (p["min"], p["max"]):
             notes.append(f"param {p['name']}: range narrowed from {_round(p['min']):g}..{_round(p['max']):g} to "
-                         f"{_round(a):g}..{_round(b):g}: past it the angles together make no shape")
+                         f"{_round(a):g}..{_round(b):g}: past it the angle makes no shape with the other values as "
+                         f"the lecture has them")
             p["min"], p["max"] = a, b
 
 

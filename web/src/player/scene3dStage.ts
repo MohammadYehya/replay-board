@@ -29,7 +29,9 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import type { Scene3D, Scene3DObject, Scene3DParam, Vec3 } from '../types';
 import { angleReach, angleShape } from './angle3d.ts';
 import { tryCompileVars, type VarsFn } from './expr.ts';
-import { arcLabelAt, placeLabels, type LabelPlace, type Rect } from './labelLayout.ts';
+import {
+  arcLabelAt, besideCenter, glide, originCenter, placeLabels, tickSide, type Glide, type LabelPlace, type Rect,
+} from './labelLayout.ts';
 import { distinctCurveColors, fitRange, formatTick, niceTicks, sampleSegments, stageColors } from './plotMath.ts';
 import { liveNumberLabels, stepFraming, type Camera, type SceneState } from './scene3dState.ts';
 import { angleLabel, displayName, formatValue, labelText } from './sceneText.ts';
@@ -1250,8 +1252,18 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
   const stale = (it: Item) => !it.built || it.fns.deps.some((pi, j) => Math.abs(P[pi] - it.built![j]) > 1e-9 * (1 + Math.abs(P[pi])));
 
   // ---------- axes ----------
-  /** The axes' labels (name and numbers), with the axis' world direction: hidden while it points at the viewer. */
-  const axisLabels: { dir: Vector3; objs: CSS2DObject[] }[] = [];
+  /** The axes' labels (name and numbers), with the axis' world direction: hidden while it points at the viewer. Its
+   *  ends (world), and its numbers, each anchored on its tick: placeTicks puts them beside the axis as seen (the
+   *  origin's number, kept on x, between the sides of x and y). */
+  const axisLabels: {
+    axis: number;
+    dir: Vector3;
+    objs: CSS2DObject[];
+    from: Vector3;
+    to: Vector3;
+    ticks: CSS2DObject[];
+    origin: CSS2DObject | null;
+  }[] = [];
   /** Every label on the stage besides the objects' own: laid out with them, at the lowest priority. */
   const guideLabels: { obj: CSS2DObject; inner: HTMLElement; rank: number; movable: boolean }[] = [];
   if (ax.show) {
@@ -1284,19 +1296,23 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
       guides.add(nameLabel.obj);
       objs.push(nameLabel.obj);
       guideLabels.push({ ...nameLabel, rank: 6, movable: true });
-      // ticks: a short mark across the axis, and its number
+      // ticks: a short mark across the axis, and its number (anchored on the tick; placeTicks sets its side)
       const side = a === 2 ? new Vector3(1, 0, 0) : new Vector3(0, 1, 0);
+      const tickObjs: CSS2DObject[] = [];
+      let origin: CSS2DObject | null = null;
       for (const t of ticks[a].ticks) {
-        if (Math.abs(t - o[a]) < 1e-9 * (1 + Math.abs(t)) && a > 0) continue; // the origin's number once, on x
+        const atOrigin = Math.abs(t - o[a]) < 1e-9 * (1 + Math.abs(t));
+        if (atOrigin && a > 0) continue; // the origin's number once, on x
         const p = w(...at(a, t));
         tickPairs.push(p.clone().addScaledVector(side, -0.025), p.clone().addScaledVector(side, 0.025));
-        const off = a === 2 ? new Vector3(-0.07, 0, 0) : new Vector3(0, -0.07, 0);
-        const tick = cssLabel(formatTick(t, ticks[a].step), 'p3-tick', p.clone().add(off), a === 2 ? 1 : 0.5, a === 2 ? 0.5 : 0);
+        const tick = cssLabel(formatTick(t, ticks[a].step), 'p3-tick', p.clone(), a === 2 ? 1 : 0.5, a === 2 ? 0.5 : 0);
         guides.add(tick.obj);
         objs.push(tick.obj);
+        tickObjs.push(tick.obj);
+        if (atOrigin) origin = tick.obj;
         guideLabels.push({ ...tick, rank: 7, movable: false });
       }
-      axisLabels.push({ dir, objs });
+      axisLabels.push({ axis: a, dir, objs, from, to, ticks: tickObjs, origin });
     });
     // graph paper on the x-y plane through the origin
     for (const x of ticks[0].ticks) gridPairs.push(w(x, ax.y.min, o[2]), w(x, ax.y.max, o[2]));
@@ -1685,36 +1701,102 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
   // length its text takes (tabular figures: one length, one width): an angle's value moving from 80° to 75° goes
   // "β 80°", "β 79.9°", "β 79°"..., and measuring it again at each change of length forced 34-38 page layouts during
   // one 2 s change of test2 #4 (3 now).
-  const sizes = new Map<HTMLElement, Map<number, { w: number; h: number }>>();
+  // The renderer places the outer element (its centre times its size off the anchor); what is seen, and laid out, is
+  // the pill inside it, which may sit off it: a point's name has a margin (-5 px up, 7 px right), so its pill stood
+  // 5 px above the box laid out for it and overlapped the label above by 3 (test-full #3's "x=0" and "-1").
+  const sizes = new Map<HTMLElement, Map<number, { w: number; h: number; px: number; py: number; pw: number; ph: number }>>();
   const viewProj = new Matrix4();
   const anchor = new Vector3();
-  const boxOf = (obj: CSS2DObject, inner: HTMLElement) => {
-    const outer = obj.element;
-    if (outer.style.display === 'none') return null; // behind the camera, or hidden by the renderer
+  const sizeOf = (outer: HTMLElement, inner: HTMLElement) => {
     const len = inner.textContent?.length ?? 0;
     let byLen = sizes.get(outer);
     if (!byLen) sizes.set(outer, (byLen = new Map()));
     let sz = byLen.get(len);
     if (!sz) {
-      sz = { w: outer.offsetWidth, h: outer.offsetHeight };
-      if (!sz.w || !sz.h) return null;
+      const mine = inner.offsetParent === outer;
+      sz = {
+        w: outer.offsetWidth,
+        h: outer.offsetHeight,
+        px: mine ? inner.offsetLeft : 0,
+        py: mine ? inner.offsetTop : 0,
+        pw: inner.offsetWidth || outer.offsetWidth,
+        ph: inner.offsetHeight || outer.offsetHeight,
+      };
+      if (!sz.w || !sz.h || !sz.pw || !sz.ph) return null;
       byLen.set(len, sz);
     }
-    anchor.setFromMatrixPosition(obj.matrixWorld).applyMatrix4(viewProj);
-    return { x: (anchor.x * 0.5 + 0.5) * width - obj.center.x * sz.w, y: (-anchor.y * 0.5 + 0.5) * height - obj.center.y * sz.h, w: sz.w, h: sz.h };
+    return sz;
   };
-  const layoutLabels = (st: SceneState, settled: boolean) => {
+  const boxOf = (obj: CSS2DObject, inner: HTMLElement) => {
+    const outer = obj.element;
+    if (outer.style.display === 'none') return null; // behind the camera, or hidden by the renderer
+    const sz = sizeOf(outer, inner);
+    if (!sz) return null;
+    anchor.setFromMatrixPosition(obj.matrixWorld).applyMatrix4(viewProj);
+    const x = (anchor.x * 0.5 + 0.5) * width - obj.center.x * sz.w + sz.px;
+    const y = (-anchor.y * 0.5 + 0.5) * height - obj.center.y * sz.h + sz.py;
+    return { x, y, w: sz.pw, h: sz.ph };
+  };
+  /** An axis' numbers beside it as it is seen now (tickCenter): below one across the screen, left of one up it, never
+   *  on it (seen from the top, the y axis' numbers sat under a dashed asymptote drawn along it). */
+  const ta = new Vector3();
+  const tb = new Vector3();
+  const scr = new Vector3();
+  const onScreen = (v: Vector3): [number, number] => {
+    scr.copy(v).project(camera);
+    return [(scr.x * 0.5 + 0.5) * width, (-scr.y * 0.5 + 0.5) * height];
+  };
+  const placeTicks = () => {
+    const sides = new Map<number, [number, number]>();
+    for (const a of axisLabels) {
+      if (!a.objs[0]?.visible) continue;
+      ta.copy(a.from).project(camera);
+      tb.copy(a.to).project(camera);
+      const n = tickSide((tb.x - ta.x) * width, -(tb.y - ta.y) * height);
+      if (n) sides.set(a.axis, n);
+    }
+    for (const a of axisLabels) {
+      const n = sides.get(a.axis);
+      if (!n) continue;
+      for (const t of a.ticks) {
+        const sz = t.element.isConnected ? sizeOf(t.element, t.element.firstElementChild as HTMLElement) : null;
+        if (!sz) {
+          dirty = true; // not measured yet: again next frame
+          continue;
+        }
+        if (t === a.origin) {
+          // clear of every axis drawn, as seen: x and y on graph paper, and z as well in space (originCenter)
+          const [ox, oy] = onScreen(t.position);
+          const rays: [number, number][] = [];
+          for (const b of axisLabels)
+            for (const end of [b.from, b.to]) {
+              const [ex, ey] = onScreen(end);
+              if (Math.hypot(ex - ox, ey - oy) > 2) rays.push([ex - ox, ey - oy]);
+            }
+          t.center.set(...originCenter(rays, sz.w, sz.h));
+        } else t.center.set(...besideCenter(n[0], n[1], sz.w, sz.h));
+      }
+    }
+  };
+  /** Each label's nudge as shown on screen now, and its speed: it glides to its place (glide), never jumps there. */
+  let shownAt = new Map<HTMLElement, Glide>();
+  const AT_HOME: Glide = { dx: 0, dy: 0, vx: 0, vy: 0 };
+  /** Some label is still on its way to its place: keep drawing frames. */
+  let gliding = false;
+  const layoutLabels = (st: SceneState, settled: boolean, dt: number) => {
+    gliding = false;
     const lit = new Set(st.glow > 0 ? st.highlight : []);
     const shown = new Set(st.index >= 0 ? (scene.steps[st.index]?.show ?? []) : []);
-    const entries: { obj: CSS2DObject; inner: HTMLElement; rank: number; movable: boolean }[] = [];
+    const entries: { obj: CSS2DObject; inner: HTMLElement; rank: number; movable: boolean; faint: boolean }[] = [];
     for (const it of items) {
       if (!it.label || !it.labelInner || !it.root.visible || !it.label.visible || it.vis < 0.2) continue;
       const id = it.def.id;
       const t = it.def.type;
       const rank = lit.has(id) ? 0 : shown.has(id) ? 1 : t === 'point' || t === 'label' || t === 'angle' ? 2 : t === 'curve' ? 4 : t === 'segment' ? 5 : 3;
-      entries.push({ obj: it.label, inner: it.labelInner, rank, movable: true });
+      entries.push({ obj: it.label, inner: it.labelInner, rank, movable: true, faint: it.vis < 0.5 });
     }
-    for (const g of guideLabels) if (g.obj.visible) entries.push({ obj: g.obj, inner: g.inner, rank: g.rank, movable: g.movable });
+    for (const g of guideLabels)
+      if (g.obj.visible) entries.push({ obj: g.obj, inner: g.inner, rank: g.rank, movable: g.movable, faint: false });
     if (!entries.length) return;
     entries.sort((a, b) => a.rank - b.rank);
     viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -1756,13 +1838,29 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
       prev: settled ? undefined : keep.map((e) => lastPlace.get(e.inner)),
       avoid,
     });
+    // A label slides to its place rather than jumping there: while things move it keeps its spot when it can, and
+    // once all is still it is placed afresh, which hopped labels up to 32 px on a still drawing (test2 #4). A label
+    // that was not laid out last frame starts at its place; one still fading in (shown faint, in its own place
+    // meanwhile) glides out from there.
+    const next = new Map<HTMLElement, Glide>();
     places.forEach((p, i) => {
       const inner = keep[i].inner;
-      const tf = p.dx || p.dy ? `translate(${Math.round(p.dx)}px, ${Math.round(p.dy)}px)` : '';
+      const from = shownAt.get(inner) ?? (keep[i].faint && !inner.style.transform ? AT_HOME : undefined);
+      const g = glide(opts.reducedMotion ? undefined : from, p, dt);
+      if (!g.done) gliding = true;
+      next.set(inner, g);
+      const tf = Math.round(g.dx) || Math.round(g.dy) ? `translate(${Math.round(g.dx)}px, ${Math.round(g.dy)}px)` : '';
       if (inner.style.transform !== tf) inner.style.transform = tf;
       inner.classList.toggle('dim', p.dim);
       lastPlace.set(inner, p);
     });
+    // a label no longer laid out (fading, hidden, behind the camera) goes back to its own place, plain
+    for (const inner of shownAt.keys()) {
+      if (next.has(inner)) continue;
+      inner.style.transform = '';
+      inner.classList.remove('dim');
+    }
+    shownAt = next;
   };
 
   /** An angle's label stands out from its vertex, along the bisector as seen now: its near edge at its anchor, so it
@@ -1816,6 +1914,7 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
     stepTween(now);
     const turning = update(dt);
     if (turning) dirty = true;
+    const settled = !st.moving && !tween && !turning;
     if (dirty || pulsing) {
       dirty = false;
       const dist = camera.position.distanceTo(controls.target);
@@ -1824,9 +1923,10 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
       renderer.render(world, camera);
       axesFacing();
       turnAngleLabels();
+      placeTicks();
       labels.render(world, camera);
-      layoutLabels(st, !st.moving && !tween && !turning);
-    }
+      layoutLabels(st, settled, dt);
+    } else if (gliding) layoutLabels(st, settled, dt); // the drawing is still: only labels on their way move
   };
   // Every object built now (each stays hidden until a step shows it) and every shader compiled before the first
   // frame: a step that shows many parts at once then only uncovers them.

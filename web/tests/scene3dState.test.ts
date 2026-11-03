@@ -3,9 +3,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  beforeLine, chipCaption, cleanScene, drawingFrom, dwell, ease, momentClock, openingCamera, playFrom, sceneLoader,
-  liveNumberLabels, sceneState, seekTimeFor, stepFraming, stepHeading, stepTimes, STEP_GAP,
+  beforeLine, chipCaption, clampToShape, cleanScene, drawingFrom, dwell, ease, fitToShape, FLAT_MIN, momentClock,
+  openingCamera, playFrom, sceneLoader, liveNumberLabels, sceneState, seekTimeFor, shapeGuard, stepFraming, stepHeading,
+  stepTimes, STEP_GAP, tryValue, drawnWith,
 } from '../src/player/scene3dState.ts';
+import { measureAngle } from '../src/player/angle3d.ts';
 import type { Scene3D } from '../src/types.ts';
 
 const near = (a: number, b: number, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} != ${b}`);
@@ -630,4 +632,199 @@ test('each step is framed on what is on screen then, where its change starts and
   assert.deepEqual(f[2].visible, ['base', 'force', 'note', 'edge']);
   assert.deepEqual([f[2].from.lean, f[2].to.lean, f[2].to.h], [90, 110, 3]);
   assert.deepEqual(f[3].visible, ['base', 'note', 'edge', 'fx', 'fz']); // the force goes, its parts come
+});
+
+// ---------------------------------------------------------------- "Try it": only cells that exist
+
+/** test2 #7's cell: a, b, c and alpha, beta, gamma, built from the defs; the hexagon step takes gamma to 120. */
+function cell(): Scene3D {
+  const r = cleanScene({
+    format: 2,
+    synced: true,
+    params: [
+      { name: 'a', value: 3, min: 1, max: 6, label: 'edge length a' },
+      { name: 'b', value: 3, min: 1, max: 6, label: 'edge length b' },
+      { name: 'c', value: 3, min: 1, max: 6, label: 'edge length c' },
+      { name: 'alpha', value: 90, min: 60, max: 120, label: 'angle alpha', unit: 'deg' },
+      { name: 'beta', value: 90, min: 60, max: 120, label: 'angle beta', unit: 'deg' },
+      { name: 'gamma', value: 90, min: 60, max: 150, label: 'angle gamma', unit: 'deg' },
+    ],
+    defs: [
+      { name: 'bx', expr: 'b*cos(gamma*deg)' },
+      { name: 'by', expr: 'b*sin(gamma*deg)' },
+      { name: 'cx', expr: 'c*cos(beta*deg)' },
+      { name: 'cy', expr: 'c*(cos(alpha*deg) - cos(beta*deg)*cos(gamma*deg))/sin(gamma*deg)' },
+      { name: 'cz', expr: 'sqrt(max(c*c - cx*cx - cy*cy, 0.2))' },
+    ],
+    objects: [
+      obj('alpha_angle', 'angle', { points: [['0', '0', '0'], ['bx', 'by', '0'], ['cx', 'cy', 'cz']], label: 'alpha' }),
+      obj('beta_angle', 'angle', { points: [['0', '0', '0'], ['a', '0', '0'], ['cx', 'cy', 'cz']], label: 'β' }),
+      obj('gamma_angle', 'angle', {
+        points: [['0', '0', '0'], ['a', '0', '0'], ['bx', 'by', '0']],
+        label: 'gamma',
+        size: ['0.3*min(a, b)'],
+      }),
+    ],
+    steps: [step(100, { caption: 'cube' }), step(200, { caption: 'hexagonal', set: [{ param: 'gamma', to: 120 }] })],
+  });
+  assert.equal(r.kind, 'scene');
+  return (r as { scene: Scene3D }).scene;
+}
+
+const gram = (al: number, be: number, ga: number) => {
+  const c = (d: number) => Math.cos((d * Math.PI) / 180);
+  return 1 - c(al) ** 2 - c(be) ** 2 - c(ga) ** 2 + 2 * c(al) * c(be) * c(ga);
+};
+
+test("the shape guard: a cell's angles must measure what the sliders say and never lie flat", () => {
+  const g = shapeGuard(cell())!;
+  assert.deepEqual(g.params, ['alpha', 'beta', 'gamma']); // the letter names beta as well as the word does
+  const at = (alpha: number, beta: number, gamma: number) => g.ok({ a: 3, b: 3, c: 3, alpha, beta, gamma });
+  assert.equal(at(90, 90, 90), true);
+  assert.equal(at(90, 90, 120), true); // the hexagonal cell
+  assert.equal(at(80, 75, 85), true); // triclinic
+  assert.equal(at(120, 120, 120), false); // a flat plate: the old ranges' corner (labels read 119.9)
+  assert.equal(at(60, 60, 120), false);
+  // the edge of what exists is the server's FLAT_MIN on the Gram determinant
+  for (const [al, be, ga] of [[123, 90, 120], [123.5, 90, 120], [100, 70, 140], [95, 60, 140]]) {
+    assert.equal(at(al, be, ga), gram(al, be, ga) >= FLAT_MIN, `${al} ${be} ${ga}`);
+  }
+  // nothing to guard: no angle parameter, or no angle object named after one
+  const s = cell();
+  assert.equal(shapeGuard({ ...s, params: s.params.map((p) => ({ ...p, unit: '' as const })) }), null);
+  assert.equal(shapeGuard({ ...s, objects: s.objects.map((o) => ({ ...o, label: 'phi' })) }), null);
+  assert.equal(shapeGuard(scene()), null); // a lean with no angle object
+});
+
+test('a slider explores what the cell allows with the other values as they are, and stops at the wall', () => {
+  // test2 #7: the box rule let alpha explore only 77..94, because gamma must still reach 120 in the same box
+  const g = shapeGuard(cell())!;
+  const hex = { a: 3, b: 3, c: 4.5, alpha: 90, beta: 90, gamma: 120 };
+  // with gamma at 120 and beta at 90, alpha goes up to where the cell would lie flat: cos^2 alpha = 0.75 - FLAT_MIN
+  const top = (Math.acos(-Math.sqrt(0.75 - FLAT_MIN)) * 180) / Math.PI; // 123.2
+  const up = clampToShape(g, hex, 'alpha', 150);
+  assert.ok(Math.abs(up - top) < 0.01, `${up} vs ${top}`);
+  assert.ok(g.ok({ ...hex, alpha: up }) && !g.ok({ ...hex, alpha: up + 0.05 }));
+  const down = clampToShape(g, hex, 'alpha', 20);
+  assert.ok(Math.abs(down - (180 - top)) < 0.01, `${down}`);
+  assert.ok(up - down > 46, 'far more than the 17 degrees of 77..94');
+  // a value that makes a cell is taken as it is
+  assert.equal(clampToShape(g, hex, 'alpha', 110), 110);
+  assert.equal(clampToShape(g, hex, 'c', 1), 1); // lengths are free here
+  // with gamma at 90 instead, alpha may go further
+  assert.ok(clampToShape(g, { ...hex, gamma: 90 }, 'alpha', 150) > top + 5);
+  // values that already make no cell (nothing to keep): the wanted value, as it is
+  assert.equal(clampToShape(g, { ...hex, alpha: 120, beta: 120, gamma: 120 }, 'alpha', 130), 130);
+  assert.equal(clampToShape(null, hex, 'alpha', 170), 170);
+  // whatever the slider asks, every value taken makes a cell whose angles read what the sliders say
+  for (let want = 0; want <= 180; want += 7.5) {
+    const v = clampToShape(g, hex, 'beta', want);
+    assert.ok(g.ok({ ...hex, beta: v }), `beta ${want} -> ${v}`);
+  }
+});
+
+test("when the lecture moves an angle the viewer left alone, the viewer's angles give way as little as it takes", () => {
+  const s = cell();
+  const g = shapeGuard(s)!;
+  // the viewer set alpha and beta to 60 with gamma at 90 (a cell); the hexagon step takes gamma to 120 (none)
+  const own = { alpha: 60, beta: 60 };
+  assert.ok(g.ok({ a: 3, b: 3, c: 3, gamma: 90, ...own }));
+  const lecture = { a: 3, b: 3, c: 3, alpha: 90, beta: 90, gamma: 120 };
+  const fit = fitToShape(g, lecture, own);
+  assert.ok(g.ok(fit), 'a cell that exists');
+  assert.ok(fit.alpha < 90 && fit.alpha > 60 && Math.abs(fit.alpha - fit.beta) < 1e-9, 'both moved back by one share');
+  assert.ok(!g.ok({ ...fit, alpha: fit.alpha - 0.05, beta: fit.beta - 0.05 }), 'no more than it takes');
+  assert.equal(fit.gamma, 120, "the lecture's own value is untouched");
+  // values that make a cell are kept as they are
+  assert.deepEqual(fitToShape(g, lecture, { alpha: 100 }), { ...lecture, alpha: 100 });
+  // in the view: before the hexagon step the viewer's values stand; after it they give way; without the guard, a
+  // flat cell whose angles no longer read what the sliders say
+  const before = sceneState(s, { clock: 150 }, { overrides: own, guard: g });
+  assert.deepEqual([before.params.alpha, before.params.beta], [60, 60]);
+  const after = sceneState(s, { clock: 205 }, { overrides: own, guard: g });
+  assert.ok(g.ok(after.params) && after.params.alpha > 60 && after.params.gamma === 120);
+  assert.deepEqual(after.overridden, ['alpha', 'beta']);
+  const bare = sceneState(s, { clock: 205 }, { overrides: own });
+  assert.equal(g.ok(bare.params), false);
+  // what the guard lets through, the angle objects measure: the labels read the sliders' values
+  const p = after.params;
+  const r = (d: number) => (d * Math.PI) / 180;
+  const cx = p.c * Math.cos(r(p.beta));
+  const cy = (p.c * (Math.cos(r(p.alpha)) - Math.cos(r(p.beta)) * Math.cos(r(p.gamma)))) / Math.sin(r(p.gamma));
+  const cz = Math.sqrt(Math.max(p.c * p.c - cx * cx - cy * cy, 0.2));
+  const bx = p.b * Math.cos(r(p.gamma));
+  const by = p.b * Math.sin(r(p.gamma));
+  assert.ok(Math.abs(measureAngle([0, 0, 0], [bx, by, 0], [cx, cy, cz])! - p.alpha) <= 0.5);
+});
+
+test("a lecture change moves only the viewer's angles that must give way: their lengths stay as they set them", () => {
+  const s = cell();
+  const g = shapeGuard(s)!;
+  // test2 #7: c set to 6 read 5.42 once the hexagon step took gamma to 120
+  const own = { c: 6, alpha: 60, beta: 60 };
+  const lecture = { a: 3, b: 3, c: 3, alpha: 90, beta: 90, gamma: 120 };
+  const fit = fitToShape(g, lecture, own);
+  assert.equal(fit.c, 6);
+  assert.ok(g.ok(fit) && fit.alpha > 60 && fit.alpha < 90 && Math.abs(fit.alpha - fit.beta) < 1e-9);
+  // the angles give way exactly as far as without the length (a cell's angles do not depend on its edges)
+  near(fit.alpha, fitToShape(g, lecture, { alpha: 60, beta: 60 }).alpha, 1e-6);
+  const after = sceneState(s, { clock: 205 }, { overrides: own, guard: g });
+  assert.equal(after.params.c, 6);
+  assert.deepEqual(after.overridden, ['c', 'alpha', 'beta']);
+});
+
+test("moving one slider keeps the viewer's other angles where they are shown, and stops on the slider's steps", () => {
+  const s = cell();
+  const g = shapeGuard(s)!;
+  const lecture = { a: 3, b: 3, c: 3, alpha: 90, beta: 90, gamma: 120 };
+  // the hexagon step made alpha and beta give way from the 60 the viewer set to about 71.6
+  const own = { c: 6, alpha: 60, beta: 60 };
+  const drawn = fitToShape(g, lecture, own);
+  const shown = drawn.alpha;
+  // the viewer moves beta to 75: alpha, which they did not touch, stays at what it shows; beta is 75, as asked
+  const next = tryValue(g, own, drawn, 'beta', 75, { min: 60, step: 1 });
+  assert.deepEqual([next.alpha, next.beta, next.c], [shown, 75, 6]);
+  const frame = fitToShape(g, lecture, next);
+  assert.deepEqual([frame.alpha, frame.beta, frame.c], [shown, 75, 6]);
+  // the old way (the viewer's 60 kept for alpha): beta drew 77.9 and alpha went to 65.7
+  const old = fitToShape(g, lecture, { ...own, beta: 75 });
+  assert.ok(Math.abs(old.beta - 75) > 2 && Math.abs(old.alpha - shown) > 5);
+  // moving an angle that gave way starts from where it is shown, not from the 60 set before: it stops at the wall
+  // there, never jumping to the value asked for
+  const back = tryValue(g, own, drawn, 'alpha', 65, { min: 60, step: 1 });
+  assert.ok(Math.abs(back.alpha - shown) < 0.05 && back.beta === drawn.beta, JSON.stringify(back));
+  assert.ok(g.ok({ ...lecture, ...back }));
+  // at a wall the value stops on the slider's own steps, on the side where the cell exists (85.1 had the thumb at 85)
+  const hex = { a: 3, b: 3, c: 4.5, alpha: 90, beta: 60, gamma: 120 };
+  const wall = clampToShape(g, hex, 'alpha', 60);
+  assert.ok(wall > 85 && wall < 86, `${wall}`);
+  const taken = tryValue(g, {}, hex, 'alpha', 60, { min: 60, step: 1 });
+  assert.equal(taken.alpha, 86);
+  assert.ok(g.ok({ ...hex, alpha: taken.alpha }));
+  // a value that makes a cell is taken as asked, on or off the steps; with no guard, as asked
+  assert.equal(tryValue(g, {}, hex, 'alpha', 100.5, { min: 60, step: 1 }).alpha, 100.5);
+  assert.equal(tryValue(null, { alpha: 70 }, hex, 'beta', 20, { min: 60, step: 1 }).beta, 20);
+  // whatever is asked, what is taken makes a cell
+  for (let want = 0; want <= 180; want += 5) {
+    const t = tryValue(g, {}, hex, 'gamma', want, { min: 60, step: 1 });
+    assert.ok(g.ok({ ...hex, ...t }), `gamma ${want} -> ${t.gamma}`);
+    assert.ok(Number.isInteger(t.gamma) || t.gamma === want, `gamma ${want} -> ${t.gamma} is on the steps`);
+  }
+});
+
+test('two sliders moved before the next frame: the first keeps the value just set, not the one last drawn', () => {
+  const g = shapeGuard(cell())!;
+  // test2 #4's last step: End on alpha, then End on beta, with no frame drawn between
+  const frame = { params: { a: 3, b: 3, c: 3, alpha: 90, beta: 75, gamma: 90 }, own: {} };
+  const grid = { min: 60, step: 1 };
+  const one = tryValue(g, frame.own, drawnWith(frame, frame.own), 'alpha', 120, grid);
+  assert.equal(one.alpha, 120);
+  const two = tryValue(g, one, drawnWith(frame, one), 'beta', 120, grid);
+  assert.equal(two.alpha, 120, 'alpha stays where the viewer put it');
+  assert.ok(g.ok({ ...frame.params, ...two }));
+  // once a frame is drawn with these values, they are what is shown
+  const drawn = { params: { ...frame.params, ...two }, own: two };
+  assert.deepEqual(drawnWith(drawn, two), drawn.params);
+  // the old way (the frame as last drawn, whatever it was drawn with): alpha went back to 90
+  assert.equal(tryValue(g, one, frame.params, 'beta', 120, grid).alpha, 90);
 });

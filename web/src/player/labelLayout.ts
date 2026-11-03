@@ -3,6 +3,9 @@
 //   moves the least it can (up, down or sideways) to a free spot, or is dimmed when there is none near.
 // - arcLabelAt(): an angle's arc names its angle out along the angle's bisector, past the arc, rather than on it,
 //   so three arcs from one corner (alpha, beta, gamma) put their names apart.
+// - glide(): a label never jumps to a new place: it slides there in a few frames.
+// - tickCenter(): an axis' numbers sit beside the axis as seen on screen, never on it; originCenter(): the origin's
+//   number in a gap between all the axes, clear of each.
 
 export interface LabelBox {
   /** Where the label is on the stage now (CSS pixels, before any nudge). */
@@ -25,7 +28,8 @@ export interface PlaceOptions {
   /** The stage's size: a label inside it stays inside it. */
   width: number;
   height: number;
-  /** Last frame's places (same order), tried first when their spot is still free, so labels do not hop around. */
+  /** Last frame's places (same order), tried first when their spot is still free, so labels do not hop around; when
+   *  it is not, the free spot nearest it of those about as near the label's own place as the nearest (KEEP_SLACK). */
   prev?: readonly (LabelPlace | undefined)[];
   /** Pixels kept between two labels. */
   pad?: number;
@@ -45,6 +49,8 @@ export interface Rect {
 
 /** The most labels a layout looks for a free spot for (the rest that collide are dimmed). */
 export const MAX_SEARCHES = 32;
+/** Pixels farther from its own place than the nearest free spot that a label may go to stay near last frame's spot. */
+export const KEEP_SLACK = 6;
 
 const hits = (a: Rect, b: Rect, pad: number) =>
   a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
@@ -105,10 +111,173 @@ export function placeLabels(boxes: readonly LabelBox[], opts: PlaceOptions): Lab
         if (d > 0 && d <= reach) moves.push([dx, dy, d]);
       }
     moves.sort((m, n) => m[2] - n[2] || m[1] - n[1] || m[0] - n[0]);
-    for (const [dx, dy] of moves) if (freeHere(dx, dy)) return void out.push(take(dx, dy));
-    out.push({ dx: 0, dy: 0, dim: true });
+    // A label nudged last frame whose spot is now taken goes to the free spot nearest that one, of those about as
+    // near its own place as the nearest free spot (KEEP_SLACK): as test2 #4's cell came to rest, beta's name, kept
+    // just right of "b", touched it by a fraction of a pixel and went 31 px up to the spot nearest home (0.5 px
+    // nearer), then came back once all was still. Never farther: the saddle's "y", following the spot beside "z = x²"
+    // as the view turned, drifted 39 px right of a free spot 9 px above its place, and slid back there at rest.
+    const kept = p && !p.dim && (p.dx || p.dy) ? p : null;
+    let first = -1;
+    let best: [number, number] | null = null;
+    let bestOff = Infinity;
+    for (const [dx, dy, d] of moves) {
+      if (first >= 0 && (!kept || d > first + KEEP_SLACK)) break;
+      if (!freeHere(dx, dy)) continue;
+      if (first < 0) first = d;
+      const off = kept ? Math.hypot(dx - kept.dx, dy - kept.dy) : 0;
+      if (off < bestOff) {
+        bestOff = off;
+        best = [dx, dy];
+      }
+    }
+    out.push(best ? take(best[0], best[1]) : { dx: 0, dy: 0, dim: true });
   });
   return out;
+}
+
+/** How briskly a label glides to a new place (per second): a critically damped spring that starts and ends gently,
+ *  95% of the way in 4.7 / GLIDE_RATE s (0.26 s). */
+export const GLIDE_RATE = 18;
+
+/** A label's nudge as shown, and how fast it is moving (pixels, pixels per second). */
+export interface Glide {
+  dx: number;
+  dy: number;
+  vx: number;
+  vy: number;
+}
+
+/**
+ * Where a label's nudge is on the next frame, `dt` seconds after this one: from where it is shown now (and as fast as
+ * it moves) towards its place, as a critically damped spring (worked out exactly, so a long frame never overshoots
+ * from rest), and on it once within half a pixel and nearly still. Labels are placed afresh once the drawing is still
+ * (so a moment looks the same however the view got there), and while it moves a label keeps its spot while it is
+ * free; the two differ, and a label hopped up to 32 px in one frame on a still drawing when a change ended (test2 #4).
+ * `from` undefined (a label that was not on screen) or no rate (reduced motion): straight to its place.
+ */
+export function glide(
+  from: Glide | undefined,
+  to: { dx: number; dy: number },
+  dt: number,
+  rate = GLIDE_RATE,
+): Glide & { done: boolean } {
+  const there = { dx: to.dx, dy: to.dy, vx: 0, vy: 0, done: true };
+  if (!from || !(rate > 0)) return there;
+  const t = Math.max(0, dt);
+  const k = Math.exp(-rate * t);
+  const axis = (x: number, v: number, goal: number): [number, number] => {
+    const e = x - goal;
+    const c = v + rate * e;
+    return [goal + (e + c * t) * k, (v - rate * c * t) * k];
+  };
+  const [dx, vx] = axis(from.dx, from.vx, to.dx);
+  const [dy, vy] = axis(from.dy, from.vy, to.dy);
+  if (Math.hypot(to.dx - dx, to.dy - dy) <= 0.5 && Math.hypot(vx, vy) <= 20) return there;
+  return { dx, dy, vx, vy, done: false };
+}
+
+/** Pixels between an axis and the near edge of its numbers. */
+export const TICK_GAP = 6;
+
+/**
+ * The label renderer's centre (CSS2DObject.center) for an axis number whose anchor is its tick, on the axis: the
+ * label sits on the side square to the axis as seen on screen, its near edge `gap` pixels off it. Below an axis that
+ * runs across the screen and left of one that runs up it, as on graph paper; between, the side towards the bottom
+ * left. (dx, dy): the axis' direction on screen, in pixels, y down; w x h: the label's size. Seen from the top, the y
+ * axis runs up the screen, and its numbers, centred on it, sat under the dashed asymptote x = 0 drawn along it
+ * (test-full #3, gest-test #10).
+ */
+export function tickCenter(dx: number, dy: number, w: number, h: number, gap = TICK_GAP): [number, number] {
+  const n = tickSide(dx, dy);
+  return n ? besideCenter(n[0], n[1], w, h, gap) : [0.5, 0.5];
+}
+
+/** The side of an axis its numbers go on, as a unit vector on screen (y down), square to the axis: see tickCenter.
+ *  Null for an axis with no direction on screen (seen end on). */
+export function tickSide(dx: number, dy: number): [number, number] | null {
+  const len = Math.hypot(dx, dy);
+  if (!(len > 1e-9)) return null;
+  const nx = -dy / len;
+  const ny = dx / len;
+  return ny - nx >= -ny + nx ? [nx, ny] : [-nx, -ny];
+}
+
+/** The label renderer's centre for a label w x h that sits out from its anchor along the unit vector (nx, ny), its
+ *  nearest corner `gap` pixels off the line through the anchor square to that vector. The origin's number goes out
+ *  between the sides of the two axes that meet there, so it sits under neither (an asymptote x = 0 runs down the y
+ *  axis past it). */
+export function besideCenter(nx: number, ny: number, w: number, h: number, gap = TICK_GAP): [number, number] {
+  const len = Math.hypot(nx, ny);
+  if (!(len > 1e-9) || !(w > 0) || !(h > 0)) return [0.5, 0.5];
+  const ux = nx / len;
+  const uy = ny / len;
+  // the label's middle goes out by the gap and half its box's reach along u
+  const t = gap + (Math.abs(ux) * w) / 2 + (Math.abs(uy) * h) / 2;
+  return [0.5 - (ux * t) / w, 0.5 - (uy * t) / h];
+}
+
+/** How far from where the axes cross the origin's number may go to find room, in label sizes (w + h). */
+const ORIGIN_REACH = 3;
+const DOWN_LEFT: readonly [number, number] = [-Math.SQRT1_2, Math.SQRT1_2];
+
+/** Whether the ray from (0, 0) along (rx, ry) passes within `gap` of the box centred at (cx, cy), w x h. */
+function rayHits(rx: number, ry: number, cx: number, cy: number, w: number, h: number, gap: number): boolean {
+  let lo = 0;
+  let hi = Infinity;
+  for (const [r, c, half] of [[rx, cx, w / 2 + gap], [ry, cy, h / 2 + gap]]) {
+    if (Math.abs(r) < 1e-12) {
+      if (Math.abs(c) > half) return false;
+      continue;
+    }
+    const t1 = (c - half) / r;
+    const t2 = (c + half) / r;
+    lo = Math.max(lo, Math.min(t1, t2));
+    hi = Math.min(hi, Math.max(t1, t2));
+    if (lo > hi) return false;
+  }
+  return true;
+}
+
+/**
+ * The label renderer's centre for the origin's number (w x h), anchored where the axes cross: in a gap between the
+ * axes as seen, its box `gap` pixels clear of every one, as near the crossing as that allows; of places about as near,
+ * the one most towards the bottom left, as on graph paper. `rays`: each axis' direction on screen from the crossing
+ * (y down), both ways where it runs on past it. With x and y alone that is below-left of the crossing; with z as well
+ * the "0" was put between the sides of x and y only, and sat on the x axis (the saddle from the front) or on z (iso).
+ */
+export function originCenter(rays: readonly (readonly [number, number])[], w: number, h: number, gap = TICK_GAP): [number, number] {
+  if (!(w > 0) || !(h > 0)) return [0.5, 0.5];
+  const dirs = rays
+    .map(([x, y]) => [x, y, Math.hypot(x, y)])
+    .filter(([, , n]) => n > 1e-9)
+    .map(([x, y, n]) => [x / n, y / n] as const);
+  if (!dirs.length) return besideCenter(DOWN_LEFT[0], DOWN_LEFT[1], w, h, gap);
+  const clear = (cx: number, cy: number) => dirs.every(([rx, ry]) => !rayHits(rx, ry, cx, cy, w, h, gap));
+  const angles = dirs.map(([x, y]) => Math.atan2(y, x)).sort((a, b) => a - b);
+  const far = ORIGIN_REACH * (w + h);
+  const found: { t: number; u: [number, number]; lean: number }[] = [];
+  angles.forEach((a0, i) => {
+    const a1 = i + 1 < angles.length ? angles[i + 1] : angles[0] + 2 * Math.PI;
+    if (a1 - a0 < 1e-6) return;
+    const N = 24; // directions tried across the gap
+    for (let k = 0; k < N; k++) {
+      const a = a0 + ((k + 0.5) / N) * (a1 - a0);
+      const u: [number, number] = [Math.cos(a), Math.sin(a)];
+      if (!clear(u[0] * far, u[1] * far)) continue;
+      let lo = 0;
+      let hi = far;
+      for (let j = 0; j < 20; j++) {
+        const m = (lo + hi) / 2;
+        if (clear(u[0] * m, u[1] * m)) hi = m;
+        else lo = m;
+      }
+      found.push({ t: hi, u, lean: u[0] * DOWN_LEFT[0] + u[1] * DOWN_LEFT[1] });
+    }
+  });
+  if (!found.length) return besideCenter(DOWN_LEFT[0], DOWN_LEFT[1], w, h, gap);
+  const near = Math.min(...found.map((f) => f.t)) + 1.5;
+  const { t, u } = found.filter((f) => f.t <= near).reduce((a, b) => (b.lean > a.lean ? b : a));
+  return [0.5 - (u[0] * t) / w, 0.5 - (u[1] * t) / h];
 }
 
 type P3 = readonly [number, number, number];

@@ -464,6 +464,51 @@ def test_a_sketch_drawn_in_several_pieces_is_one_drawing():
     assert not popout.can_popout(replay["board"]["pieces"][4])
 
 
+def test_the_images_show_every_figure_piece_of_a_drawing_not_only_the_first(tmp_path):
+    """synth3d-vector3d: the photo of the main piece (the x and y axes) was taken before the vector was drawn, so no
+    image Muse Spark saw showed the vector. Each other figure piece's own photo goes too, in the order they were
+    drawn, at most PART_PHOTOS."""
+    replay = board_replay()
+
+    def p(i, box, kind, text, t):
+        return {"id": i, "box": list(box), "image": f"pieces/{i:03d}.png", "t_seen": t, "t_shown": t,
+                "written_after": t, "removed_at": None, "pre_existing": False,
+                "read": {"kind": kind, "text": text, "latex": ""}, "spoken": [], "redraw_at": None}
+
+    replay["board"]["pieces"] = [
+        p(1, (200, 20, 20, 90), "arrow", "z-axis arrow labeled z", 20),
+        p(2, (150, 90, 140, 60), "arrow", "x-axis and y-axis arrows labeled x and y", 25),
+        p(3, (180, 40, 45, 60), "arrow", "red vector arrow labeled v", 35),
+        p(4, (185, 95, 40, 30), "diagram", "components 3, 2, 4 of v", 45),
+        p(5, (195, 60, 8, 10), "label", "v", 36),  # a label of it: no photo of its own
+    ]
+    job = write_job(tmp_path / "job", replay)
+    (job / "crops").mkdir()
+    for i in (1, 2, 3, 4, 5):  # each photo a colour of its own, to tell them apart
+        imwrite(job / "crops" / f"{i:03d}.jpg", np.full((60, 80, 3), (40 * i, 20, 200 - 30 * i), np.uint8))
+    asked, anchor, pieces, _ = popout.gather(replay, 1)
+    assert anchor["id"] == 2 and {q["id"] for q in pieces} >= {1, 2, 3, 4, 5}
+    images = popout.drawing_images(job, replay, anchor, pieces)
+    caps = [c for c, _, _ in images]
+    assert caps[0].startswith("the drawing as captured from the board")
+    assert caps[1].startswith("a photo of the drawing from the video")
+    assert [c.split("(#")[1].split(")")[0] for c in caps[2:]] == ["1", "3", "4"]  # in the order they were drawn
+    assert "red vector arrow labeled v (#3)" in caps[3]
+    blue = [int(img[..., 0].mean() + 0.5) for _, img, fmt in images[1:]]
+    assert blue == pytest.approx([80, 40, 120, 160], abs=6)  # #2's photo, then #1, #3, #4's
+    # at most PART_PHOTOS of them
+    replay["board"]["pieces"] += [p(10 + k, (150 + k, 90, 140, 60), "diagram", f"more of it {k}", 26 + k)
+                                  for k in range(4)]
+    for k in range(4):
+        imwrite(job / "crops" / f"{10 + k:03d}.jpg", np.full((60, 80, 3), 128, np.uint8))
+    asked, anchor, pieces, _ = popout.gather(replay, anchor["id"])
+    assert len(popout.drawing_images(job, replay, anchor, pieces)) == 2 + popout.PART_PHOTOS
+    # and the prompt names each image
+    msgs, _, _ = popout.scene_messages(job, replay, anchor["id"])
+    head = msgs[1]["content"][0]["text"]
+    assert "Image 3: a photo of one part of the drawing" in head
+
+
 GOOD = answer([obj("cone", "cone", center=["0", "0", "1"], size=["r", "2"]),
                obj("axis", "segment", points=[["0", "0", "0"], ["0", "0", "2"]], style="dashed")],
               [step("0:30", caption="The cone", show=["axis"]),
@@ -1394,26 +1439,178 @@ def test_angles_at_one_corner_are_nested():
     assert any("share a vertex: radii 1, 1.45, 1.9" in n for n in notes)
 
 
-def test_angle_ranges_hold_only_shapes_that_exist():
-    # test2 #4: alpha = beta = gamma = 120 (each 60..120) made a flat plate and read 119.9 on the labels
+def gram(al, be, ga):
+    cos = lambda d: math.cos(math.radians(d))  # noqa: E731
+    return 1 - cos(al) ** 2 - cos(be) ** 2 - cos(ga) ** 2 + 2 * cos(al) * cos(be) * cos(ga)
+
+
+HEXAGONAL = SERIES + [step("1:20", caption="Hexagonal: gamma is 120",
+                           set=[{"param": "a", "to": 3}, {"param": "b", "to": 3}, {"param": "c", "to": 4.5},
+                                {"param": "alpha", "to": 90}, {"param": "beta", "to": 90},
+                                {"param": "gamma", "to": 120}])]
+
+
+def test_each_angle_range_holds_what_that_angle_can_take_with_the_lecture_values():
+    # test2 #7: one box whose every corner made a cell shrank all three angles together (alpha 77..94, because gamma
+    # had to reach 120 in the same box). Each range now holds what its angle can take with the other values as the
+    # lecture has them; the player stops a slider where a mix of the student's values would make no cell
+    # (scene3dState.ts shapeGuard).
+    raw = corner_cell(HEXAGONAL)
+    gamma = next(p for p in raw["params"] if p["name"] == "gamma")
+    raw["params"] = [p for p in raw["params"] if p["name"] != "gamma"] + [{**gamma, "min": 20, "max": 170}]
     notes = []
-    scene = popout.clean_scene(corner_cell(SERIES), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
     rng = {p["name"]: (p["min"], p["max"]) for p in scene["params"]}
     assert rng["a"] == (1, 6)  # lengths are not touched
-    for n in ("alpha", "beta", "gamma"):
-        lo, hi = rng[n]
-        assert 60 < lo <= 75 and 90 <= hi < 120 and lo == int(lo) and hi == int(hi)  # still the lecture's values
-    cos = lambda d: math.cos(math.radians(d))  # noqa: E731
-    for al in rng["alpha"]:
-        for be in rng["beta"]:
-            for ga in rng["gamma"]:
-                gram = 1 - cos(al) ** 2 - cos(be) ** 2 - cos(ga) ** 2 + 2 * cos(al) * cos(be) * cos(ga)
-                assert gram >= popout.FLAT_MIN - 1e-6
-    assert "param alpha: range narrowed from 60..120 to" in " ".join(notes)
+    # alpha and beta: 60..120 is a cell with the others at 90 (the cubic start): left as they are, wider than 77..94
+    assert rng["alpha"] == (60, 120) and rng["beta"] == (60, 120)
+    # gamma 20..170: with alpha = beta = 90 the cell lies flat past |cos gamma| = sqrt(1 - FLAT_MIN) (42.1..137.9)
+    lim = math.degrees(math.acos(math.sqrt(1 - popout.FLAT_MIN)))
+    assert rng["gamma"] == (math.ceil(lim), math.floor(180 - lim)) == (43, 137)
+    assert "param gamma: range narrowed from 20..170 to 43..137" in " ".join(notes)
+    # each end makes a cell with the other values as the lecture has them somewhere (here the cubic start)
+    for g in rng["gamma"]:
+        assert gram(90, 90, g) >= popout.FLAT_MIN
+    # but not every mix of the ends does (the player checks those): 120/120/120 is a flat plate
+    assert gram(120, 120, 120) < popout.FLAT_MIN
+    # the lecture's own values always stay inside, even past where the rest would narrow them
+    for s in scene["steps"]:
+        for st in s["set"]:
+            p = next(p for p in scene["params"] if p["name"] == st["param"])
+            assert p["min"] <= st["to"] <= p["max"]
     # one angle alone (the monoclinic beta of `cell`) exists over its whole range: left as it is
     scene = popout.clean_scene(cell([step("0:20", caption="lean", set=[{"param": "beta", "to": 75}])]),
                                piece=1, pieces=[1], version="v", clip=CLIP)
     assert [(p["min"], p["max"]) for p in scene["params"] if p["name"] == "beta"] == [(60, 120)]
+
+
+def test_a_range_narrowed_by_one_lecture_state_is_widened_by_another():
+    # gamma 60..170 with alpha = beta = 80 (rhombohedral) reaches less far than with alpha = beta = 90 (cubic): the
+    # range is the widest any resting state of the lecture allows
+    raw = corner_cell(SERIES)
+    raw["params"] = [{**p, "max": 170} if p["name"] == "gamma" else p for p in raw["params"]]
+    scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP)
+    hi = next(p["max"] for p in scene["params"] if p["name"] == "gamma")
+    assert hi == 137  # the cubic start's limit, not the rhombohedral one
+    assert gram(80, 80, 138) < popout.FLAT_MIN <= gram(90, 90, 137)
+
+
+def faces_cell(labels, steps=None):
+    """test2 #4 as Muse Spark made it: a cell of six faces, and a, b, c as loose labels."""
+    o = ["0", "0", "0"]
+    a, ab, b = ["a", "0", "0"], ["a + bx", "by", "0"], ["bx", "by", "0"]
+    c, ac, abc, bc = ["cx", "cy", "cz"], ["a + cx", "cy", "cz"], ["a + bx + cx", "by + cy", "cz"], ["bx + cx", "by + cy", "cz"]
+    faces = [obj("face_bottom", "polygon", points=[o, a, ab, b], color="#a0c4ff", opacity=0.25),
+             obj("face_top", "polygon", points=[c, ac, abc, bc], color="#a0c4ff", opacity=0.25),
+             obj("face_front", "polygon", points=[o, a, ac, c], color="#90befa", opacity=0.3),
+             obj("face_back", "polygon", points=[b, ab, abc, bc], color="#90befa", opacity=0.25),
+             obj("face_left", "polygon", points=[o, b, bc, c], color="#b8d4ff", opacity=0.25),
+             obj("face_right", "polygon", points=[a, ab, abc, ac], color="#b8d4ff", opacity=0.25)]
+    raw = answer(faces + labels, steps if steps is not None else [
+        step("0:20", caption="Cubic: a b c equal", show=[x["id"] for x in labels]),
+        step("0:40", caption="Tetragonal: c longer", highlight=["label_c"], set=[{"param": "c", "to": 4.5}]),
+        step("1:00", caption="Monoclinic: pushed over",
+             set=[{"param": "a", "to": 2.5}, {"param": "b", "to": 4}, {"param": "c", "to": 5},
+                  {"param": "beta", "to": 75}])], TRICLINIC)
+    raw["defs"] = TRICLINIC_DEFS
+    return raw
+
+
+T4_LABELS = [obj("label_a", "label", points=[["a/2", "-0.5", "0.2"]], color="#d62728", label="a"),
+             obj("label_b", "label", points=[["bx/2", "by/2 + 0.5", "0.2"]], color="#2ca02c", label="b"),
+             obj("label_c", "label", points=[["cx + 0.6", "cy", "cz/2"]], color="#ff7f0e", label="c")]
+
+
+def test_a_loose_label_naming_a_length_becomes_its_edge_in_its_colour():
+    # test2 #4: "c" sat mid-face (0.6 off its edge, 1.2 once the cell leaned) and every edge was the faces' blue
+    notes = []
+    scene = popout.clean_scene(faces_cell(T4_LABELS), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    by = {o["id"]: o for o in scene["objects"]}
+    o = ["0", "0", "0"]
+    assert by["label_a"]["type"] == "segment" and by["label_a"]["points"] == [o, ["a", "0", "0"]]
+    assert by["label_b"]["type"] == "segment" and by["label_b"]["points"] == [o, ["bx", "by", "0"]]
+    assert by["label_c"]["type"] == "segment" and by["label_c"]["points"] == [o, ["cx", "cy", "cz"]]
+    # each in its own colour, with its name, solid; the faces keep theirs
+    assert [(by[i]["color"], by[i]["label"], by[i]["style"], by[i]["opacity"]) for i in ("label_a", "label_b", "label_c")] \
+        == [("#d62728", "a", "solid", 1.0), ("#2ca02c", "b", "solid", 1.0), ("#ff7f0e", "c", "solid", 1.0)]
+    assert by["face_front"]["color"] == "#90befa"
+    # the steps still show and point at them under the same ids
+    assert scene["steps"][0]["show"] == ["label_a", "label_b", "label_c"]
+    assert scene["steps"][1]["highlight"] == ["label_c"]
+    # edge c is c long in every state the view rests in, the cell leaning or not
+    shape = popout.Shape(by["label_c"], popout._names(scene), scene["axes"])
+    for env in popout._envs(scene, popout.param_states(scene["params"], scene["steps"], finals=True)):
+        pts, _ = shape.points_at(env)
+        assert float(np.linalg.norm(pts[1] - pts[0])) == pytest.approx(env["c"])
+    assert "object label_c: the label 'c' is the edge c beside it (0.6 off it), drawn in its colour" in notes
+
+
+def test_a_label_stays_a_label_unless_an_edge_beside_it_is_that_length():
+    far = obj("label_c", "label", points=[["9", "9", "9"]], color="#ff7f0e", label="c")  # nowhere near edge c
+    angle_name = obj("label_beta", "label", points=[["0.5", "0", "0.5"]], label="beta")  # an angle, not a length
+    named_other = obj("label_d", "label", points=[["1", "0", "0"]], label="d")  # names no param
+    raw = faces_cell([far, angle_name, named_other], steps=[step("0:20", caption="the cell")])
+    scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP)
+    assert {o["id"]: o["type"] for o in scene["objects"] if o["id"].startswith("label")} == \
+        {"label_c": "label", "label_beta": "label", "label_d": "label"}
+    # a side c long only at the start (it is a, which a step stretches) is not edge c
+    labels = [obj("label_c", "label", points=[["a/2", "-0.3", "0"]], label="c")]
+    raw = faces_cell(labels, steps=[step("0:20", caption="a longer", set=[{"param": "a", "to": 5}])])
+    scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP)
+    assert next(o["type"] for o in scene["objects"] if o["id"] == "label_c") == "label"
+    # only a polygon's sides: an edge drawn as a segment of its own is left to that segment
+    edge = obj("edge_c", "segment", points=[["0", "0", "0"], ["0", "0", "c"]])
+    lab = obj("label_c", "label", points=[["0.3", "0", "c/2"]], label="c")
+    scene = popout.clean_scene(answer([edge, lab], [step("0:20", caption="c")], TRICLINIC),
+                               piece=1, pieces=[1], version="v", clip=CLIP)
+    assert [o["type"] for o in scene["objects"]] == ["segment", "label"]
+
+
+def test_a_side_drawn_as_its_own_segment_is_not_drawn_again_from_a_label():
+    # the cell's faces, its edge c drawn as a segment of its own (written the other way round), and "c" beside it:
+    # turning the label into edge c drew a second, orange c on the blue one
+    for ends in ([["0", "0", "0"], ["cx", "cy", "cz"]], [["cx", "cy", "cz"], ["0", "0", "0"]]):
+        edge = obj("edge_c", "segment", points=ends, color="#336699")
+        lab = obj("label_c", "label", points=[["cx + 0.6", "cy", "cz/2"]], color="#ff7f0e", label="c")
+        raw = faces_cell([lab], steps=[step("0:20", caption="Cubic: a b c equal", show=["label_c"])])
+        raw["objects"].append(edge)
+        notes = []
+        scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+        by = {o["id"]: o for o in scene["objects"]}
+        assert by["label_c"]["type"] == "label" and by["edge_c"]["type"] == "segment"
+        assert not [n for n in notes if "is the edge" in n]
+    # the same side written with other expressions that land on the same corners counts as drawn too
+    edge = obj("edge_c", "vector", points=[["0*a", "0", "0"], ["c*cos(beta*deg)", "cy", "cz"]])
+    raw = faces_cell([obj("label_c", "label", points=[["cx + 0.6", "cy", "cz/2"]], label="c")],
+                     steps=[step("0:20", caption="c", show=["label_c"])])
+    raw["objects"].append(edge)
+    scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP)
+    assert next(o["type"] for o in scene["objects"] if o["id"] == "label_c") == "label"
+    # the other sides still become edges: a and b, with c drawn already
+    raw = faces_cell(T4_LABELS)
+    raw["objects"].append(obj("edge_c", "segment", points=[["0", "0", "0"], ["cx", "cy", "cz"]]))
+    scene = popout.clean_scene(raw, piece=1, pieces=[1], version="v", clip=CLIP)
+    assert {o["id"]: o["type"] for o in scene["objects"] if o["id"].startswith(("label", "edge"))} ==         {"label_a": "segment", "label_b": "segment", "label_c": "label", "edge_c": "segment"}
+
+
+def test_a_label_nearer_another_drawn_length_names_that_one_not_a_side():
+    # a regular hexagon: its sides are r long, and so is its dashed radius, which "r" sits beside
+    pts = [[f"r*cos({k * 60}*deg)", f"r*sin({k * 60}*deg)", "0"] for k in range(6)]
+    radius = obj("radius", "segment", points=[["0", "0", "0"], ["r", "0", "0"]], style="dashed")
+    params = [{"name": "r", "value": 2, "min": 1, "max": 3, "label": "radius r"}]
+    for at, becomes in ((["r/2", "-0.15", "0"], "label"),  # 0.15 off the radius, 0.79 off a side: the radius's
+                        (["1.6", "-0.6", "0"], "segment")):  # 0.05 off a side, 0.6 off the radius: the side's
+        objs = [obj("hex", "polygon", points=pts, color="#1f6fd1", opacity=0.3), radius,
+                obj("label_r", "label", points=[at], color="#d0342c", label="r")]
+        scene = popout.clean_scene(answer(objs, [step("0:20", caption="The radius r", show=["radius", "label_r"])], params),
+                                   piece=1, pieces=[1], version="v", clip=CLIP)
+        assert next(o["type"] for o in scene["objects"] if o["id"] == "label_r") == becomes, at
+    # with no radius drawn, "r" beside a side is that side
+    objs = [obj("hex", "polygon", points=pts, color="#1f6fd1", opacity=0.3),
+            obj("label_r", "label", points=[["1.6", "-0.6", "0"]], color="#d0342c", label="r")]
+    scene = popout.clean_scene(answer(objs, [step("0:20", caption="A side r", show=["label_r"])], params),
+                               piece=1, pieces=[1], version="v", clip=CLIP)
+    assert next(o["type"] for o in scene["objects"] if o["id"] == "label_r") == "segment"
 
 
 def test_a_step_looks_from_where_what_it_points_at_is_seen():
