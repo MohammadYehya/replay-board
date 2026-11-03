@@ -42,5 +42,8 @@ All three returned correct answers: `board / white`, the right sentence, and one
   pieces at `reasoning_effort: low`).
 - **Voice Transcribe**: ENDPOINTING turns average ~15 s, so word times need the MMS aligner. 3-minute pieces
   in parallel; an 8-minute lecture transcribes in ~30 s for $0.024.
-- **Whole lecture** (8 min, 1080p board lecture, nothing cached): 19 calls, $0.38; first replay after
-  4.8 min, word times refined by 7.4 min, on a 4-core laptop.
+- **Whole lecture** (8 min, 1080p board lecture, nothing cached, on a 4-core laptop):
+  - without pointing gestures (1 Nov): 19 calls, $0.38; first replay after 4.8 min, word times refined by
+    7.4 min;
+  - with pointing gestures, the default (`data/measure-nocache.log`): 100 calls, $1.17; first replay after
+    5.0 min, word times refined by 5.8 min.

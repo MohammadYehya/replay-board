@@ -125,7 +125,8 @@ cd web; npm install; npm run build; cd ..
 ```powershell
 .venv\Scripts\python -m app.server
 ```
-Open http://127.0.0.1:8000, drop a lecture video, and watch the stages; the player opens when it's ready.
+Open http://127.0.0.1:8000, drop a lecture video, click "Upload and process", and watch the stages; the player
+opens when it's ready.
 
 Or from the command line (writes `data\jobs\<name>-<hash>\replay.json`):
 ```powershell
@@ -143,10 +144,10 @@ cd web; npm test
 
 ## Layout
 ```
-app/            pipeline, CLI (app.process), server (app.server), slides export (export, pptx_deck), 3D steps
-                (popout), smoke test
-app/core/       meta_api (one client), board, slides, sam, sam_codec, speech, understand, media, texrender,
-                scene_expr (the 3D maths grammar)
+app/            pipeline, CLI (app.process), server (app.server), Ask Muse (ask), study notes (notes), slides
+                export (export, pptx_deck), 3D steps (popout), settings (config), smoke test
+app/core/       meta_api (one client), board, board_gestures (pointing), lines, slides, deck (PDF decks), sam,
+                sam_codec, speech, understand, media, texrender, scene_expr (the 3D maths grammar)
 web/            player: React + Vite + TypeScript + KaTeX
 tests/          generated-lecture self-tests and unit tests
 data/           videos, job folders and the model cache (never committed)
@@ -200,6 +201,11 @@ data/           videos, job folders and the model cache (never committed)
 - MMS word alignment runs on the CPU at 1–3× real time; for long lectures the replay appears first with
   turn-level word times and is refined in place.
 - Handwriting reading is as good as the frame: very small or blurry writing may be read partly.
+
+## What's next
+- A browser extension front end for lecture platforms that allow it, on top of the same backend.
+- Moving cameras (pan and zoom).
+- The MMS aligner on a GPU, so an hour of lecture gets its word times in minutes.
 
 ## Privacy and video rules
 The original video is never altered: no outlining, blurring or removing the teacher. Videos and anything

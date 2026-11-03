@@ -5,15 +5,17 @@ point at a result with your arm stretched out, erase something, and draw one sha
 in a few spoken stages, e.g. "first a cube... now stretch it upwards... now tilt it", for the 3D view) and one
 slide lecture with a cursor or laser. Process both before filming
 (`python -m app.server`, drop the files), so the player opens instantly; show the upload with a short clip.
-Record at 1920×1080, browser zoom 100%, dark theme. Close other tabs; hide the bookmarks bar.
+Record at 1920×1080 with the browser at 100% zoom. This laptop's screen is 1368×912 at 200%, so the page
+would be only about 1368 px wide: use a 1080p monitor, or capture a 16:9 region. Close other tabs; hide the
+bookmarks bar.
 
 | Time | On screen | Say (roughly) |
 |---|---|---|
 | 0:00–0:15 | A recorded board lecture where the teacher stands in front of the writing; then a slide recording with a cursor flying around. | "Rewatching a recorded lecture is hard: the teacher blocks the board, the camera can't read it, the cursor never stops moving." |
-| 0:15–0:30 | Replay Board home page. Drag a short clip in. The stages tick: board found, person tracked, writing captured, transcript, reading, linking. | "Replay Board takes the recording as it is. Meta's models do the understanding: SAM 3.1 finds the board and tracks the teacher, Voice Transcribe and Meta's MMS aligner get every word and its time, Muse Spark reads the board and links it to what was said." |
+| 0:15–0:30 | Replay Board home page. Drag a short clip in and click "Upload and process". The stages tick: Find the board, Find the teacher, Capture the writing, Transcribe the voice, Read the writing, Link writing to speech. | "Replay Board takes the recording as it is. Meta's models do the understanding: SAM 3.1 finds the board and tracks the teacher, Voice Transcribe and Meta's MMS aligner get every word and its time, Muse Spark reads the board and links it to what was said." |
 | 0:30–0:55 | Player: original video left (untouched), clean board right, drawing stroke by stroke in sync. Scrub back and forth. | "The original video plays untouched. Beside it, a clean board redraws your writing as you write it, on the same clock as the video." |
 | 0:55–1:10 | Seek to a moment where you stand in front of the writing: the board already shows it, with the "was hidden" tag. | "When the teacher stands in front of what they're writing, the camera can't see it. Replay Board draws it anyway, at the moment it was actually said." |
-| 1:10–1:25 | Hover a piece (tooltip with typeset maths); click it: the video jumps to where it was explained. Toggle Typeset. | "Click any line to jump to where it was explained. Switch handwriting to typeset maths." |
+| 1:10–1:25 | Hover a piece (tooltip with typeset maths); click it: the video jumps to where it was explained. Switch Handwriting to Typeset (or press T). | "Click any line to jump to where it was explained. Switch handwriting to typeset maths." |
 | 1:25–1:35 | Transcript highlighting word by word; click a chapter. Partial erase visible on the board. | "Every word is timed; chapters come from the lecture itself. Erasing works too." |
 | 1:35–1:45 | A moment where you point at a result on the board: the virtual board spotlights or underlines it while the video plays untouched. | "When the teacher points at the board, the clean board shows what they meant: SAM 3.1 follows the hand, Muse Spark decides if it was pointing and at what." |
 | 1:45–2:00 | While the video plays, the "Watch in 3D" pill appears on your 3D-ish drawing; click it (made beforehand, so it opens at once). Click the first step chip: the video jumps there and the model changes at each word, its angles and values updating, while the video plays beside it. Click "Try it" and drag one slider for a second. | "Drawings come alive in 3D: Muse Spark builds a model of what you drew and changes it step by step, at the exact words you explain it with." |
@@ -26,14 +28,21 @@ Record at 1920×1080, browser zoom 100%, dark theme. Close other tabs; hide the 
 ## Checklist before filming
 - `.venv\Scripts\python -m pytest -q` and `.venv\Scripts\python -m tests.selftest_board` pass.
 - `cd web; npm run build`, then use the built player at http://127.0.0.1:8000 (smoother than dev mode).
-- The lecture list shows only your lectures (delete old test jobs in `data\jobs`).
+- The lecture list shows only your lectures: move the old test jobs out of `data\jobs` (for example into
+  `data\jobs-archive`) rather than deleting them.
+- Open each lecture you will show once before the take: on a long lecture the video's first frame can take a
+  few seconds the first time.
 - Make the 3D view you will show beforehand, so it opens at once: open it once in the player (the first time takes
   30–70 s), or run `.venv\Scripts\python -m app.popout <job> <piece>` (it shows the cost and asks first). Play
   through every step and check each change happens at the right word; if one is off, delete
-  `data\jobs\<job>\popout\NNN.v2.json` and open it again for a new take (about $0.03–0.10).
+  `data\jobs\<job>\popout\NNN.v2.json` and open it again for a new take (about $0.03–0.10). Make it after the
+  last time you process that lecture: processing it again makes the 3D view stale, and it has to be made again.
 - Open the Slides page of the lecture you film once before (Muse Spark writes the deck in about 25–30 s the first
   time, then it's cached) and read every slide. Download the PowerPoint and open it in PowerPoint once before
-  filming: it was only checked in LibreOffice here. The Notes page is no longer in the script; show it only if you
+  filming: it was only checked in LibreOffice here. PowerPoint isn't installed on this PC, so for the 2:35 shot
+  use PowerPoint for the web (upload the file to OneDrive) or another PC. The Notes page is no longer in the script; show it only if you
   have spare seconds.
 - Decide on the Ask Muse question beforehand. A question asked before comes from the cache, free, but appears at
-  once instead of streaming in; to show the streaming, ask it fresh on camera (about a cent).
+  once instead of streaming in; to show the streaming, ask it fresh on camera (about a cent). The cache only
+  matches the same question at the same moment, with the same attachments in the same order, in an empty
+  conversation.
