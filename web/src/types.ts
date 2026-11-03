@@ -296,6 +296,9 @@ export interface Scene3D {
   steps: Scene3DStep[];
   /** [[minx, miny, minz], [maxx, maxy, maxz]] over every state of every step (the server works it out). */
   bounds: [Vec3, Vec3] | null;
+  /** The corner the "iso" camera looks from: "left" when the scene's main vector points into the usual front-right
+   *  one (the server picks it). */
+  isoFrom?: 'left' | 'right';
 }
 
 // Ask Muse (app/ask.py): a student's questions about the lecture, answered by Muse Spark with the whole lecture as

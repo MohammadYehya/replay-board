@@ -75,11 +75,25 @@ export function cleanMadeScenes(raw: unknown): MadeScene[] {
   return out;
 }
 
-/** The made scenes the lecture is explaining at this clock (from PILL_BEFORE s before the first step to PILL_AFTER s
- *  after the last): the board offers "Watch in 3D" by them. */
-export function explainedAt(made: readonly MadeScene[], clock: number): MadeScene[] {
+/** The made scene the lecture is explaining at this clock (from PILL_BEFORE s before its first step to PILL_AFTER s
+ *  after its last), as a list of one or none: the board offers "Watch in 3D" by it. When two are, the one whose step
+ *  came last (test2: #4 and #7 both explain the crystal systems, and both showed the pill from 0:14). `onBoard`: only
+ *  a drawing that is on the board then can have the pill (one that is not would take it from one that is). */
+export function explainedAt(
+  made: readonly MadeScene[],
+  clock: number,
+  onBoard: (m: MadeScene) => boolean = () => true,
+): MadeScene[] {
   if (!Number.isFinite(clock)) return [];
-  return made.filter((m) => m.synced && m.times.length > 0 && clock >= m.times[0] - PILL_BEFORE && clock <= m.times[m.times.length - 1] + PILL_AFTER);
+  let best: MadeScene | null = null;
+  let bestAt = -Infinity;
+  for (const m of made) {
+    if (!m.synced || !m.times.length || clock < m.times[0] - PILL_BEFORE || clock > m.times[m.times.length - 1] + PILL_AFTER) continue;
+    if (!onBoard(m)) continue;
+    const at = m.times.filter((t) => t <= clock + PILL_BEFORE).pop() ?? -Infinity;
+    if (at > bestAt) [best, bestAt] = [m, at];
+  }
+  return best ? [best] : [];
 }
 
 /** A made drawing is on the board at a moment when any of its pieces is: the saddle's drawing (piece 23, its label)

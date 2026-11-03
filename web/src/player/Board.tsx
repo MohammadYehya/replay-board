@@ -416,9 +416,11 @@ export const Board = memo(
       (t: number) => {
         const r = rendererRef.current;
         if (!r || !badgeEls.size) return;
-        const now = new Set(explainedAt(madeRef.current.map((x) => x.m), t).map((m) => m.drawing));
         const made = new Map(madeRef.current.map((x) => [x.m.drawing, x.m]));
         const seen = (pid: number) => r.isVisible(pid, t);
+        const now = new Set(
+          explainedAt(madeRef.current.map((x) => x.m), t, (m) => drawingOnBoard(m, seen)).map((m) => m.drawing),
+        );
         for (const [id, el] of badgeEls) {
           const m = made.get(id);
           const state = !(m ? drawingOnBoard(m, seen) : seen(id)) ? 'off' : now.has(id) ? 'pill' : 'badge';

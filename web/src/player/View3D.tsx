@@ -554,7 +554,15 @@ export default function View3D(props: Props) {
                 </span>
               </div>
               {step ? (
-                step.caption && <span className="v3-cap-text">{displayName(step.caption)}</span>
+                step.caption &&
+                (mine ? (
+                  // The caption tells the lecture's values; with the viewer's own it may no longer be true.
+                  <span className="v3-cap-text lecture">
+                    <span className="v3-cap-from">In the lecture:</span> {displayName(step.caption)}
+                  </span>
+                ) : (
+                  <span className="v3-cap-text">{displayName(step.caption)}</span>
+                ))
               ) : (
                 <span className="v3-cap-text muted">{beforeLine(scene!)}</span>
               )}

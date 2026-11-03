@@ -1430,15 +1430,31 @@ def test_a_step_looks_from_where_what_it_points_at_is_seen():
              step("0:40", caption="first along x", show=["comp"], camera="iso")]
     notes = []
     scene = popout.clean_scene(answer(objs, steps), piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
-    assert [s["camera"] for s in scene["steps"]] == ["iso", "side", "keep", "iso"]
-    assert "step 2: camera side instead of iso: v seen 0.91 face on, not 0.41" in notes
-    assert sum("camera" in n for n in notes) == 1
+    # v points into iso's usual front-right corner: the scene's iso looks from the front-left, where v is 0.85 of its
+    # length and the components of steps 3-5 still show (from "side", the y axis pointed at the viewer)
+    assert scene["iso_from"] == "left"
+    assert [s["camera"] for s in scene["steps"]] == ["iso", "iso", "keep", "iso"]
+    assert "iso looks from the front-left: the worst line on screen is seen 0.61 face on, not 0.41" in notes
+    assert sum("camera" in n for n in notes) == 0
     # an angle: its plane faces the camera when its normal is along the line of sight
     theta = angle("theta", [o, ["0", "-1", "0"], ["2", "-3", "4"]], label="theta")
     notes = []
     scene = popout.clean_scene(answer(objs + [theta], [step("0:10", caption="theta", show=["theta"], camera="iso")]),
                                piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
-    assert scene["steps"][0]["camera"] == "side" and "theta seen 0.75 face on, not 0.23" in " ".join(notes)
+    assert scene["steps"][0]["camera"] == "side" and "theta seen 0.75 face on, not 0.59" in " ".join(notes)
+
+
+def test_iso_stays_at_the_front_right_when_nothing_points_into_it():
+    o = ["0", "0", "0"]
+    objs = [obj("x_axis", "vector", points=[o, ["5", "0", "0"]], label="x"),
+            obj("y_axis", "vector", points=[o, ["0", "5", "0"]], label="y"),
+            obj("z_axis", "vector", points=[o, ["0", "0", "5"]], label="z"),
+            obj("v", "vector", points=[o, ["-2", "3", "4"]], label="v")]
+    notes = []
+    scene = popout.clean_scene(answer(objs, [step("0:10", caption="the vector", show=["v"], camera="iso")]),
+                               piece=1, pieces=[1], version="v", clip=CLIP, notes=notes)
+    assert "iso_from" not in scene and scene["steps"][0]["camera"] == "iso"
+    assert not any("front-left" in n for n in notes)
 
 
 def test_a_param_label_up_to_32_characters_is_whole():
@@ -1453,3 +1469,84 @@ def test_the_prompt_asks_for_points_built_from_the_defs_and_angles_where_marked(
     assert "Build every point from the params and defs" in task  # test2 #7: the prism walls ignored alpha
     assert "goes at the corner where it is marked" in task  # test2 #7: gamma at the hexagon's centre
     assert "at most 32 characters" in task
+
+
+def _deg_scene(captions, params=(("beta", "β", "deg", 90), ("gamma", "gamma", "deg", 120), ("a", "a", "", 3)),
+               sets=(("beta", 104.5), ("beta", 75))):
+    steps = [{"caption": c, "set": []} for c in captions]
+    steps[0]["set"] = [{"param": n, "to": v} for n, v in sets]
+    return {"params": [{"name": n, "label": l, "unit": u, "value": v} for n, l, u, v in params], "steps": steps}
+
+
+@pytest.mark.parametrize("caption, expected", [
+    # test2 #7's captions, in the teacher's words (its angles are 90 and 120)
+    ("Tetragonal: stretched cube with a equals b, c longer, angles 90",
+     "Tetragonal: stretched cube with a equals b, c longer, angles 90°"),
+    ("Orthorhombic: shoe box with a b c all different, angles still 90",
+     "Orthorhombic: shoe box with a b c all different, angles still 90°"),
+    ("Monoclinic: leans one way with alpha gamma 90 and beta not 90",
+     "Monoclinic: leans one way with alpha gamma 90° and beta not 90°"),
+    ("Rhombohedral: cube squished so sides equal and angles equal not 90",
+     "Rhombohedral: cube squished so sides equal and angles equal not 90°"),
+    ("β = 75 now", "β = 75° now"),
+    ("beta 104.5, gamma 120", "beta 104.5°, gamma 120°"),
+    ("beta=90, so it stands straight", "beta=90°, so it stands straight"),
+    ("All angles are still 90 here", "All angles are still 90° here"),
+    ("gamma 120 at the base", "gamma 120° at the base"),
+    ("angles 90.", "angles 90°."),
+    # left alone: not a value the scene's angles take
+    ("beta is 45 now", "beta is 45 now"),
+    ("a is 3 and c is 4", "a is 3 and c is 4"),
+    ("angle 720", "angle 720"),
+    # left alone: a unit, a ratio, pi or radians
+    ("Simple cubic: all angles 90 degrees", "Simple cubic: all angles 90 degrees"),
+    ("Hexagon corner with gamma 120° at the base", "Hexagon corner with gamma 120° at the base"),
+    ("beta 90 degs", "beta 90 degs"),
+    ("Cos beta is 3 over root 29", "Cos beta is 3 over root 29"),
+    ("The cosine of beta is 90", "The cosine of beta is 90"),
+    ("beta is 90 radians", "beta is 90 radians"),
+    ("beta and gamma are 90 and 120 radians", "beta and gamma are 90 and 120 radians"),
+    ("beta is 90 pi over 3", "beta is 90 pi over 3"),
+    ("beta now 90 and a bit radians", "beta now 90 and a bit radians"),
+    # left alone: a count, an index, a coefficient, a list of several values
+    ("The angles at all 8 corners are 90", "The angles at all 8 corners are 90"),
+    ("Of the angles only 1 is not 90", "Of the angles only 1 is not 90"),
+    ("angles of 90 bonds", "angles of 90 bonds"),
+    ("the number of angles is 90", "the number of angles is 90"),
+    ("Angles 1 and 2 add up to 180", "Angles 1 and 2 add up to 180"),
+    ("beta 1 is 30 and beta 2 is 19", "beta 1 is 30 and beta 2 is 19"),
+    ("beta is 2 gamma", "beta is 2 gamma"),
+    ("F and beta are 90 and 120", "F and beta are 90 and 120"),
+    ("Angle 90 is marked", "Angle 90 is marked"),
+    # left alone: glued to text
+    ("Angles in 90D look different", "Angles in 90D look different"),
+    ("beta 90s style", "beta 90s style"),
+    ("beta at 90:30 in the video", "beta at 90:30 in the video"),
+    ("beta is a 90-degree angle", "beta is a 90-degree angle"),
+    ("β90 and β120", "β90 and β120"),
+    ("betamax 90", "betamax 90"),
+    ("beta, then 90 more", "beta, then 90 more"),
+])
+def test_a_bare_angle_value_in_a_caption_gets_its_degree_sign(caption, expected):
+    scene = _deg_scene([caption])
+    popout.degree_captions(scene, [])
+    assert scene["steps"][0]["caption"] == expected
+
+
+def test_a_one_letter_angle_name_is_no_trigger_and_a_caption_never_outgrows_its_limit():
+    # a triangle's angles named a, b, c: "a" is also the article (link_captions skips labels under 2 letters too)
+    scene = _deg_scene(["Take a 60 degree turn", "a is 60 here"], params=(("a", "a", "deg", 60), ("b", "b", "deg", 60)),
+                       sets=())
+    popout.degree_captions(scene, [])
+    assert [s["caption"] for s in scene["steps"]] == ["Take a 60 degree turn", "a is 60 here"]
+    full = "x" * (popout.CAPTION_CHARS - len(" beta 90")) + " beta 90"
+    scene, notes = _deg_scene([full]), []
+    popout.degree_captions(scene, notes)
+    assert scene["steps"][0]["caption"] == full and "would pass" in notes[0]
+
+
+def test_no_degree_sign_without_an_angle_param():
+    scene = _deg_scene(["angles 90", "theta 45"], params=(("a", "a", "", 90),), sets=())
+    notes = []
+    popout.degree_captions(scene, notes)
+    assert [s["caption"] for s in scene["steps"]] == ["angles 90", "theta 45"] and notes == []

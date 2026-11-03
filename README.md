@@ -112,7 +112,8 @@ Re-running a lecture is free: every model answer is cached.
 
 ## Run it (Windows, PowerShell)
 
-Needs Python 3.10–3.13, ffmpeg on PATH, Node 20+, and a Meta Model API key.
+Needs Python 3.10–3.13, ffmpeg on PATH, Node 22.18+ (its tests run TypeScript directly), and a Meta
+Model API key.
 
 ```powershell
 py -3.13 -m venv .venv
@@ -184,7 +185,8 @@ data/           videos, job folders and the model cache (never committed)
   every maths expression against a small grammar (the player compiles the same grammar with its own parser,
   never as code), evaluates every state of every step, moves each step onto the time of its cue word from the
   aligner, drops steps that change nothing, shows what a caption names, keeps angle marks apart, picks a camera
-  that shows the step's subject, and narrows the sliders' ranges to shapes that can exist. A strip shows every
+  that shows the step's subject (from the other front corner when a vector points straight at the usual one),
+  adds the degree sign a caption leaves out, and narrows the sliders' ranges to shapes that can exist. A strip shows every
   value as it changes; **Try it** gives a slider per value so a student can explore ("Back to the lecture"
   returns). Step chips and the `[` `]` keys jump the video to a step; "Play the explanation" plays it with the
   lecture; a drawing never talked about gets steps you play yourself. One scene per drawing, made on the first

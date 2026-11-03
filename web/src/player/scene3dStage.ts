@@ -111,6 +111,9 @@ const CAMERA_DIRS: Record<Camera, Vec3> = {
   side: [1, 0.2, 0.25],
   iso: [0.7, -1.2, 0.62],
 };
+/** "iso" from the front-left corner, for a scene whose main vector points into the front-right one (its iso_from
+ *  "left", app/popout.py pick_cameras). */
+const ISO_LEFT: Vec3 = [-0.7, -1.2, 0.62];
 /** An axis whose screen length is under this share of its true length points at the viewer: its numbers would pile
  *  up on the origin, so they are hidden (sin of the angle between the axis and the line of sight). */
 const AXIS_EDGE_ON = 0.25;
@@ -1442,7 +1445,7 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
   /** The viewer's zoom (Ctrl + wheel, a pinch): a share of the fitted distance, kept when the steps turn the camera. */
   let zoom = 1;
   const viewFor = (preset: Camera) => {
-    const dir = frame.dir(CAMERA_DIRS[preset]);
+    const dir = frame.dir(preset === 'iso' && scene.isoFrom === 'left' ? ISO_LEFT : CAMERA_DIRS[preset]);
     return { pos: ft.clone().addScaledVector(dir, fitDistance(dir) * zoom), target: ft.clone() };
   };
 

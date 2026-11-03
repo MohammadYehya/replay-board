@@ -400,16 +400,32 @@ def link(client: MetaClient, elements: list[dict], words: list[dict], duration: 
     if not elements:
         return {"elements": {}, "chapters": []}
     starts = np.arange(0.0, max(duration, 1.0), window)
+    multi = len(starts) > 1
     jobs = []
     for a in starts:
         b = a + window
         els = [e for e in elements if a <= _el_time(e) < b]
-        if not els:
+        # with several windows, one with talk and no new writing is still asked for its chapters
+        if not els and not (multi and any(a <= w["s"] < b for w in words)):
             continue
         ws = [w for w in words if a - 120 <= w["s"] <= b + 120]
         jobs.append((a, b, els, ws, a == 0.0))
     if not jobs:
         jobs = [(0.0, duration, elements, words, True)]
+
+    def chapters_ask(a: float, b: float, first: bool, t0: float) -> str:
+        """What a window is asked about chapters. A lecture of one window: the whole lecture, as always (the prompt
+        is unchanged, so cached answers stay valid). Several: each window sees only its own speech, so each gives
+        the topics that start in it (an hour-long lecture had chapters for its first 22 minutes only)."""
+        if not multi:
+            return ("chapters: split the whole lecture into 3-10 topic chapters with short titles (first at "
+                    f"{max(0.0, a):.0f}).\n")
+        if first:
+            # first at the first word or writing: a clip cut from a long video starts later than 0
+            return (f"chapters: split this part of the lecture (up to {b:.0f} s) into 2-5 topic chapters with short "
+                    f"titles (first at {t0:.0f}).\n")
+        return (f"chapters: the topics that start in this part of the lecture (between {a:.0f} and {b:.0f} s), "
+                "0-5, with short titles; an empty list when the topic before it simply goes on.\n")
 
     def one(job):
         a, b, els, ws, first = job
@@ -425,8 +441,7 @@ def link(client: MetaClient, elements: list[dict], words: list[dict], duration: 
             "redraw_at: for an element with revealed=true (written while the teacher's body hid it, so it "
             "became visible only at t_seen), the time when the teacher actually wrote/said it, normally "
             "between written_after and t_seen; -1 for all other elements.\n"
-            + ("chapters: split the whole lecture into 3-10 topic chapters with short titles (first at "
-               f"{max(0.0, a):.0f}).\n" if first else "chapters: return an empty list.\n")
+            + chapters_ask(a, b, first, min([w["s"] for w in ws if w["s"] >= a] + [_el_time(e) for e in els] + [b]))
             + "Use only times from the transcript and the elements. Reply in JSON.\n\n"
             "ELEMENTS:\n" + "\n".join(el_lines) + "\n\nSPEECH:\n" + tr)
         return client.ask(prompt, schema=LINK_SCHEMA, reasoning="medium")
@@ -438,7 +453,10 @@ def link(client: MetaClient, elements: list[dict], words: list[dict], duration: 
     out: dict[str, dict] = {}
     chapters = []
     ids = {str(e["id"]) for e in elements}
-    for res in results:
+    for (a, b, *_), res in zip(jobs, results):
+        if multi:  # a window's chapters start inside it (its speech overlaps the next by 2 min)
+            res = {**res, "chapters": [c for c in res.get("chapters", []) if isinstance(c, dict)
+                                       and (a == 0.0 or a <= _num(c.get("t"))) and _num(c.get("t")) < b]}
         for r in res.get("elements", []):
             eid = str(r.get("id"))
             if eid not in ids:
@@ -450,9 +468,18 @@ def link(client: MetaClient, elements: list[dict], words: list[dict], duration: 
                     spoken.append({"start": round(a, 2), "end": round(min(b, duration), 2)})
             ra = r.get("redraw_at", -1)
             out[eid] = {"spoken": spoken, "redraw_at": round(float(ra), 2) if ra is not None and ra >= 0 else None}
-        chapters += [c for c in res.get("chapters", []) if 0 <= float(c.get("t", -1)) <= duration]
-    chapters = sorted({round(float(c["t"]), 1): c["title"].strip() for c in chapters if c.get("title")}.items())
+        chapters += [c for c in res.get("chapters", []) if isinstance(c, dict) and 0 <= _num(c.get("t")) <= duration]
+    chapters = sorted({round(float(c["t"]), 1): c["title"].strip() for c in chapters
+                       if isinstance(c.get("title"), str) and c["title"].strip()}.items())
     return {"elements": out, "chapters": [{"t": t, "title": title} for t, title in chapters]}
+
+
+def _num(v) -> float:
+    """A number from a model's answer, or -1."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return -1.0
 
 
 def _el_time(e: dict) -> float:

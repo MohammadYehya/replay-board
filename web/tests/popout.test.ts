@@ -211,7 +211,7 @@ test('the list of made 3D views is read defensively', () => {
   assert.deepEqual(cleanMadeScenes([{ drawing: 1 }]), []);
 });
 
-test('"Watch in 3D" from a second before the first step to five seconds after the last', () => {
+test('"Watch in 3D" from a second before the first step to five seconds after the last, on one drawing at a time', () => {
   const made = cleanMadeScenes({
     drawings: [
       { drawing: 4, pieces: [4], title: 'a', steps: 3, synced: true, times: [100, 120, 150] },
@@ -223,9 +223,15 @@ test('"Watch in 3D" from a second before the first step to five seconds after th
   assert.deepEqual(at(98.9), []);
   assert.deepEqual(at(100 - PILL_BEFORE), [4]);
   assert.deepEqual(at(130), [4]);
-  assert.deepEqual(at(145), [4, 7]);
-  assert.deepEqual(at(150 + PILL_AFTER), [4, 7]);
+  // both explained: the one whose step came last (7 at 140, then 4 at 150)
+  assert.deepEqual(at(139), [7]);
+  assert.deepEqual(at(145), [7]);
+  assert.deepEqual(at(149), [4]);
+  assert.deepEqual(at(150 + PILL_AFTER), [4]);
   assert.deepEqual(at(155.1), [7]);
+  // a drawing not on the board then never takes the pill from one that is
+  assert.deepEqual(explainedAt(made, 145, (m) => m.drawing !== 7).map((m) => m.drawing), [4]);
+  assert.deepEqual(explainedAt(made, 145, () => false), []);
   assert.deepEqual(at(165.1), []);
   assert.deepEqual(at(NaN), []);
 });

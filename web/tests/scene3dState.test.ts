@@ -72,6 +72,13 @@ test('a good scene comes through whole', () => {
   assert.deepEqual(s.bounds, [[-1, -1, 0], [4, 4, 5]]);
   assert.equal(s.axes.show, true);
   assert.deepEqual(s.steps.map((x) => x.t), [100, 110, 120]);
+  assert.equal(s.isoFrom, 'right');
+});
+
+test("the iso camera's corner: left only when the server says so", () => {
+  assert.equal(scene({ iso_from: 'left' }).isoFrom, 'left');
+  assert.equal(scene({ iso_from: 'LEFT' }).isoFrom, 'right');
+  assert.equal(scene({ iso_from: [-0.7, -1.2, 0.62] }).isoFrom, 'right');
 });
 
 test('an older server (format 1) or something unknown is told apart', () => {

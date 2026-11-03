@@ -332,6 +332,7 @@ export function cleanScene(raw: unknown): CleanResult {
       objects,
       steps,
       bounds: cleanBounds(raw.bounds),
+      isoFrom: raw.iso_from === 'left' ? 'left' : 'right',
     },
   };
 }

@@ -1967,6 +1967,13 @@ kbd {
 .v3-cap-text.muted {
   color: var(--text-2);
 }
+.v3-cap-text.lecture {
+  color: var(--text-2);
+}
+.v3-cap-from {
+  color: var(--amber);
+  font-weight: 600;
+}
 .v3-steps {
   display: flex;
   align-items: center;
@@ -3761,13 +3768,23 @@ body.presenting { overflow: hidden; }
   .sl-card .sl { border-radius: 0; box-shadow: none; }
 }
 
-/* the player's top bar: Slides stays on phones, as an icon */
+/* the player's top bar on phones: Notes and Slides stay, as icons; Shortcuts goes (no keyboard); the lecture's name
+   shrinks first, so nothing is cut off at the edge (at 375 px the first buttons were) */
 @media (max-width: 640px) {
   .topbar-actions a.ghost-btn.slides-btn {
     display: inline-flex;
   }
-  .slides-btn-label {
+  .slides-btn-label,
+  .notes-btn-label,
+  .topbar-actions .keys-btn {
     display: none;
+  }
+  .topbar-title {
+    flex: 1 1 auto;
+  }
+  .topbar-actions {
+    flex: none;
+    gap: 6px;
   }
 }
 .print-only { display: none; }

@@ -487,6 +487,7 @@ export function Player({
           </a>
           <a
             className="ghost-btn notes-btn"
+            aria-label="Notes"
             href={`#/job/${encodeURIComponent(jobId)}/notes`}
             title="Study notes for this lecture, by chapter"
           >
@@ -499,7 +500,7 @@ export function Player({
                 strokeLinejoin="round"
               />
             </svg>
-            Notes
+            <span className="notes-btn-label">Notes</span>
           </a>
           <a
             className="ghost-btn slides-btn"

@@ -47,7 +47,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import cv2
 import numpy as np
@@ -83,6 +83,9 @@ SCENE_RULES_VERSION = "6"  # change it when the prompt, the checks or REASONING 
 #    test2 #7 named alpha and beta with nothing labelled so); every named length is
 #    labelled; a param's min and max are the range a student explores with a slider; a step that changes nothing is
 #    dropped, and one whose caption names a labelled object points at it.
+# Kept at "6" when degree_captions and iso_from came (2026-11-03): they only polish scenes made from now on; a new
+# version would remake (and bill) every saved scene and replace takes checked by hand. Deleting
+# popout/NNN.v2.json remakes one.
 FORMAT = 2
 # Measured live on test2 #4 (a monoclinic cell, 2026-11-02), same prompt: "low" took 22 s and $0.028 (4.8k tokens
 # out) and got the geometry right, but turned the camera to where the lean cannot be seen and drew no angles;
@@ -123,6 +126,8 @@ FLAT_MIN = 0.45
 # Where each camera preset looks from (maths coordinates, z up): scene3dStage.ts CAMERA_DIRS, in its order of
 # preference when two see a step equally well.
 CAMERA_DIRS = {"iso": (0.7, -1.2, 0.62), "front": (0.2, -1.0, 0.25), "side": (1.0, 0.2, 0.25), "top": (0.0, -0.02, 1.0)}
+# "iso" from the front-left corner instead (a scene's iso_from "left", pick_cameras): scene3dStage.ts ISO_LEFT.
+ISO_LEFT = (-0.7, -1.2, 0.62)
 CAMERA_LOW, CAMERA_BETTER = 0.6, 0.15  # a preset scoring under this is swapped for one at least this much better
 DEG_SPAN, LEN_SHARE = 30.0, 0.5  # a param with no range explores value +- 30 degrees, or +- half its value
 SIZES = {"box": 3, "sphere": 1, "cylinder": 2, "cone": 2, "torus": 2}
@@ -1342,6 +1347,7 @@ def clean_scene(raw: Any, *, piece: int, pieces: list[int], version: str, clip: 
     size_short_arms(scene, notes)
     pick_cameras(scene, notes)
     check_captions(scene, notes)
+    degree_captions(scene, notes)
     # Dropping steps and sets that moved nothing leaves the same states, without repeats.
     scene["bounds"] = compute_bounds(scene, param_states(params, scene["steps"]))
     return scene
@@ -1592,18 +1598,12 @@ def pick_cameras(scene: dict, notes: list[str]) -> None:
     shapes = {o["id"]: (o["type"], Shape(o, names, scene["axes"])) for o in scene["objects"] if o["type"] in kinds}
     dirs = {k: np.array(v, dtype=float) / np.linalg.norm(v) for k, v in CAMERA_DIRS.items()}
     defs = _parsed_defs(scene)
-    cur = {p["name"]: float(p["value"]) for p in scene["params"]}
-    vis = _visible(scene)
-    cam = next((s["camera"] for s in steps if s["camera"] != "keep"), "iso")
-    for n, s in enumerate(steps, 1):
-        cur.update({st["param"]: float(st["to"]) for st in s["set"]})
-        env = with_defs(defs, dict(cur)) if defs else dict(cur)
-        new = [i for i in s["show"] if i not in vis]
-        vis = (vis | set(s["show"])) - set(s["hide"])
-        chosen = cam if s["camera"] == "keep" else s["camera"]
+
+    def seen(ids: Iterable[str], env: dict) -> tuple[list[np.ndarray], list[np.ndarray], list[str]]:
+        """The line directions and angle planes of these objects in this state, and the ids they come from."""
         lines, planes, what = [], [], []
-        for i in dict.fromkeys(new + s["highlight"]):
-            if i not in shapes or i not in vis:
+        for i in ids:
+            if i not in shapes:
                 continue
             typ, shape = shapes[i]
             try:
@@ -1621,11 +1621,49 @@ def pick_cameras(scene: dict, notes: list[str]) -> None:
                         what.append(i)
             except (sx.ExprError, ValueError, TypeError, FloatingPointError, ZeroDivisionError):
                 continue
+        return lines, planes, what
+
+    def scores_of(lines: list[np.ndarray], planes: list[np.ndarray], d: np.ndarray) -> list[float]:
+        return [math.sqrt(max(0.0, 1.0 - float(np.dot(u, d)) ** 2)) for u in lines] + \
+               [abs(float(np.dot(u, d))) for u in planes]
+
+    def walk():
+        """(step number, step, its state, objects visible after it, objects it shows, camera in effect) per step."""
+        cur = {p["name"]: float(p["value"]) for p in scene["params"]}
+        vis = _visible(scene)
+        cam = next((s["camera"] for s in steps if s["camera"] != "keep"), "iso")
+        for n, s in enumerate(steps, 1):
+            cur.update({st["param"]: float(st["to"]) for st in s["set"]})
+            env = with_defs(defs, dict(cur)) if defs else dict(cur)
+            new = [i for i in s["show"] if i not in vis]
+            vis = (vis | set(s["show"])) - set(s["hide"])
+            cam = cam if s["camera"] == "keep" else s["camera"]
+            yield n, s, env, vis, new, cam
+
+    # "iso" looks from the front-right corner, the way a board drawing shows x coming towards us. A vector that
+    # points into that corner is a stub from there (synth3d-vector3d: v = (2, -3, 4) at 0.41 of its length in steps
+    # 3-5, which point at its components); from the front-left corner it is 0.85 and every axis 0.82. When the worst
+    # seen line or angle on screen in the iso steps scores under CAMERA_LOW, and from the left at least CAMERA_BETTER
+    # more, the scene's iso looks from the left (the player's iso_from).
+    left = np.array(ISO_LEFT, dtype=float) / np.linalg.norm(ISO_LEFT)
+    worst = {"right": 1.0, "left": 1.0}
+    for _, _, env, vis, _, cam in walk():
+        if cam == "iso":
+            lines, planes, _ = seen(sorted(vis), env)
+            for side, d in (("right", dirs["iso"]), ("left", left)):
+                worst[side] = min([worst[side], *scores_of(lines, planes, d)])
+    if worst["right"] < CAMERA_LOW and worst["left"] >= worst["right"] + CAMERA_BETTER:
+        scene["iso_from"] = "left"
+        dirs["iso"] = left
+        notes.append(f"iso looks from the front-left: the worst line on screen is seen {worst['left']:.2f} face on, "
+                     f"not {worst['right']:.2f}")
+    chosen = next((s["camera"] for s in steps if s["camera"] != "keep"), "iso")
+    for n, s, env, vis, new, _ in walk():
+        chosen = chosen if s["camera"] == "keep" else s["camera"]  # the one in effect, with the turns made below
+        lines, planes, what = seen([i for i in dict.fromkeys(new + s["highlight"]) if i in vis], env)
         if what:
             def score(k: str) -> float:
-                d = dirs[k]
-                vals = [math.sqrt(max(0.0, 1.0 - float(np.dot(u, d)) ** 2)) for u in lines] + \
-                       [abs(float(np.dot(u, d))) for u in planes]
+                vals = scores_of(lines, planes, dirs[k])
                 return sum(vals) / len(vals)
 
             scores = {k: score(k) for k in CAMERA_DIRS}
@@ -1634,7 +1672,6 @@ def pick_cameras(scene: dict, notes: list[str]) -> None:
                 notes.append(f"step {n}: camera {best} instead of {chosen}: {', '.join(what)} seen "
                              f"{scores[best]:.2f} face on, not {scores[chosen]:.2f}")
                 s["camera"] = chosen = best
-        cam = chosen
 
 
 def repeated_labels(scene: dict) -> dict[str, str]:
@@ -1801,6 +1838,110 @@ def check_captions(scene: dict, notes: list[str]) -> None:
             if not any(vis[i] and (term in re.findall(r"[a-z]+", lab) or _GREEK.get(term, "\0") in lab)
                        for i, lab in labels.items()):
                 notes.append(f"step {n}: the caption names {term}, but nothing shown is labelled {term}")
+
+
+# What may stand between an angle's name and its value ("angles still 90", "beta is not 90", "alpha = 90"); any other
+# word means the number is something else ("the angle between 2 lines", "angle theta at point 3, 2, 4").
+_DEG_LINK = frozenset("is are = ≈ equals equal of at still not about now all both and stay stays remain remains "
+                      "becomes become to exactly only just also each".split())
+# The clause is about a ratio or radians, not degrees ("cos theta is 3 over root 29", "the cosine of theta is 0.6").
+_DEG_RATIO = re.compile(r"(?<![^\W\d_])(?:cos|sin|tan|cot|sec|csc|cosine|sine|tangent|ratio|radians?|rad|pi|π)"
+                        r"(?![^\W\d_])", re.I)
+# A unit or a word right after the number ("90 degrees", "1.57 radians", "3 over", "3 cm", "2 times").
+_DEG_UNIT = re.compile(r"\s*(?:[°º˚%/]|deg(?:rees?)?\b|rad(?:ians?)?\b|over\b|times\b|units?\b|percent\b|[ckm]?m\b|"
+                       r"metres?\b|meters?\b|f(?:ee|oo)t\b|seconds?\b|minutes?\b|x\b)", re.I)
+# What may follow an angle value: the phrase ends there ("alpha gamma 90 and beta not 90", "gamma 120 at the base").
+_DEG_AFTER = frozenset("and but or so then now here too again each while at in on for with from".split())
+# The clause counts angles: "the number of angles is 12", "how many angles... 12".
+_DEG_COUNT = re.compile(r"\b(?:number of|how many|count)\b", re.I)
+_DEG_TOKEN = re.compile(r"[^\W\d_]+|\d+(?:\.\d+)?|[=≈]|[^\w\s]")
+
+
+def degree_captions(scene: dict, notes: list[str]) -> None:
+    """A bare angle value in a caption gets its degree sign: test2 #7 said "angles 90", "angles still 90" and "alpha
+    gamma 90 and beta not 90" (the teacher's words) under a view that shows "β 90°". Strict, since a wrong sign is
+    worse than a missing one (two reviews turned counts, indices, coefficients, multiples of pi and radians into
+    degrees with word rules alone: "angles at all 8 corners", "theta 1", "2 theta", "2 pi over 3"). The number:
+    - is a value one of the scene's angle params takes (its start or a step's "to", within ANGLE_TOL), 10..360;
+    - comes right after "angles", an angle param's name (2 letters or more) or its Greek letter, or after up to 3 of
+      those names and _DEG_LINK words ("beta is not 90"), never right after the singular "angle" ("angle 1");
+    - ends its phrase: the caption, a punctuation mark or a _DEG_AFTER word follows ("90 and", "120 at the base"),
+      not a noun or a unit ("12 bonds", "90 degrees", "30 degs"), and not another value ("10 and 30": which is which);
+    - is not glued to anything ("3D", "90s", "1:30", "90-degree"), and its clause names no ratio, pi or radians, nor
+      a count ("the number of angles is 12").
+    A caption the sign would take past CAPTION_CHARS is left as it is (the player would cut its last words)."""
+    names = {"angles", "angle"}
+    values = set()
+    deg = {p["name"] for p in scene["params"] if p["unit"] == "deg"}
+    for p in scene["params"]:
+        if p["unit"] != "deg":
+            continue
+        values.add(float(p["value"]))
+        for s in (p["name"], p["label"]):
+            w = plain_words(s)
+            if re.fullmatch(r"[a-z]{2,}", w):
+                names.add(w)
+                if w in _GREEK:
+                    names.add(_GREEK[w])
+            elif len(s.strip()) == 1 and s.strip() in _LETTERS:
+                names.add(s.strip())
+    values |= {float(st["to"]) for step in scene["steps"] for st in step.get("set", []) if st.get("param") in deg}
+    if names == {"angles", "angle"}:
+        return
+
+    def is_value(v: float) -> bool:
+        return 10 <= v <= 360 and any(abs(v - x) <= ANGLE_TOL for x in values)
+
+    num = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+    for n, s in enumerate(scene["steps"], 1):
+        text = s["caption"]
+        toks = list(_DEG_TOKEN.finditer(text))
+        words = [t.group(0).lower() for t in toks]
+        ends = [k for k, w in enumerate(words) if w in ",;:.!?"]
+        marks = []
+        trigger, links, clause = None, 0, 0  # the name the chain started at, words since it, where the clause began
+        for k, t in enumerate(toks):
+            w = words[k]
+            if w in names:
+                if trigger is None:
+                    trigger, links = t, 0
+                else:
+                    links += 1
+                continue
+            if trigger is not None and w in _DEG_LINK and links < 3:
+                links += 1
+                continue
+            if trigger is not None and num.fullmatch(w):
+                end = next((e for e in ends if e > k), len(toks))  # the clause's end (its punctuation mark)
+                stop = toks[end].start() if end < len(toks) else len(text)
+                after = words[k + 1] if k + 1 < len(toks) else ""
+                ok = (is_value(float(w))
+                      and not (links == 0 and trigger.group(0).lower() == "angle")
+                      and t.start() > trigger.end()  # "θ90" is no value
+                      and not re.match(r"[^\s,;.!?)]", text[t.end():t.end() + 1])  # glued: "3D", "90s", "1:30"
+                      and not re.match(r"\.\w", text[t.end():t.end() + 2])
+                      and not _DEG_UNIT.match(text, t.end())
+                      and (after == "" or after in ",;.!?)" or after in _DEG_AFTER)
+                      and not (after in ("and", "or", ",") and k + 2 < len(toks) and num.fullmatch(words[k + 2]))
+                      and not _DEG_RATIO.search(text, clause, stop)
+                      and not _DEG_COUNT.search(text, clause, t.start()))
+                if ok:
+                    marks.append(t.end())
+            if w in ",;:.!?":
+                clause = t.end()
+            trigger = None
+        if not marks:
+            continue
+        out, at = [], 0
+        for m in marks:
+            out += [text[at:m], "°"]
+            at = m
+        new = "".join(out) + text[at:]
+        if len(new) > CAPTION_CHARS:
+            notes.append(f"step {n}: no degree sign added: the caption would pass {CAPTION_CHARS} characters")
+            continue
+        s["caption"] = new
+        notes.append(f"step {n}: degree sign added: {new[:60]!r}")
 
 
 # ---------- making and keeping scenes ----------
