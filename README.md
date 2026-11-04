@@ -1,8 +1,9 @@
 <p align="center">
-  <img src="docs/images/logo.svg" width="88" alt="Replay Board logo">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/wordmark-dark.svg">
+    <img alt="Replay Board" src="docs/images/wordmark-light.svg" height="60">
+  </picture>
 </p>
-
-<h1 align="center">Replay Board</h1>
 
 <p align="center">
   Upload a recorded lecture. Watch the original, untouched, beside a clean board<br>
@@ -18,22 +19,16 @@
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/models-dark.svg">
     <img alt="Powered by Meta models: Muse Spark, SAM 3.1, Muse Voice Transcribe, MMS" src="docs/images/models-light.svg" height="56">
   </picture></a>
-</p>
-
-<p align="center">
-  <a href="#what-you-get">What you get</a> ·
-  <a href="#meta-models-and-what-each-one-does">Meta models</a> ·
-  <a href="#run-it">Run it</a> ·
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#cost-and-speed">Cost and speed</a> ·
-  <a href="#tested">Tested</a>
+  <br>
+  <a href="#run-it"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/stack-dark.svg">
+    <img alt="Python 3.10 to 3.13, FastAPI, React, TypeScript, MIT license" src="docs/images/stack-light.svg" height="30">
+  </picture></a>
 </p>
 
 ---
 
-## Why
-
-Rewatching a recorded lecture is hard:
+**Rewatching a recorded lecture is hard:**
 - the teacher stands in front of what they're writing;
 - the camera can't read the board well;
 - on slides, the cursor never stops moving.
