@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/images/logo.svg" width="104" alt="Replay Board logo">
+  <img src="docs/images/logo.svg" width="88" alt="Replay Board logo">
 </p>
 
 <h1 align="center">Replay Board</h1>
 
 <p align="center">
-  <b>Upload a recorded lecture. Watch the original, untouched, beside a clean board<br>
-  that redraws the writing stroke by stroke, in sync with the voice.</b>
+  Upload a recorded lecture. Watch the original, untouched, beside a clean board<br>
+  that redraws the writing stroke by stroke, in sync with the voice.
 </p>
 
 <p align="center">
@@ -14,15 +14,10 @@
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/hackathon-dark.svg">
     <img alt="Built for the 2026 Meta Global AI Developer Hackathon" src="docs/images/hackathon-light.svg" height="56">
   </picture>
-</p>
-
-<p align="center">
-  <img alt="Meta models: Muse Spark, SAM 3.1, Muse Voice Transcribe, MMS"
-       src="https://img.shields.io/badge/Meta_models-Muse_Spark_%C2%B7_SAM_3.1_%C2%B7_Muse_Voice_Transcribe_%C2%B7_MMS-0467DF?logo=meta&logoColor=white">
-  <img alt="Python 3.10 to 3.13" src="https://img.shields.io/badge/Python-3.10--3.13-3776AB?logo=python&logoColor=white">
-  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white">
-  <img alt="React and TypeScript" src="https://img.shields.io/badge/React-TypeScript-3178C6?logo=react&logoColor=white">
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e8c25a"></a>
+  <a href="#meta-models-and-what-each-one-does"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/models-dark.svg">
+    <img alt="Powered by Meta models: Muse Spark, SAM 3.1, Muse Voice Transcribe, MMS" src="docs/images/models-light.svg" height="56">
+  </picture></a>
 </p>
 
 <p align="center">
