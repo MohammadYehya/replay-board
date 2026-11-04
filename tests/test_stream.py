@@ -665,6 +665,19 @@ def test_a_run_stopped_with_ctrl_c_takes_its_partial_replay_away(clip, tmp_path,
     assert not (job / "replay.json").exists() and not (job / "stream").exists()
 
 
+def test_a_run_whose_server_is_stopping_says_interrupted_not_failed(clip, tmp_path, monkeypatch):
+    # Stopping the server while a job runs: Python's shutdown refuses new thread-pool work, so a stage fails with
+    # this RuntimeError (data/test4.mp4). That is the server stopping, not the job going wrong.
+    def stopping(*a, **k):
+        capture_board(*a, **k)
+        raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+
+    with pytest.raises(RuntimeError):
+        _run(clip, tmp_path, monkeypatch, "stopping", capture=stopping, writes=[])
+    st = json.loads((tmp_path / "stopping" / "status.json").read_text(encoding="utf-8"))
+    assert st["state"] == "failed" and st["error"] == pipeline.INTERRUPTED and "replay" not in st
+
+
 def test_a_finished_job_keeps_no_stream_pictures(clip, tmp_path, monkeypatch):
     writes = []
     job, _ = _run(clip, tmp_path, monkeypatch, "tidy", writes=writes)
@@ -833,3 +846,23 @@ def test_ask_still_answers_from_a_partial_replay(server_job):
     prep = server._ask_prepare(job, {"question": "what is drawn?", "selection": [{"kind": "piece", "id": 1}],
                                      "history": [], "t": 10.0})
     assert prep.question == "what is drawn?" and prep.messages
+
+
+def test_the_first_partial_board_colour_is_not_a_title_card(monkeypatch):
+    # An edited video opens on a black title card: the colour before capture's first checkpoint comes from frames
+    # across the lecture, not the first one alone.
+    from app import stream
+
+    green, black = (65, 66, 43), (0, 0, 0)
+    monkeypatch.setattr(stream.media, "grab_frame",
+                        lambda info, t, width: np.full((90, 160, 3), black if t < 10 else green, np.uint8))
+
+    class Geom:
+        dw = 160
+
+        @staticmethod
+        def warp(img):
+            return img
+
+    assert stream.board_colour(None, Geom, [0.0, 400.0, 800.0], "chalk") == green
+    assert stream.board_colour(None, Geom, [0.0, 1.0, 800.0], "chalk") == black  # mostly cards: nothing to go on

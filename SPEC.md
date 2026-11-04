@@ -88,6 +88,7 @@ Writing stays where it is; the teacher moves.
 **What's in front (hidden pixels keep their state)**
 - Primary: SAM 3.1 person mask, dilated.
 - Fallback 1, large dark things: keep a per-pixel `bg_ref`, initialised to `closed` and then updated each step as `max(closed, bg_ref - 0.5)`. Where `bg_ref - closed > 45`, dilate by an ellipse of 15 px.
+  - Not on a chalkboard where SAM looked (it is still used where a SAM chunk failed, and on chalkboards without a person mask). There the grey is `255 - max(B, G, R)`, so a dark shirt is brighter than the board: it lifts `bg_ref` as it passes, and the clean board behind it counts as "in front" until `bg_ref` sinks back, half a minute or more after the teacher left (measured on a real 27-min chalkboard lecture: writing shown a median 22 s late, 95 pieces wrongly tagged "written while hidden"; without it, 2).
 - Fallback 2, too thick to be a pen stroke: where the distance transform of the ink exceeds `max_stroke/2` (max_stroke = 11 px), dilate by an ellipse of 31 px. Except thick ink that stays put: a thick pixel whose contrast against the clean board changes by at most 10 levels for 3 samples in a row is writing (a filled arrowhead, a heavy underline, strokes crossing), and it and thick pixels within 9 px of it leave this mask. Its count may only start while the whole thick shape is more than 6 px from the dilated person mask and the large-dark mask, so a still hand or sleeve that SAM missed never counts. Shapes wider than the closing (21 px) are not ink at all.
   - The replay shows ink this mask held back from when it would have been accepted as thin ink: a second count like `on`, in view of everything except this mask, and the pixel is shown from when it reached 3 (never later than its real acceptance, which still waits for the shape to stay put). That count restarts when the contrast of the pixel, or of any counted pixel within a 9 px ellipse around it (`jump_zone`: covers a replacing stroke up to 8 px wide), changes by more than 10 levels between samples (a stroke replacing a thing of another width or darkness changes only some of its rows). It is dropped for ink that was part of a too-thick thing whose middle turned into clean board without being accepted (a hand or sleeve SAM missed). Behind the teacher it waits, like `on`. Not caught: a thing SAM missed that is replaced by ink of exactly its width and darkness.
 
@@ -106,6 +107,7 @@ A global image alignment was tried and did **not** help: the drift is not a pure
 
 **Start of the clip**
 - Ignore frames until the picture settles, meaning the middle's brightness is within 25 levels of the typical brightness (this covers fade-ins).
+- After that, skip any sample that does not show the board: a title or end card, an advert, in an edited video. Its visible board's median grey (without the dilated person mask, when at least a tenth of the board is in view) is further than `max(40, typical / 2)` from the typical brightness. A skipped sample changes nothing: no counter moves, so a card is never writing, never erases the board and never gives the board its colour (the colour comes from the last sample that showed it). Measured margins: normal clips stay under half the threshold (an exposure swing reached 48 of 97); every card sample is far past it.
 - Anything accepted in the first 2.5 s after that is **pre-existing**: show it, but it is not a timed event.
 - Content never seen blank since the start that touches pre-existing content is pre-existing too.
 
@@ -339,6 +341,8 @@ While a board lecture is processed, `replay.json` is written in parts, so the pl
 
 - Camera drift of about 1 px makes strokes "erase and rewrite" themselves. Use the 2 px tolerance (5.1).
 - Black first frames from a fade-in. Judge modes from several moments, and wait for the picture to settle.
+- Edited videos (YouTube lectures) end on a black card: it was taken for the board, wiped every piece at the end and made the background black. Skip samples that don't show the board (5.1).
+- On a chalkboard a dark shirt looks bright (the grey is `255 - max`), so a running-max reference is lifted by every pass of the teacher. Don't use the large-dark fallback there when SAM gives the person.
 - Board frame and wall edges inside the analysed area turn into fake writing. Give the board corners and drop anything in the outer 3% band.
 - A webcam person who barely moves. Use the flicker rule and the furthest-strip growth (5.2).
 - A cursor parked for a whole slide gets baked into the clean slide. Remove it with the template, then re-track.

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -48,6 +49,13 @@ def replace_file(tmp: Path, path: Path, tries: int = 40) -> bool:
 
 # A job whose run stopped before the end without an error of its own: Ctrl+C, or the server stopped while it ran
 INTERRUPTED = "processing was interrupted before it finished; process the video again"
+
+
+def _stopped(e: BaseException) -> bool:
+    """The run stopped under the job, not by an error of its own: Ctrl+C, or Python shutting down because the server
+    was stopped while it ran (thread pools then refuse new work with this RuntimeError)."""
+    return (not isinstance(e, Exception) or sys.is_finalizing()
+            or (isinstance(e, RuntimeError) and "interpreter shutdown" in str(e)))
 
 
 def plain_error(e: BaseException) -> str:
@@ -467,7 +475,7 @@ def run(video: str | Path, job_dir: Path | None = None, start: float | None = No
         writer.drop_partial()
         # Ctrl+C (or the process being stopped some other way) is not an error to report, but the job must not stay
         # "running" with a partial replay for good
-        status.finish(plain_error(e) if isinstance(e, Exception) else INTERRUPTED)
+        status.finish(INTERRUPTED if _stopped(e) else plain_error(e))
         raise
 
 
@@ -736,7 +744,7 @@ def _start_stream(info, s0, s1, job_dir: Path, status: Status, client, kind: dic
             mode = detect_mode(info, geom, s0, s1, params)[0]
         size = [geom.width, geom.height]
         board_corners = [[round(float(x), 1), round(float(y), 1)] for x, y in geom.corners_video]
-        first_bg = board_colour(info, geom, s0, mode)
+        first_bg = board_colour(info, geom, [s0 + (s1 - s0) * f for f in (0.25, 0.5, 0.75)], mode)
         shutil.rmtree(job_dir / "stream", ignore_errors=True)  # a run before this one's pictures
     except Exception as e:
         log(f"stream: no partial replays ({plain_error(e)})")

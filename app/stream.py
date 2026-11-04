@@ -287,14 +287,17 @@ class StreamWriter:
             self._cv.notify_all()
 
 
-def board_colour(info, geom, t: float, mode: str | None) -> tuple:
-    """The clean board's colour (BGR) before capture has a frame of its own: the median of the middle of one
-    flattened frame. Cosmetic: capture's own colour replaces it at the first checkpoint."""
+def board_colour(info, geom, times, mode: str | None) -> tuple:
+    """The clean board's colour (BGR) before capture has a frame of its own: the median over the middles of a few
+    flattened frames, never the first one alone (an edited video opens on a title card). Cosmetic: capture's own
+    colour replaces it at the first checkpoint."""
     try:
-        img = geom.warp(media.grab_frame(info, t, geom.dw))
-        h, w = img.shape[:2]
-        mid = img[h // 4: h - h // 4, w // 4: w - w // 4].reshape(-1, 3)
-        return tuple(int(v) for v in np.median(mid, axis=0))
+        cols = []
+        for t in times:
+            img = geom.warp(media.grab_frame(info, t, geom.dw))
+            h, w = img.shape[:2]
+            cols.append(np.median(img[h // 4: h - h // 4, w // 4: w - w // 4].reshape(-1, 3), axis=0))
+        return tuple(int(v) for v in np.median(np.array(cols), axis=0))
     except Exception:
         return (40, 48, 44) if mode == "chalk" else (245, 245, 245)
 

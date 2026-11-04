@@ -63,6 +63,11 @@ class BoardParams:
     touch_r: float = 4.0  # a small bit "touches" a piece if its ink is this close
     settle_tol: float = 25.0
     settle_give_up: float = 30.0  # seconds without settling before we start anyway
+    # A sample that does not show the board (a title or end card, an advert in an edited video) is skipped: the
+    # visible board's median grey is further than max(card_tol, card_share * typical) from the typical board's.
+    # Normal clips stay well inside (camera exposure swings reach about half of it). 0 = never skip.
+    card_tol: float = 40.0
+    card_share: float = 0.5
     pre_window: float = 2.5
     group_dilate: int = 13
     join_recent: float = 3.0
@@ -339,6 +344,21 @@ def _middle(gray: np.ndarray) -> np.ndarray:
     return gray[h // 4: h - h // 4, w // 4: w - w // 4]
 
 
+def _off_board(board: np.ndarray, in_front: np.ndarray | None, typical: float, p: BoardParams) -> bool:
+    """True when the frame does not show the board: the median grey of what is in view (every 4th pixel each way,
+    without the dilated person mask `in_front`, at any size) is far from the typical board's. Never when less than a
+    tenth of the board is in view."""
+    if p.card_tol <= 0:
+        return False
+    g = cv2.cvtColor(board, cv2.COLOR_BGR2GRAY)[::4, ::4]
+    if in_front is not None:
+        view = cv2.resize(in_front, (g.shape[1], g.shape[0]), interpolation=cv2.INTER_NEAREST) == 0
+        if view.sum() < 0.1 * view.size:
+            return False
+        g = g[view]
+    return abs(float(np.median(g)) - typical) > max(p.card_tol, p.card_share * typical)
+
+
 def detect_mode(info: VideoInfo, geom: BoardGeometry, start: float, end: float, p: BoardParams):
     """Median middle brightness at several moments (never the first frame)."""
     n = p.mode_moments
@@ -490,6 +510,9 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
 
     # Checkpoints for a streamed replay: the video time and wall-clock time of the last one, how far it was ready.
     ck_t, ck_wall, ck_gap, ck_ready, ck_failed = s0, time.perf_counter(), checkpoint_wall, s0, False
+    # A PersonTrack says where SAM did not look (its chunk failed); a plain callable looked everywhere.
+    looked = getattr(person_mask, "looked", None)
+    skipped = 0  # samples that did not show the board
 
     for t, frame in iter_frames(info, p.fps, geom.dw, s0, s1):
         board = geom.warp(frame)
@@ -499,6 +522,15 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                 continue
             t_settle = t
             last_clean[:] = t
+        # The person mask at the "in front" masks' scale, dilated.
+        person_front = None
+        if person_mask is not None:
+            pm = person_mask(t)
+            if pm is not None:
+                person_front = cv2.dilate((geom8 if s > 1.05 else geom).warp_mask(pm).astype(np.uint8), k_person_c)
+        if _off_board(board, person_front, typical, p):
+            skipped += 1  # a card or another shot: nothing is seen, nothing changes
+            continue
         steps += 1
         last_board = board
         b, g, r = cv2.split(board)
@@ -527,12 +559,15 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             bg_ref = closed_f.copy()
         else:
             np.maximum(closed_f, bg_ref - p.bg_decay, out=bg_ref)
-        front = cv2.dilate(((bg_ref - closed_f) > p.dark_thr).astype(np.uint8), k_dark_c)
-        if person_mask is not None:
-            pm = person_mask(t)
-            if pm is not None:
-                pw = (geom8 if coarse else geom).warp_mask(pm).astype(np.uint8)
-                front = cv2.max(front, cv2.dilate(pw, k_person_c))
+        if mode == "chalk" and person_mask is not None and (looked is None or looked(t)):
+            # Not on a chalkboard SAM looked at: there its grey is 255 - max(B, G, R), so a dark shirt is brighter
+            # than the board, lifts the reference as it passes and leaves the clean board behind it "in front" for
+            # as long as the reference takes to sink back (half a minute or more), long after the teacher left.
+            front = np.zeros_like(closed_s)
+        else:
+            front = cv2.dilate(((bg_ref - closed_f) > p.dark_thr).astype(np.uint8), k_dark_c)
+        if person_front is not None:
+            front = cv2.max(front, person_front)
         # In view unless something other than too-thick ink is in front.
         visible_nt = (cv2.resize(front, (W, H), interpolation=cv2.INTER_NEAREST) if coarse else front) == 0
         dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 3)
@@ -868,7 +903,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     add_piece = [np.array([resolve(int(v)) for v in a], np.int64) if alias else a for a in add_piece]
     res = _finish(p, geom, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift, rem_add, rem_t,
                   accepted, last_board, t_settle, s1, add_seen, add_show, add_lc, add_moved)
-    res.stats.update(steps=steps, seconds=time.perf_counter() - t_wall, typical_brightness=typical,
+    res.stats.update(steps=steps, skipped=skipped, seconds=time.perf_counter() - t_wall, typical_brightness=typical,
                      clip_seconds=s1 - s0, speed=(s1 - s0) / max(1e-6, time.perf_counter() - t_wall))
     if progress is not None:
         progress(1.0)

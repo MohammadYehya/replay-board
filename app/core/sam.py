@@ -100,6 +100,7 @@ class PersonTrack:
         self.n = 0
         self.chunks: list[tuple[int, int, threading.Event]] = []  # (first sample, end sample, ready)
         self.failed = 0
+        self.failed_chunks: set[int] = set()
         self.waited = 0.0
 
     def _wait_for(self, i: int) -> None:
@@ -135,6 +136,14 @@ class PersonTrack:
             if m is not None:
                 out = m if out is None else (out | m)
         return out
+
+    def looked(self, t: float) -> bool:
+        """False when SAM never looked at t (its chunk failed): no mask there does not mean nobody was there."""
+        i = int(np.floor((t - self.start) * self.fps + 1e-6))
+        for k, (a, b, _ready) in enumerate(self.chunks):
+            if a <= i < b:
+                return k not in self.failed_chunks
+        return True
 
     @property
     def coverage(self) -> float:
@@ -195,6 +204,7 @@ def track_people(client: MetaClient, info: VideoInfo, start: float = 0.0, end: f
             return _one(i, cs, cd)
         except Exception:
             track.failed += 1
+            track.failed_chunks.add(i)
             if not background:
                 raise
             return 0
