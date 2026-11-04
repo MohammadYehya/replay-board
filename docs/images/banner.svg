@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" fill="none">
+  <title>Replay Board: a lecture's writing redrawn on a clean board, on the video's clock</title>
+  <style>
+    .serif { font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif; }
+    .sans { font-family: -apple-system, "Segoe UI", system-ui, Roboto, Arial, sans-serif; }
+    .hand { font-family: "Segoe Print", "Bradley Hand", "Chalkboard", "Comic Sans MS", cursive; }
+    .chalk { stroke: #e9e3d3; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .draw { stroke-dasharray: 1; stroke-dashoffset: 1; }
+    .title { animation: rise 1.2s ease-out both; }
+    .tag { animation: rise 1.2s ease-out 0.35s both; }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  </style>
+  <!-- One 12 s loop, all SMIL so every part runs on one clock: the board redraws a graph while the playhead runs,
+       the teacher's point becomes a chalk-yellow circle, then the board is wiped (86-94%) and it starts again. -->
+  <defs>
+    <radialGradient id="dust" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ede7d8" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#ede7d8" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="grain" x="-5%" y="-5%" width="110%" height="110%">
+      <feTurbulence type="fractalNoise" baseFrequency="1.1" numOctaves="2" seed="7" result="noise"/>
+      <feColorMatrix in="noise" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.6 1.35" result="mask"/>
+      <feComposite in="SourceGraphic" in2="mask" operator="in"/>
+    </filter>
+    <clipPath id="labelClip">
+      <rect x="728" y="78" width="0" height="64">
+        <animate attributeName="width" values="0;0;330;330" keyTimes="0;0.36;0.52;1" dur="12s" repeatCount="indefinite"/>
+      </rect>
+    </clipPath>
+  </defs>
+
+  <!-- the board and its ledge -->
+  <rect x="8" y="8" width="1184" height="318" rx="16" fill="#1c1b17" stroke="#3e3a32" stroke-width="2"/>
+  <ellipse cx="300" cy="250" rx="260" ry="70" fill="url(#dust)"/>
+  <ellipse cx="930" cy="120" rx="220" ry="60" fill="url(#dust)"/>
+  <rect x="8" y="326" width="1184" height="18" rx="5" fill="#2c2a25"/>
+  <rect x="1030" y="319" width="46" height="8" rx="3" fill="#e9e3d3" opacity="0.85"/>
+  <rect x="1088" y="320" width="30" height="7" rx="3" fill="#e8c25a" opacity="0.9"/>
+
+  <!-- title -->
+  <g class="title">
+    <text x="78" y="160" class="serif" font-size="78" fill="#ede7d8" letter-spacing="0.5">Replay Board</text>
+  </g>
+  <g class="tag sans" font-size="24" fill="#a39b8b">
+    <text x="82" y="212">Rewatch a recorded lecture</text>
+    <text x="82" y="244">with a clean board beside it.</text>
+  </g>
+
+  <!-- the board redrawing a graph, in chalk; everything on it is wiped together -->
+  <g filter="url(#grain)">
+    <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.86;0.94;1" dur="12s" repeatCount="indefinite"/>
+    <path class="chalk draw" pathLength="1" stroke-width="3.2"
+          d="M700 288 V58 M694 70 L700 56 L706 70 M688 268 H1132 M1120 262 L1134 268 L1120 274">
+      <animate attributeName="stroke-dashoffset" values="1;0;0" keyTimes="0;0.08;1" dur="12s" repeatCount="indefinite"/>
+    </path>
+    <path class="chalk draw" pathLength="1" stroke-width="3.6"
+          d="M704 254 C 800 252, 890 240, 952 206 S 1050 120, 1104 72">
+      <animate attributeName="stroke-dashoffset" values="1;1;0;0" keyTimes="0;0.10;0.34;1" dur="12s"
+               repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.45 0 .55 1;0 0 1 1"/>
+    </path>
+    <text class="hand" x="732" y="122" font-size="34" fill="#e9e3d3" clip-path="url(#labelClip)">A = P(1 + r)ⁿ</text>
+    <path class="chalk draw" pathLength="1" stroke-width="2.4" stroke-opacity="0.6" d="M1000 172 V268">
+      <animate attributeName="stroke-dashoffset" values="1;1;0;0" keyTimes="0;0.55;0.61;1" dur="12s" repeatCount="indefinite"/>
+    </path>
+    <circle cx="1000" cy="172" r="6" fill="#e9e3d3" opacity="0">
+      <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.54;0.57;1" dur="12s" repeatCount="indefinite"/>
+    </circle>
+    <path class="draw" pathLength="1" stroke="#e8c25a" stroke-width="3.4" stroke-linecap="round" fill="none"
+          d="M1000 144 C 1026 143, 1036 160, 1034 174 C 1032 192, 1012 202, 994 200 C 974 198, 964 182, 967 167
+             C 970 151, 986 143, 1004 142">
+      <animate attributeName="stroke-dashoffset" values="1;1;0;0" keyTimes="0;0.62;0.71;1" dur="12s"
+               repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.45 0 .55 1;0 0 1 1"/>
+    </path>
+  </g>
+
+  <!-- the video's clock: the board is drawn as the playhead passes -->
+  <rect x="700" y="302" width="400" height="3" rx="1.5" fill="#3e3a32"/>
+  <g>
+    <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.86;0.94;1" dur="12s" repeatCount="indefinite"/>
+    <rect x="700" y="302" width="0" height="3" rx="1.5" fill="#e8c25a">
+      <animate attributeName="width" values="0;400;400" keyTimes="0;0.86;1" dur="12s" repeatCount="indefinite"/>
+    </rect>
+    <circle cx="700" cy="303.5" r="6" fill="#e8c25a">
+      <animate attributeName="cx" values="700;1100;1100" keyTimes="0;0.86;1" dur="12s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+</svg>

@@ -1,22 +1,203 @@
-# Replay Board
+<p align="center">
+  <img src="docs/images/banner.svg" width="100%"
+       alt="Replay Board: a chalkboard that redraws a lecture's writing stroke by stroke as the video's playhead moves">
+</p>
 
-**Rewatch a recorded lecture with a clean board beside it.** Upload a lecture video; Replay Board plays
-the original, untouched, next to a virtual board that redraws the teacher's writing stroke by stroke,
-in sync with their voice, including writing that was hidden behind the teacher while it was written.
-Click any piece of writing to jump to the moment it was explained, or switch handwriting to typeset maths.
-When the teacher points at the board (resting a finger on a line, tapping a result, sweeping under an
-equation), the virtual board shows it as a calm spotlight, circle, underline or arrow on that writing.
-Slide lectures get the same treatment: clean slides, and the teacher's cursor or laser turned into the
-same animations. And you can **ask Muse** about the lecture: attach a formula from the first minute and a
-result from the last, ask how they connect, and get an answer whose times and board items you can click.
-Open a drawing **in 3D** and Muse Spark's model of it changes step by step as the teacher explains it, each
-change at the word that names it, beside the video as it plays.
-When you're done, **export the lecture as slides**: Muse Spark writes a deck that teaches the whole lecture
-in order (typeset formulas, worked steps, tables, the teacher's own drawings, key takeaways and a formula
-sheet, with what was said in the speaker notes), downloaded as a real PowerPoint.
+<p align="center">
+  <img alt="Built for the Meta Global AI Developer Hackathon 2026"
+       src="https://img.shields.io/badge/Meta_Global_AI_Developer_Hackathon-2026_entry-0467DF?style=for-the-badge&logo=meta&logoColor=white">
+</p>
 
-Built for the Meta Global AI Developer Hackathon. **Meta models do the understanding**; plain code does
-the per-pixel measurement.
+<p align="center">
+  <img alt="Meta models: Muse Spark, SAM 3.1, Muse Voice Transcribe, MMS"
+       src="https://img.shields.io/badge/Meta_models-Muse_Spark_%C2%B7_SAM_3.1_%C2%B7_Muse_Voice_Transcribe_%C2%B7_MMS-0467DF?logo=meta&logoColor=white">
+  <img alt="Python 3.10 to 3.13" src="https://img.shields.io/badge/Python-3.10--3.13-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white">
+  <img alt="React and TypeScript" src="https://img.shields.io/badge/React-TypeScript-3178C6?logo=react&logoColor=white">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e8c25a"></a>
+</p>
+
+<p align="center">
+  <b>Upload a recorded lecture. Watch the original, untouched, beside a clean board<br>
+  that redraws the writing stroke by stroke, in sync with the voice.</b>
+</p>
+
+<p align="center">
+  <a href="#what-you-get">What you get</a> ·
+  <a href="#meta-models-and-what-each-one-does">Meta models</a> ·
+  <a href="#run-it">Run it</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#cost-and-speed">Cost and speed</a> ·
+  <a href="#tested">Tested</a>
+</p>
+
+---
+
+## Why
+
+Rewatching a recorded lecture is hard:
+- the teacher stands in front of what they're writing;
+- the camera can't read the board well;
+- on slides, the cursor never stops moving.
+
+Replay Board takes the recording as it is. **Meta models do the understanding**; plain code does the
+per-pixel measurement.
+
+## What you get
+
+| | Feature | In one line |
+|---|---|---|
+| ✍️ | **Clean board** | The writing is redrawn stroke by stroke on the video's clock, even writing hidden behind the teacher. |
+| 🎯 | **Click to jump** | Click any line to hear it explained. Press **T** to switch handwriting to typeset maths; a line written in bursts is typeset whole once it's finished. |
+| 👉 | **Pointing** | When the teacher points at the board, it shows a calm spotlight, circle, underline or arrow on that writing. |
+| 🖥️ | **Slide lectures** | Clean slides, the webcam blanked, and the restless cursor or laser turned into the same calm marks. |
+| 💬 | **Ask Muse** | Ask about the whole lecture. Answers cite times and board items you can click. Press **A**. |
+| 🧊 | **3D steps** | A drawing becomes a 3D model that changes at the very words that explain it. Then **Try it** with sliders. |
+| 📊 | **Slides export** | The **Slides** button: Muse Spark writes a deck that teaches the lecture, downloaded as a real PowerPoint. |
+| 📝 | **Study notes** | The **Notes** page: every line of writing by chapter, typeset, with what was said; each time links back to the video. Markdown or print. |
+| 🕒 | **Timed transcript** | Every word timed, chapters taken from the lecture itself. |
+
+**The original video is never altered**: no outlining, blurring or removing the teacher.
+
+<details>
+<summary><b>Ask Muse</b>: what you can attach, and what it costs</summary>
+
+- Open it with the button or the **A** key.
+- Attach anything from any point of the lecture:
+  - writing from the board (its tooltip's "Ask", or Shift+click);
+  - slide text, or a stretch of the transcript (select it);
+  - "this moment";
+  - an item from a searchable list of everything in the lecture, including writing later erased.
+- Muse Spark gets the whole lecture every time, so a question can link the first minute to the last.
+- The answer streams in. `[5:44]` times seek the video; item chips show the writing typeset, jump to where the
+  board shows it, and outline it there.
+- The conversation is kept per lecture.
+- Cost on an 8-minute lecture: about $0.01 for a first question, $0.006 for a follow-up (Meta's prompt cache
+  reuses the lecture), nothing for a repeated one (disk cache).
+
+</details>
+
+<details>
+<summary><b>3D steps</b>: how a drawing comes alive</summary>
+
+- Hover or tap a drawing and click **3D** in its tooltip. Once made, it gets a small "3D" badge on the board,
+  and a **Watch in 3D** pill while the teacher explains it.
+- Click it: the 3D view takes the board's place while the video keeps playing, and the model changes at each
+  cue word. In a crystal lecture, one cell turns from cubic into tetragonal, orthorhombic, rhombohedral and
+  monoclinic, with its angles measured live ("β 75°").
+- Muse Spark writes the scene as **pure data**: shapes, graphs, surfaces, curves, angles, parameters, and steps
+  that show, hide, highlight, move the camera or ease a parameter.
+- The server checks it before you see it:
+  - every maths expression against a small grammar (the player compiles the same grammar, never runs code);
+  - every state of every step is evaluated;
+  - each step moves onto the time of its cue word from the aligner;
+  - steps that change nothing are dropped; slider ranges are narrowed to shapes that can exist.
+- **Try it** gives a slider per value. Step chips and the `[` `]` keys jump the video to a step.
+- One scene per drawing, made on the first open (30–70 s, about $0.03–0.10), then cached.
+  `.venv\Scripts\python -m app.popout <job> <piece>` makes them ahead of time (it shows the cost and asks
+  first).
+
+</details>
+
+<details>
+<summary><b>Slides export</b>: what goes into the deck</summary>
+
+- Muse Spark plans the deck from the whole lecture (sections, slides, which writing goes where), then writes the
+  parts in parallel.
+- Slides have titles that say what they teach, bullets, typeset formulas, numbered worked steps, comparison
+  tables, definition and key-idea boxes, and figures made from the teacher's own drawings (the ink lifted off the
+  board, not a photo).
+- Code checks every answer:
+  - each piece of writing that matters lands on a slide;
+  - the LaTeX is valid;
+  - a formula of plain numbers is worked out (a rounded result gets ≈, a false one is left out);
+  - text fits the layout.
+- The **PowerPoint** (16:9) has real titles, native bullets and tables, an agenda, key takeaways, a formula
+  sheet, and speaker notes with what was said and when. Equations keep their LaTeX as alt text.
+- The page also previews the slides, with **Present** (full screen) and **Save as PDF**.
+- Cost on an 8-minute lecture: about $0.08 and 25–30 s, once; then it's cached.
+
+</details>
+
+<details>
+<summary><b>Keys</b> in the player</summary>
+
+| Key | Does |
+|---|---|
+| Space | Play or pause |
+| ← → | Back or forward 5 s |
+| T | Handwriting ↔ typeset (board lectures) |
+| P | Show or hide the pointer (slide lectures) |
+| A | Open or close Ask Muse |
+| `[` `]` | Previous or next step in the 3D view |
+| Esc | Close what's open |
+| ? | All keys |
+
+</details>
+
+## Meta models, and what each one does
+
+| Model | Used for | Calls to process an 8-min lecture |
+|---|---|---|
+| **Muse Spark 1.3** | Board or slides? · reading every piece of writing · linking writing to speech · chapters · what a pointing gesture means · Ask Muse · 3D steps · slides export | 86 |
+| **SAM 3.1** | Finding the board · tracking the teacher and their hands (video mode) | 11 |
+| **Muse Voice Transcribe** | The words, in parallel pieces | 3 |
+| **MMS forced aligner** (torchaudio) | The time of every word | runs locally |
+
+- Every call goes through **one client** (`app/core/meta_api.py`): retries, byte uploads, a cost log and a disk
+  cache keyed by model and request.
+- So **re-running a lecture is free**.
+- Ask Muse, 3D steps and slides export call Muse Spark on demand, on top of these.
+- Measured calls and prices: [docs/meta-api-notes.md](docs/meta-api-notes.md).
+
+## Run it
+
+**You need:** Windows with PowerShell · Python 3.10–3.13 · ffmpeg on PATH · Node 22.18+ (the player's tests run
+TypeScript directly) · a Meta Model API key.
+
+**1. Install**
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+copy .env.example .env        # then put your MODEL_API_KEY in .env
+cd web; npm install; npm run build; cd ..
+```
+
+**2. Start**
+```powershell
+.venv\Scripts\python -m app.server
+```
+
+**3. Use it:** open `http://127.0.0.1:8000`, drop a lecture video, click **Upload and process**, and watch the
+stages tick. The player opens when it's ready.
+
+<details>
+<summary>From the command line instead</summary>
+
+```powershell
+.venv\Scripts\python -m app.process my-lecture.mp4 [--start 60] [--end 600] [--deck slides.pdf] [--no-gestures]
+```
+- Writes `data\jobs\<name>-<hash>\replay.json`.
+- `--deck`: for a slide lecture, the PDF of the slides. Muse Spark reads the crisp pages, and a page replaces
+  the video's slide wherever they match exactly (build steps and pen ink keep the video's image).
+- `--no-gestures`: skips pointing on the board, about half the API cost.
+- `--no-cache`: asks the models again instead of using saved answers. Also `--job`, `--no-sam`, `--width`
+  (see `--help`).
+
+</details>
+
+<details>
+<summary>Settings in <code>.env</code></summary>
+
+| Setting | Default | What it is |
+|---|---|---|
+| `MODEL_API_KEY` | (required) | Your Meta Model API key. Never committed. |
+| `MODEL_SPARK`, `MODEL_TRANSCRIBE`, `MODEL_SAM` | `muse-spark-1.3`, `muse-voice-transcribe-1.0`, `sam-3.1` | Model ids |
+| `META_API_CACHE` | `data/cache/meta` | Where model answers are saved |
+| `META_API_MAX_PARALLEL` | `8` | Model calls at once |
+| `VIDEO_DECODE` | `auto` | `auto` decodes on the GPU (Windows) where it gives the same frames; `cpu` never does |
+
+</details>
 
 ## How it works
 
@@ -42,7 +223,14 @@ flowchart LR
   A --> L
   L --> J[(replay.json)]
   J --> P[Player<br/>video + board/slides<br/>on one clock]
+  classDef meta fill:#0467DF,stroke:#0467DF,color:#fff
+  class C,S1,S2,S3,R1,G1,R2,T,A,L meta
 ```
+
+Blue boxes are Meta models.
+
+<details>
+<summary>Every step, and who does it</summary>
 
 | Step | Done by | What it decides |
 |---|---|---|
@@ -54,170 +242,125 @@ flowchart LR
 | Where the teacher's hand is | **SAM 3.1 video mode** ("hand") on a 3 fps copy | hand masks; code keeps moments where the hand is stretched out onto visible writing and no new ink follows |
 | Slide changes, clean slides, pointer | slide analysis (code) | states, live regions, cursor/laser track, gesture guesses |
 | What a pointing gesture means | **Muse Spark** with the path drawn on the slide (or on the video frame and the clean board) + the words spoken | spotlight / circle / underline / arrow / pulse, target elements, or "not pointing" |
-| Questions about the lecture | **Muse Spark** with the whole lecture (board or slides, chapters, timed transcript) as a cached prefix, plus images of what the student attached | a streamed answer that cites clickable times and board items |
-| 3D steps | **Muse Spark** with the drawing (redrawn and the sharp video crop), the writing around it and the timed transcript | a 3D scene as data (shapes, graphs, surfaces, angles, parameters and their ranges to explore) and up to 12 steps that change it, each with a caption and the teacher's cue word |
-| Slides export | **Muse Spark** with the whole lecture: one call plans the deck, then one call per part writes it (4 at a time) | sections, which writing goes on which slide, then each slide's title, bullets, formulas, worked steps, tables, definitions, figures and notes |
+| Questions about the lecture | **Muse Spark** with the whole lecture as a cached prefix, plus images of what the student attached | a streamed answer that cites clickable times and board items |
+| 3D steps | **Muse Spark** with the drawing, the writing around it and the timed transcript | a 3D scene as data and up to 12 steps that change it, each at the teacher's cue word |
+| Slides export | **Muse Spark** with the whole lecture: one call plans the deck, then one call per part (4 at a time) | sections, which writing goes where, then each slide |
 | Words | **Muse Voice Transcribe** in parallel pieces | turns |
-| Word times | **MMS forced aligner** (Meta, torchaudio) | per-word start/end |
+| Word times | **MMS forced aligner** (Meta, torchaudio) | per-word start and end |
 | When each element is talked about | **Muse Spark** with elements + timed transcript | spoken ranges, redraw time of hidden writing, chapters |
 
-Every model call goes through one client (`app/core/meta_api.py`) with retries, byte uploads and a disk
-cache keyed by model + request, so re-running a lecture costs nothing. Measured calls and prices are in
-[docs/meta-api-notes.md](docs/meta-api-notes.md).
+</details>
 
-### Board capture: "writing stays put, the teacher moves"
-Frames are flattened onto the board at 3 fps. Ink is what morphological closing removes; each pixel keeps
-counters that only move while the board is visible there (SAM person mask, plus built-in detectors for
-large dark things and too-thick strokes; a thick shape that stays put for 1 s, clear of the teacher, is writing:
-a filled arrowhead, a heavy underline, two strokes crossing). A pixel is accepted after 1 s of ink and removed after 2 s of
-clean board. New pixels are grouped into pieces of writing; removals into erases. Writing that appears
-long after its spot was last seen blank was written while hidden, and is redrawn when it was talked about.
-Camera drift of a pixel or two is tolerated rather than treated as erase-and-rewrite. The result is a
-per-pixel replay log; the player gets per-piece images with drawing-order and erase-time maps.
+<details>
+<summary>Board capture: "writing stays put, the teacher moves"</summary>
 
-### Pointing on the board
-SAM 3.1 tracks the teacher's hands at 3 fps. Code keeps a moment as pointing only when the hand is stretched
-away from the body (not gesturing in front of the chest), its tip is on writing that is on the board at that
-moment, and no new ink appears next to it in the following seconds (that would be writing). Nearby moments
-become one gesture with a guessed shape (rest, sweep, circle). Muse Spark then sees the video frame and the
-clean board with the hand's path drawn on both, plus the words spoken, and decides whether the teacher was
-really pointing, at what, and how to show it. Most candidates are talking gestures and are dropped. When the
-target is a block of several lines (often everything already on the board when the recording starts), Spark
-gets that block zoomed in and says which line or term was meant; code fits the box to the ink. The
-annotations are drawn on the virtual board only; the original video is never marked up.
+- Frames are flattened onto the board at 3 fps.
+- Ink is what morphological closing removes.
+- Each pixel keeps counters that only move while the board is visible there: the SAM person mask, plus
+  built-in detectors for large dark things and too-thick strokes.
+- A thick shape that stays put for 1 s, clear of the teacher, is writing (a filled arrowhead, a heavy underline,
+  two strokes crossing).
+- A pixel is accepted after 1 s of ink and removed after 2 s of clean board.
+- New pixels are grouped into pieces of writing; removals into erases.
+- Writing that comes into view all at once, long after its spot was last seen blank, was written while hidden.
+  It is redrawn when it was talked about, never before its spot could hold it.
+- A camera drift of a pixel or two is tolerated, not treated as erase-and-rewrite.
+- The player gets per-piece images with drawing-order and erase-time maps.
 
-### Self-tests on generated lectures
-`tests/gen_board.py` and `tests/gen_slides.py` render lectures with known answers (a teacher who walks in
-front of what he writes, an eraser, chalk, fade-ins, camera drift, filled arrowheads and crossing strokes, a
-webcam corner, a parked cursor, a laser...). The analysis is scored against them:
+</details>
 
-```text
-python -m tests.selftest_board    ->  136/136 checks (8 variants)
-python -m tests.selftest_slides   ->  47/47 checks (4 variants)
-```
+<details>
+<summary>Pointing on the board</summary>
 
-### What it costs and how long it takes
+- SAM 3.1 tracks the teacher's hands at 3 fps.
+- Code keeps a moment as pointing only when:
+  - the hand is stretched away from the body (not gesturing in front of the chest);
+  - its tip is on writing that is on the board at that moment;
+  - no new ink appears next to it in the following seconds (that would be writing).
+- Nearby moments become one gesture with a guessed shape (rest, sweep, circle).
+- Muse Spark then sees the video frame and the clean board with the hand's path drawn on both, plus the words
+  spoken, and decides whether it really was pointing, at what, and how to show it. Most candidates are talking
+  gestures and are dropped.
+- For a block of several lines, Spark gets the block zoomed in and says which line or term was meant; code fits
+  the box to the ink.
+- The marks are drawn on the virtual board only.
+
+</details>
+
+## Cost and speed
+
 Measured on an 8-minute 1080p board lecture, nothing cached, on a 4-core laptop:
 
-| | |
+| Measured | Result |
 |---|---|
 | Meta model calls | 100 (Muse Spark 86, SAM 3.1 11, Voice Transcribe 3) |
-| API cost | $1.17: base $0.39 (SAM person masks $0.19) + pointing gestures $0.78 (SAM hands $0.29, Muse Spark judging 74 candidates $0.49) |
+| API cost | **$1.17**: base $0.39 (SAM person masks $0.19) + pointing gestures $0.78 (SAM hands $0.29, Muse Spark judging 74 candidates $0.49) |
 | First replay ready | 5.0 min |
-| Word times refined (MMS) | 5.8 min (the replay is rewritten in place; the player picks it up) |
-| Board capture alone | 3–9× real time on 1080p, depending on what else the machine is doing |
+| Word times refined (MMS) | 5.8 min (the replay is updated in place) |
+| Board capture, 1080p | 8–9× real time with GPU decoding (6–7.5× in software) |
+| …while the video is also prepared for SAM 3.1 | 4–4.5× real time (1.5–2× in software) |
 
-That is about $9 per hour of lecture; with `--no-gestures` (no pointing on the board) about $3 per hour.
+- **Per hour of lecture:** about $9, or about $3 with `--no-gestures`.
+- Board capture was measured on 2 minutes of the same lecture. The other times were measured before GPU
+  decoding was added.
+- **An hour-long lecture**, measured for $0 with saved model answers (gestures off):
+  - capture: 9.0–9.8 min (6.1–6.6× real time, in software);
+  - first replay: about 16–18 min, final word times about 30 min (with the models' logged delays added);
+  - pointing gestures add about 4–7 min;
+  - peak memory 7.6 GB, most of it the MMS aligner.
+- **The player** shows an hour-long replay (10,060 words, 252 pieces) in under 2 s and seeks in under 0.5 s.
 
-An hour, measured for $0 on a 60-minute 1080p file with the model calls replaced by saved answers (gestures off):
-capture took 9.0–9.8 min (6.1–6.6× real time), the first replay was written after 12.5 min and the MMS word times
-after 26.4 min. Adding the model calls' logged latencies gives about 16–18 min to the first replay and about 30 min
-to the final one; pointing gestures add about 4–7 min. Peak memory was 7.6 GB, most of it the MMS aligner. The
-player shows the hour-long replay's board and transcript (10,060 words, 252 pieces) in under 2 s and seeks in
-under 0.5 s.
-Re-running a lecture is free: every model answer is cached.
+## Tested
 
-## Run it (Windows, PowerShell)
-
-Needs Python 3.10–3.13, ffmpeg on PATH, Node 22.18+ (its tests run TypeScript directly), and a Meta
-Model API key.
-
-```powershell
-py -3.13 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-copy .env.example .env        # then put your MODEL_API_KEY in .env
-cd web; npm install; npm run build; cd ..
-```
+Generated lectures with known answers keep the analysis honest:
+- `tests/gen_board.py`: a teacher walking in front of his writing, an eraser, chalk, fade-ins, camera drift,
+  filled arrowheads, crossing strokes.
+- `tests/gen_slides.py`: build steps, a webcam corner, a parked cursor, a laser.
+- `tests/gen_scene_lectures.py`: narrated 3D lectures (a vector, a cylinder's volume, a saddle surface), with what
+  must hold at each spoken stage.
 
 ```powershell
-.venv\Scripts\python -m app.server
-```
-Open http://127.0.0.1:8000, drop a lecture video, click "Upload and process", and watch the stages; the player
-opens when it's ready.
-
-Or from the command line (writes `data\jobs\<name>-<hash>\replay.json`):
-```powershell
-.venv\Scripts\python -m app.process my-lecture.mp4 [--start 60] [--end 600] [--deck slides.pdf] [--no-gestures]
-```
-For a slide lecture you can add the PDF deck: Muse Spark then reads the crisp pages, and a page replaces the
-video's slide wherever they match exactly (build steps and pen ink keep the video's image).
-
-Tests:
-```powershell
-.venv\Scripts\python -m pytest -q             # unit tests
-.venv\Scripts\python -m pytest -q -m selftest # generated-lecture self-tests (slow)
-cd web; npm test
+.venv\Scripts\python -m tests.selftest_board    # 136/136 checks (8 variants)
+.venv\Scripts\python -m tests.selftest_slides   # 47/47 checks (4 variants)
+.venv\Scripts\python -m pytest -q               # unit tests
+.venv\Scripts\python -m pytest -q -m selftest   # generated-lecture self-tests (slow)
+cd web; npm test                                # player tests
 ```
 
-## Layout
+<details>
+<summary>Project layout</summary>
+
 ```
 app/            pipeline, CLI (app.process), server (app.server), Ask Muse (ask), study notes (notes), slides
                 export (export, pptx_deck), 3D steps (popout), settings (config), smoke test
 app/core/       meta_api (one client), board, board_gestures (pointing), lines, slides, deck (PDF decks), sam,
                 sam_codec, speech, understand, media, texrender, scene_expr (the 3D maths grammar)
 web/            player: React + Vite + TypeScript + KaTeX
+docs/           Meta API notes, demo script, submission text, README banner
 tests/          generated-lecture self-tests and unit tests
 data/           videos, job folders and the model cache (never committed)
 ```
 
-## Also in the box
-- **Ask Muse**: a drawer in the player (button or the A key). Attach anything from any point of the lecture:
-  writing from the board (its tooltip's "Ask", or Shift+click), slide text, a stretch of the transcript (select
-  it), "this moment", or an item from the searchable list of everything in the lecture, including writing that
-  was later erased. Muse Spark gets the whole lecture every time (it fits easily in its context window), so a
-  question can link the first minute to the last. The answer streams in; `[5:44]` times seek the video and item
-  chips show the writing typeset, jump to it and outline it on the board. The conversation is kept per lecture.
-  Cost on the 8-minute lecture: about $0.01 for a first question, $0.006 for a follow-up (Meta's prompt cache
-  reuses the lecture), nothing for a repeated one (disk cache).
-- **Slides export**: the player's Slides button turns the lecture into a deck that teaches it, in order, the way
-  a teacher would prepare one. Muse Spark plans it from the whole lecture (sections, slides, which writing goes
-  where), then writes the parts in parallel: titles that say what each slide teaches, bullets, typeset formulas,
-  numbered worked steps, comparison tables, definition and key-idea boxes, and figures made from the teacher's
-  own drawings (the ink lifted off the board onto a clean background, not a photo of it). Code checks every
-  answer: each piece of writing that matters must land on a slide, the LaTeX must be valid, a formula made of
-  plain numbers is worked out (a rounded result gets ≈, a false one is left out), and text must fit the layout.
-  The **PowerPoint** (python-pptx, 16:9) has real slide titles, native bullets and tables, an agenda, key
-  takeaways, a formula sheet, and speaker notes with what was said and when; equations are typeset by MathJax
-  into sharp pictures that keep their LaTeX as alt text. The page previews the same slides, with **Present**
-  (full screen) and **Save as PDF**. Cost on the 8-minute lecture: about $0.08 and 25 s, once; then it's cached.
-- **Study notes**: the player's Notes page lists every line of writing (or slide element) by chapter, typeset with
-  KaTeX, with what was said; each time links back to that moment in the player. Download as Markdown or print.
-- **Typeset by line**: a line written in bursts (several pieces) is read by Muse Spark as one line and typeset whole
-  once it is finished; until then its pieces draw one by one, in time.
-- **3D steps**: a drawing or graph that has a 3D view gets a small "3D" badge on the board, and a "Watch in 3D"
-  pill while the teacher explains it. Click it and the 3D view takes the board's place while the video keeps
-  playing; the model changes as the teacher explains it: in a crystal lecture one cell turns from cubic into
-  tetragonal, orthorhombic, rhombohedral and monoclinic, each at the word, with its angles marked and measured
-  live ("β 75°"). Muse Spark writes the scene as pure data (shapes, graphs, surfaces, curves, angles,
-  parameters, and steps that show, hide, highlight, move the camera or ease a parameter). The server checks
-  every maths expression against a small grammar (the player compiles the same grammar with its own parser,
-  never as code), evaluates every state of every step, moves each step onto the time of its cue word from the
-  aligner, drops steps that change nothing, shows what a caption names, keeps angle marks apart, picks a camera
-  that shows the step's subject (from the other front corner when a vector points straight at the usual one),
-  adds the degree sign a caption leaves out, and narrows the sliders' ranges to shapes that can exist. A strip shows every
-  value as it changes; **Try it** gives a slider per value so a student can explore ("Back to the lecture"
-  returns). Step chips and the `[` `]` keys jump the video to a step; "Play the explanation" plays it with the
-  lecture; a drawing never talked about gets steps you play yourself. One scene per drawing, made on the first
-  open (30–70 s, about $0.03–0.10), then cached; `python -m app.popout <job> <piece>` makes them ahead of time.
-  three.js is loaded only when a 3D view opens. `tests/gen_scene_lectures.py` makes narrated board lectures (a
-  3D vector, a cylinder's volume, a saddle surface) with a truth file of what must hold at each spoken stage, to
-  check the 3D steps end to end.
+</details>
 
 ## Limits
-- The camera must stay still (a tripod or a fixed classroom camera). Panning or zooming cameras are not handled.
-- MMS word alignment runs on the CPU at about 2–4× real time; for long lectures the replay appears first with
-  turn-level word times and is refined in place. It needs a lot of memory (7.6 GB at its peak on an hour), so
-  use a machine with 16 GB.
-- Handwriting reading is as good as the frame: very small or blurry writing may be read partly.
+
+- The camera must stay still (a tripod or a fixed classroom camera). Panning or zooming is not handled.
+- The MMS aligner runs on the CPU, at about 2–4× real time. On a long lecture the replay comes first and its word
+  times are refined in place.
+- Peak memory is 7.6 GB on an hour-long lecture: use a machine with 16 GB.
+- Reading handwriting is only as good as the frame: very small or blurry writing may be read partly.
 
 ## What's next
-- A browser extension front end for lecture platforms that allow it, on top of the same backend.
+
+- A browser extension for lecture platforms that allow it, on the same backend.
 - Moving cameras (pan and zoom).
 - The MMS aligner on a GPU, so an hour of lecture gets its word times in minutes.
 
-## Privacy and video rules
-The original video is never altered: no outlining, blurring or removing the teacher. Videos and anything
-made from them stay in `data/`, which is not committed.
+## Privacy
+
+Videos and anything made from them stay in `data/`, which is never committed.
 
 ## License
+
 MIT, see [LICENSE](LICENSE).
