@@ -4,6 +4,7 @@ Used by the CLI (`python -m app.process`) and by the server's background worker.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -19,11 +20,12 @@ from typing import Callable
 import cv2
 import numpy as np
 
-from .config import DATA_DIR
+from .config import DATA_DIR, load_settings
 from .core import media, speech
-from .core.board import BoardParams, capture_board
+from .core.board import BoardGeometry, BoardParams, capture_board, detect_mode
 from .core.meta_api import MetaAPIError, MetaClient
 from .core import understand
+from .stream import STREAM_DIR, Snapshot, StreamWriter, board_colour, partial_pieces
 
 JOBS = DATA_DIR / "jobs"
 STAGES = ["probe", "classify", "board", "people", "capture", "speech", "read", "gestures", "link", "write", "align"]
@@ -42,6 +44,10 @@ def replace_file(tmp: Path, path: Path, tries: int = 40) -> bool:
         except PermissionError:
             time.sleep(0.05 * (1 + i % 5))
     return False
+
+
+# A job whose run stopped before the end without an error of its own: Ctrl+C, or the server stopped while it ran
+INTERRUPTED = "processing was interrupted before it finished; process the video again"
 
 
 def plain_error(e: BaseException) -> str:
@@ -92,7 +98,9 @@ class Status:
         self.lock = threading.Lock()
         self.on_change = on_change
         name = (name or "").strip() or _saved_name(self.path)
-        self.data = {"state": "running", "error": None, "started": time.time(),
+        # pid: the process running the job, so a server starting later can tell a job that is still running (python
+        # -m app.process) from one whose process is gone (recover_interrupted)
+        self.data = {"state": "running", "error": None, "started": time.time(), "pid": os.getpid(),
                      "stages": {s: {"state": "pending", "progress": 0.0, "seconds": None, "note": ""} for s in STAGES}}
         if name:
             self.data["name"] = name
@@ -138,6 +146,17 @@ class Status:
 
     def skip(self, stage: str, note: str = ""):
         self.done(stage, note, state="skipped")
+
+    def replay(self, seq: int | None, partial: bool = False, ready_until: float | None = None):
+        """Which replay.json is on disk (seq goes up with every write during the job), so the player fetches it
+        only when it changed; seq None: there is none (a partial one was taken away)."""
+        with self.lock:
+            if seq is None:
+                self.data.pop("replay", None)
+            else:
+                self.data["replay"] = {"seq": int(seq), "partial": bool(partial),
+                                       "ready_until": None if ready_until is None else round(float(ready_until), 2)}
+            self.write(force=True)
 
     def finish(self, error: str | None = None):
         with self.lock:
@@ -225,7 +244,164 @@ def _write_replay(job_dir: Path, replay: dict):
     summary = {"subject": replay.get("subject", ""), "type": replay.get("type", ""),
                "seconds": round(float(v.get("end", v.get("duration", 0))) - float(v.get("start", 0)), 1),
                "source": v.get("source", "")}
-    (job_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
+    text = json.dumps(summary, ensure_ascii=False)
+    spath = job_dir / "summary.json"
+    try:
+        same = spath.read_text(encoding="utf-8") == text
+    except OSError:
+        same = False
+    if not same:  # a streamed lecture writes replay.json many times: the lecture list must not catch this half written
+        spath.write_text(text, encoding="utf-8")
+
+
+def _replay_kind(path: Path) -> str | None:
+    """What replay.json is on disk: "partial" (written while the lecture is still processed), "final", or None (no
+    file). A file that cannot be read now (locked, being replaced) counts as final, so it is never taken away."""
+    for i in range(10):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return "partial" if isinstance(data, dict) and "partial" in data else "final"
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            time.sleep(0.05)
+    return None if not path.exists() else "final"
+
+
+def drop_partial_replay(job_dir: Path) -> bool:
+    """Take a partial replay.json and its stream/ pictures away (after a failure or an interrupted run, the job then
+    reads as failed, as before streaming); a final replay.json stays. True when none is left that is partial."""
+    path = job_dir / "replay.json"
+    if _replay_kind(path) != "partial":
+        return True
+    for i in range(40):
+        try:
+            path.unlink()
+            break
+        except FileNotFoundError:
+            break
+        except PermissionError:
+            time.sleep(0.05 * (1 + i % 5))
+    if path.exists():
+        return False
+    shutil.rmtree(job_dir / STREAM_DIR, ignore_errors=True)
+    return True
+
+
+def _alive(pid) -> bool:
+    """Whether a process with this id is running (a process that cannot be looked at counts as running)."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":  # os.kill(pid, 0) would stop the process on Windows
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.get_last_error() == 5  # access denied: it is there
+        try:
+            code = wintypes.DWORD()
+            return not k32.GetExitCodeProcess(h, ctypes.byref(code)) or code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def recover_interrupted(jobs: Path | None = None, log: Callable[[str], None] = print) -> list[str]:
+    """When the server starts: a job left "queued" (the queue went with the server) or "running" by a process that
+    is gone (the server or python -m app.process stopped mid-job) would show as processing for good, and a partial
+    replay would keep its "Processing" line and closed gates. Such a job is marked failed and its partial replay
+    taken away; a job whose final replay was written already (stopped while refining word times) is done, with the
+    replay it has. A job whose process still runs is left alone. Returns the ids of the jobs changed."""
+    jobs = JOBS if jobs is None else Path(jobs)
+    changed = []
+    if not jobs.is_dir():
+        return changed
+    for d in sorted(jobs.iterdir()):
+        path = d / "status.json"
+        try:
+            st = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(st, dict) or st.get("state") not in ("queued", "running"):
+            continue
+        if st.get("state") == "running" and _alive(st.get("pid")):
+            continue
+        try:
+            final = _replay_kind(d / "replay.json") == "final"
+            if not final and drop_partial_replay(d):
+                st.pop("replay", None)
+            for stage in (st.get("stages") or {}).values() if final else ():  # failed: the stage it stopped in shows
+                if isinstance(stage, dict) and stage.get("state") in ("running", "pending"):
+                    stage.update(state="skipped", note="interrupted")
+            st["state"], st["error"] = ("done", None) if final else ("failed", INTERRUPTED)
+            if st.get("started"):
+                st.setdefault("seconds", round(max(0.0, path.stat().st_mtime - float(st["started"])), 1))
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(st, indent=1), encoding="utf-8")
+            if replace_file(tmp, path):
+                changed.append(d.name)
+        except (OSError, ValueError, TypeError) as e:
+            log(f"could not mark the interrupted job {d.name} ({plain_error(e)})")
+    if changed:
+        log(f"{len(changed)} job(s) were interrupted when the server last stopped: " + ", ".join(changed))
+    return changed
+
+
+class ReplayWriter:
+    """Every write of a job's replay.json goes through here: one lock, a seq that only goes up (in the replay's
+    "partial" key and in status.json), and once the final replay is written no partial one is ever written again."""
+
+    def __init__(self, job_dir: Path, status: Status):
+        self.job_dir, self.status = job_dir, status
+        self.lock = threading.Lock()
+        self.seq = 0
+        self.final = False
+        # A final replay.json from an earlier run in this job folder (python -m app.process on the same video): this
+        # run does not stream, so that replay stays until this run's own final one replaces it (as before streaming),
+        # also when this run fails or is stopped.
+        self.had_final = _replay_kind(job_dir / "replay.json") == "final"
+
+    def write_partial(self, replay: dict, ready_until: float) -> bool:
+        """Write a partial replay (it gets its "partial" key here). False, and nothing written, after the final."""
+        with self.lock:
+            if self.final:
+                return False
+            self.seq += 1
+            replay["partial"] = {"seq": self.seq, "ready_until": round(float(ready_until), 2)}
+            _write_replay(self.job_dir, replay)
+            self.status.replay(self.seq, True, ready_until)
+            return True
+
+    def write_final(self, replay: dict):
+        with self.lock:
+            self.final = True
+            self.seq += 1
+            _write_replay(self.job_dir, replay)
+            self.status.replay(self.seq, False, None)
+
+    def drop_partial(self):
+        """After a failure: a partial replay.json is taken away (the job then reads as failed, as before streaming);
+        a final one stays."""
+        with self.lock:
+            self.final = True
+            if _replay_kind(self.job_dir / "replay.json") == "partial" and drop_partial_replay(self.job_dir):
+                self.status.replay(None)
 
 
 def _finish_with_speech(speech_job: SpeechJob, link_and_write, job_dir: Path, pool, log) -> Path:
@@ -280,19 +456,23 @@ def run(video: str | Path, job_dir: Path | None = None, start: float | None = No
         if deck.resolve() != (job_dir / "deck.pdf").resolve():
             shutil.copy2(deck, job_dir / "deck.pdf")
     status = Status(job_dir, on_status, name=(name or "").strip() or source_name(video, job_dir))
+    writer = ReplayWriter(job_dir, status)
     try:
-        out = _run(info, s0, s1, job_dir, status, use_sam, width, log, use_cache, gestures)
+        out = _run(info, s0, s1, job_dir, status, use_sam, width, log, use_cache, gestures, writer=writer)
+        shutil.rmtree(job_dir / STREAM_DIR, ignore_errors=True)  # the partial replays' pictures: the final has its own
         status.finish()
         return out
-    except Exception as e:  # report one line; keep the traceback in the job folder
+    except BaseException as e:  # report one line; keep the traceback in the job folder
         (job_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
-        msg = plain_error(e)
-        status.finish(msg)
+        writer.drop_partial()
+        # Ctrl+C (or the process being stopped some other way) is not an error to report, but the job must not stay
+        # "running" with a partial replay for good
+        status.finish(plain_error(e) if isinstance(e, Exception) else INTERRUPTED)
         raise
 
 
 def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Status, use_sam: bool,
-         width: int, log, use_cache: bool = True, gestures: bool = True) -> Path:
+         width: int, log, use_cache: bool = True, gestures: bool = True, writer: "ReplayWriter | None" = None) -> Path:
     t_all = time.perf_counter()
     status.start("probe")
     if s1 - s0 < 1.0:
@@ -317,18 +497,33 @@ def _run(info: media.VideoInfo, s0: float, s1: float, job_dir: Path, status: Sta
                 .get(kind.get("type"), "not sure: treated as a board"))
     log(f"classify: {kind}")
     if kind.get("type") == "slides":
-        return _run_slides(info, s0, s1, job_dir, status, client, kind, speech_job, lecture, pool, t_all, log)
+        return _run_slides(info, s0, s1, job_dir, status, client, kind, speech_job, lecture, pool, t_all, log,
+                           writer=writer)
     stop = threading.Event()  # set when the board path fails: the hand tracking then sends no more SAM calls
     try:
         return _run_board(info, s0, s1, job_dir, status, client, kind, speech_job, lecture, pool, t_all, log,
-                          use_sam, width, gestures, stop)
+                          use_sam, width, gestures, stop, writer=writer)
     except BaseException:
         stop.set()
         raise
 
 
 def _run_board(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, kind: dict, speech_job, lecture: Path,
-               pool, t_all: float, log, use_sam: bool, width: int, gestures: bool, stop: threading.Event) -> Path:
+               pool, t_all: float, log, use_sam: bool, width: int, gestures: bool, stop: threading.Event,
+               writer: "ReplayWriter | None" = None) -> Path:
+    writer = writer or ReplayWriter(job_dir, status)
+    streams: list = []  # the partial-replay writer, once there is one: stopped whatever happens
+    try:
+        return _board_job(info, s0, s1, job_dir, status, client, kind, speech_job, lecture, pool, t_all, log,
+                          use_sam, width, gestures, stop, writer, streams)
+    finally:
+        for sw in streams:
+            sw.stop()
+
+
+def _board_job(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, kind: dict, speech_job, lecture: Path,
+               pool, t_all: float, log, use_sam: bool, width: int, gestures: bool, stop: threading.Event,
+               writer: "ReplayWriter", streams: list) -> Path:
     status.start("board")
     corners, board_info = None, None
     if use_sam:
@@ -374,12 +569,29 @@ def _run_board(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, 
 
     status.start("capture")
     mode = "chalk" if kind.get("board_colour") == "chalk" else ("white" if kind.get("board_colour") == "white" else None)
+    stream = None
+    if writer.had_final:
+        log("stream: no partial replays (the replay of an earlier run stays until this one is done)")
+    elif load_settings().stream_replay != "off":
+        # The player opens on this first partial replay (no writing yet) and the board fills in as capture goes.
+        mode, stream = _start_stream(info, s0, s1, job_dir, status, client, kind, speech_job, lecture, t_all, log,
+                                     corners, person, width, mode, writer)
+        if stream is not None:
+            streams.append(stream)
     speech_job.cpu_free.clear()
     try:
         board = capture_board(info, corners=corners, person_mask=person, params=BoardParams(width=width),
-                              start=s0, end=s1, progress=lambda f: status.progress("capture", f), mode=mode)
+                              start=s0, end=s1, progress=lambda f: status.progress("capture", f), mode=mode,
+                              checkpoint=None if stream is None else
+                              (lambda b, t, ready: stream.submit(Snapshot(b, t, ready))))
     finally:
         speech_job.cpu_free.set()
+    if stream is not None:
+        # The whole board, while reading, gestures and linking run (its own copy of the pieces: they are filled in
+        # below). Its pieces are read by the read stage, not again here, so partial reads not started are dropped.
+        stream.end_reads()
+        stream.submit(Snapshot(dataclasses.replace(board, pieces=[dict(p) for p in board.pieces]), s1, s1,
+                               read_new=False))
     pieces = board.pieces
     hidden = sum(1 for p in pieces if p["revealed"])
     status.done("capture", f"{len(pieces)} pieces of writing" + (f", {hidden} written while hidden" if hidden else "")
@@ -432,6 +644,8 @@ def _run_board(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, 
         for i, ln in enumerate(lines):
             ln["read"] = line_reads.get(100000 + i, {"kind": "other", "text": "", "latex": ""})
     status.done("read", f"{len(reads)} pieces read" + (f", {len(lines)} lines" if lines else ""))
+    if stream is not None:
+        stream.use_reads(reads)  # the partial replay gets the readings while gestures and linking run
 
     annotations = []
     if hands_job is not None:
@@ -486,11 +700,83 @@ def _run_board(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, 
             "stats": {"seconds": round(time.perf_counter() - t_all, 1), "api": client.summary(),
                       "capture": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in board.stats.items()}},
         }
-        _write_replay(job_dir, replay)
+        if stream is not None and not writer.final:
+            stream.stop()  # waits for a partial write in progress; none comes after this
+            if stream.written:
+                log(f"stream: {len(stream.written)} partial replays written, the first after "
+                    f"{stream.written[0]['at'] - status.data['started']:.1f}s")
+        writer.write_final(replay)
         status.done("write", "word times refining" if how == "proportional" else "")
         log(f"wrote replay.json ({how} word times) after {replay['stats']['seconds']}s, API {client.summary()}")
 
     return _finish_with_speech(speech_job, link_and_write, job_dir, pool, log)
+
+
+def _partial_transcript(speech_job) -> dict:
+    """The transcript for a partial replay: all of it, with proportional word times, once transcription is done
+    (never waited for); else none yet."""
+    fut = getattr(speech_job, "transcribed", None)
+    if fut is None or not fut.done() or fut.exception() is not None:
+        return {"turns": [], "words": [], "timing": "proportional"}
+    _, turns = fut.result()
+    if not turns:
+        return {"turns": [], "words": [], "timing": "none"}
+    return {"turns": turns, "words": speech_job.proportional(), "timing": "proportional"}
+
+
+def _start_stream(info, s0, s1, job_dir: Path, status: Status, client, kind: dict, speech_job, lecture: Path,
+                  t_all: float, log, corners, person, width: int, mode: str | None, writer: ReplayWriter):
+    """The partial-replay writer of a board lecture, with its first partial (no writing yet) on its way. Returns
+    (mode, writer): the board mode found here when classify gave none (capture then finds the same one), so the
+    first partial already has the final size, corners and mode. (mode, None) if streaming could not start."""
+    try:
+        params = BoardParams(width=width)
+        geom = BoardGeometry(info, corners, params.width, params.decode_width)
+        if mode is None:
+            mode = detect_mode(info, geom, s0, s1, params)[0]
+        size = [geom.width, geom.height]
+        board_corners = [[round(float(x), 1), round(float(y), 1)] for x, y in geom.corners_video]
+        first_bg = board_colour(info, geom, s0, mode)
+        shutil.rmtree(job_dir / "stream", ignore_errors=True)  # a run before this one's pictures
+    except Exception as e:
+        log(f"stream: no partial replays ({plain_error(e)})")
+        return mode, None
+    video = {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width, "height": info.height,
+             "start": round(s0, 3), "end": round(s1, 3), "source": status.name or info.path.name}
+    subject = kind.get("subject", "")
+    shown: dict = {}  # every piece a partial showed, as last written: it stays on the board (stream.partial_pieces)
+
+    def build(snap: Snapshot, reads: dict) -> tuple[dict, float]:
+        b, ready = snap.board, float(snap.ready_until)
+        if b is None:
+            pieces, erases, bg, t_start = [], [], first_bg, s0
+        else:
+            pieces = partial_pieces(job_dir, b, ready, reads, shown)
+            erases = [e for e in b.erases if e["t"] <= ready]
+            bg, t_start = b.background, b.t_start
+        replay = {
+            "version": 1, "video": dict(video), "type": "board", "subject": subject,
+            "board": {"size": list(size), "mode": mode, "corners": board_corners, "background": hexcolor(bg),
+                      "pieces": pieces, "erases": erases, "lines": [], "annotations": [],
+                      "t_start": round(t_start, 2)},
+            "transcript": _partial_transcript(speech_job),
+            "chapters": [],
+            "stats": {"seconds": round(time.perf_counter() - t_all, 1), "api": client.summary(),
+                      "capture": {"t": round(snap.t, 2), "pieces": len(pieces)}},
+        }
+        return replay, ready
+
+    def read(snap: Snapshot, batch: list[dict]) -> dict:
+        b = snap.board
+        try:
+            crops = understand.hires_crops(info, b.corners, b, batch, person, t_end=snap.t, workers=1)
+        except Exception:
+            crops = {}
+        return understand.read_pieces(client, b, _board_all(b), batch, subject=subject, crops=crops, workers=1)
+
+    stream = StreamWriter(writer.write_partial, build, read, log=log)
+    stream.submit(Snapshot(None, s0, s0, read_new=False))
+    return mode, stream
 
 
 def redraw_time(piece: dict, redraw_at, spoken: list[dict]) -> float | None:
@@ -645,8 +931,10 @@ def _words_between(words: list[dict], a: float, b: float) -> str:
 
 
 def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, kind: dict, speech_job,
-                lecture: Path, pool, t_all: float, log) -> Path:
+                lecture: Path, pool, t_all: float, log, writer: "ReplayWriter | None" = None) -> Path:
     from .core.slides import analyse_slides
+
+    writer = writer or ReplayWriter(job_dir, status)
 
     status.skip("board", "slides")
     status.skip("people", "slides")
@@ -804,7 +1092,7 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
             "stats": {"seconds": round(time.perf_counter() - t_all, 1), "api": client.summary(),
                       "slides": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in res.stats.items()}},
         }
-        _write_replay(job_dir, replay)
+        writer.write_final(replay)
         status.done("write", "word times refining" if how == "proportional" else "")
         log(f"wrote replay.json ({how} word times) after {replay['stats']['seconds']}s, API {client.summary()}")
 

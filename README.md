@@ -54,6 +54,7 @@ per-pixel measurement.
 | 📊 | **Slides export** | The **Slides** button: Muse Spark writes a deck that teaches the lecture, downloaded as a real PowerPoint. |
 | 📝 | **Study notes** | The **Notes** page: every line of writing by chapter, typeset, with what was said; each time links back to the video. Markdown or print. |
 | 🕒 | **Timed transcript** | Every word timed, chapters taken from the lecture itself. |
+| ⏩ | **Watch while it processes** | A board lecture opens as soon as the board is found and plays at once; the clean board fills in as processing goes. |
 
 **The original video is never altered**: no outlining, blurring or removing the teacher.
 
@@ -167,7 +168,8 @@ cd web; npm install; npm run build; cd ..
 ```
 
 **3. Use it:** open `http://127.0.0.1:8000`, drop a lecture video, click **Upload and process**, and watch the
-stages tick. The player opens when it's ready.
+stages tick. A board lecture's player opens as soon as the board is found (about 15 s in) and its board fills in
+while it processes; a slide lecture's opens when it's ready. `STREAM_REPLAY=off` in `.env` waits for the end.
 
 <details>
 <summary>From the command line instead</summary>
@@ -348,6 +350,8 @@ data/           videos, job folders and the model cache (never committed)
   times are refined in place.
 - Peak memory is 7.6 GB on an hour-long lecture: use a machine with 16 GB.
 - Reading handwriting is only as good as the frame: very small or blurry writing may be read partly.
+- While a board lecture is still processing, the board can fall behind the video (it says how far it is ready), and
+  Notes, Slides and 3D views wait for the end. Typeset maths arrives as pieces are read.
 
 ## What's next
 

@@ -67,11 +67,13 @@ export function Transcript(props: {
   timing?: string;
   /** True while the backend still refines the word times (the player swaps in the new ones when they land). */
   refining?: boolean;
+  /** The lecture is still processed (a streaming replay): no transcript yet is not "no speech". */
+  pending?: boolean;
   onSeek(t: number): void;
   /** Ask Muse about the selected words: a small "Ask about this" button appears by a selection. */
   onAskSpan?(span: SpanPick): void;
 }) {
-  const { turns, words, groups, wordTurn, active, upTo, currentTurn, timing, refining, onSeek, onAskSpan } = props;
+  const { turns, words, groups, wordTurn, active, upTo, currentTurn, timing, refining, pending, onSeek, onAskSpan } = props;
   const boxRef = useRef<HTMLDivElement>(null);
   const [detached, setDetached] = useState(false);
   const idleTimer = useRef<number | undefined>(undefined);
@@ -220,7 +222,7 @@ export function Transcript(props: {
     <section className="panel transcript-panel">
       <header className="panel-head">
         <h2>Transcript</h2>
-        {refining && words.length > 0 ? (
+        {pending ? null : refining && words.length > 0 ? (
           <span className="panel-note refining" role="status">
             refining word times…
           </span>
@@ -246,7 +248,11 @@ export function Transcript(props: {
         }}
         tabIndex={-1}
       >
-        {turns.length === 0 && <p className="empty">No speech was transcribed for this lecture.</p>}
+        {turns.length === 0 && (
+          <p className="empty">
+            {pending ? 'The transcript appears here once the voice is transcribed.' : 'No speech was transcribed for this lecture.'}
+          </p>
+        )}
         {askSel && onAskSpan && (
           <button
             type="button"

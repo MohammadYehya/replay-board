@@ -206,8 +206,9 @@ export function JobPage({ jobId, startAt = null }: { jobId: string; startAt?: nu
           if (++afterFail > 4) return;
           wait = 2000;
         }
-        // Open the player as soon as a replay exists, even while the job still refines it (word times): the
-        // player watches the job itself and swaps in the rewritten replay.
+        // Open the player as soon as a replay exists, even while the job still writes it (a board lecture streams:
+        // the first partial replay is there before capture starts) or refines its word times: the player watches the
+        // job itself and swaps in each newer version.
         if (st.ready) {
           warmPoster(jobId, startAt); // the video's first frame, before the player's own requests queue it
           try {
@@ -253,7 +254,17 @@ export function JobPage({ jobId, startAt = null }: { jobId: string; startAt?: nu
 
   if (replay) {
     const running = status ? status.state === 'running' || status.state === 'queued' : undefined;
-    return <Player key={jobId} jobId={jobId} replay={replay} name={status?.name} running={running} startAt={startAt} />;
+    return (
+      <Player
+        key={jobId}
+        jobId={jobId}
+        replay={replay}
+        name={status?.name}
+        running={running}
+        status={status}
+        startAt={startAt}
+      />
+    );
   }
   return <JobProgress status={status} error={error} missing={missing} />;
 }

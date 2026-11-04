@@ -56,7 +56,7 @@ from . import ask
 from .core import scene_expr as sx
 from .core.media import imread
 from .core.meta_api import MetaAPIError, chat_text, image_part, parse_json_object, text_part
-from .export import NotReady, context_messages, read_replay, safe_text
+from .export import STILL_PROCESSING, NotReady, context_messages, is_partial, read_replay, safe_text
 from .pipeline import replace_file
 
 SCENE_RULES_VERSION = "6"  # change it when the prompt, the checks or REASONING change, so every scene is made again
@@ -2174,7 +2174,9 @@ def for_piece(scene: dict, piece_id: int) -> dict:
 def refining(job_dir: Path, replay: dict) -> bool:
     """True while the job still works out the word times: replay.json is written first with rough (proportional)
     ones and again when the aligner is done. A scene made in between would be synced to the rough times, paid
-    for, then made again by the new version."""
+    for, then made again by the new version. Also while the replay is partial (still being processed)."""
+    if is_partial(replay):
+        return True
     if (replay.get("transcript") or {}).get("timing") != "proportional":
         return False
     st = _load(job_dir / "status.json")
@@ -2190,6 +2192,8 @@ def prepare(job_dir: Path, piece_id: int) -> tuple[dict, str, int]:
         if not (job_dir / "replay.json").exists():
             raise NoScene("this lecture is not processed yet") from None
         raise NotReady("the lecture is being updated; try again in a moment") from None
+    if is_partial(replay):  # a piece may not be in it yet
+        raise NotReady(STILL_PROCESSING)
     if replay.get("type") != "board":
         raise NoScene("3D views are made for board lectures only")
     piece = next((p for p in (replay.get("board") or {}).get("pieces") or []

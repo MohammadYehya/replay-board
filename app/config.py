@@ -49,6 +49,9 @@ class Settings:
     # "auto", "cpu" (never decode lectures on the GPU, see media.gpu_decode_ok), or a value not understood, which
     # media.decode_setting treats as cpu
     video_decode: str = "auto"
+    # "auto": a board lecture's replay.json is written in parts while it is processed (SPEC "Streaming replay");
+    # "off": only when it is done, as before
+    stream_replay: str = "auto"
 
 
 # Words for VIDEO_DECODE: people write "off" or "false" as often as "cpu"
@@ -59,6 +62,11 @@ _DECODE_AUTO = {"auto", "gpu", "on", "yes", "true", "1", ""}
 def _decode_mode(value: str) -> str:
     v = value.strip().lower()
     return "cpu" if v in _DECODE_CPU else "auto" if v in _DECODE_AUTO else v
+
+
+def _stream_mode(value: str) -> str:
+    """STREAM_REPLAY: "off" for any word that turns a thing off (as for VIDEO_DECODE), else "auto"."""
+    return "off" if value.strip().lower() in _DECODE_CPU else "auto"
 
 
 def load_settings(env_path: Path | None = None) -> Settings:
@@ -80,4 +88,5 @@ def load_settings(env_path: Path | None = None) -> Settings:
         cache_dir=cache,
         max_parallel=int(get("META_API_MAX_PARALLEL", "8")),
         video_decode=_decode_mode(get("VIDEO_DECODE", "auto")),
+        stream_replay=_stream_mode(get("STREAM_REPLAY", "auto")),
     )

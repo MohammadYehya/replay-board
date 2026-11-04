@@ -195,6 +195,14 @@ kbd {
   border-color: var(--border-strong);
   box-shadow: inset 0 -2px var(--accent);
 }
+/* Notes and Slides while the replay is partial: shown, not usable yet (the title says when) */
+.ghost-btn.disabled,
+.ghost-btn.disabled:hover {
+  color: var(--faint);
+  border-color: transparent;
+  opacity: 0.55;
+  cursor: default;
+}
 .ghost-btn kbd {
   min-width: 0;
   padding: 0 5px;
@@ -923,6 +931,87 @@ kbd {
   font-size: 14px;
 }
 
+/* ---------- streaming replay: the board fills in while the lecture is processed ---------- */
+/* Over the board (held as it is at "ready up to") while the playhead is past what is ready: calm, out of the way. */
+.board-catchup {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  z-index: 8;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r);
+  background: rgba(19, 18, 16, 0.84);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  animation: rise 0.25s ease-out;
+}
+.board-catchup::before {
+  content: '';
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid rgba(232, 194, 90, 0.3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+/* Under the video: how much of the clip the board is ready for, and what is being done. */
+.stream-status {
+  margin-top: 8px;
+}
+.ready-bar {
+  height: 3px;
+  border-radius: var(--r);
+  background: var(--panel-3);
+  overflow: hidden;
+}
+.ready-bar > div {
+  height: 100%;
+  border-radius: var(--r);
+  background: var(--accent);
+  opacity: 0.85;
+  transition: width 0.6s ease;
+}
+.stream-line {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.stream-line.stopped {
+  color: var(--amber);
+}
+.ask-sub.partial {
+  color: var(--amber);
+}
+/* The 3D buttons while the replay is partial: shown, not usable yet */
+.tip-3d[aria-disabled='true'],
+.tip-3d[aria-disabled='true']:hover,
+.b3d[aria-disabled='true'],
+.b3d[aria-disabled='true']:hover {
+  border-color: var(--border-strong);
+  background: var(--panel-3);
+  color: var(--faint);
+  cursor: default;
+}
+.tip-view3d[aria-disabled='true'],
+.tip-view3d[aria-disabled='true']:hover {
+  color: var(--faint);
+  cursor: default;
+}
+
 /* ---------- chapters, facts ---------- */
 .chapters {
   list-style: none;
@@ -1554,6 +1643,8 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .st-icon.spinner,
   .panel-note.refining::before,
+  .board-catchup,
+  .board-catchup::before,
   .board-flash,
   .toast {
     animation: none;

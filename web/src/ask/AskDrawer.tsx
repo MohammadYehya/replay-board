@@ -48,6 +48,8 @@ interface Props {
   timeRef: RefObject<number>;
   /** The video's length: a cited time after it is not a link. */
   videoEnd: number;
+  /** While the lecture is still processed: how far Muse Spark knows it ("Knows the lecture up to 3:20"). */
+  knows?: string | null;
   onAddMoment(): void;
   onSeek(t: number): void;
   /** Seek to a board or slide item and light it up. */
@@ -350,7 +352,7 @@ const fromSaved = (t: AskTurn, index: LectureIndex): UiTurn => ({
 // Memoised: the player re-renders on every spoken word; the drawer only needs to when its props change.
 export const AskDrawer = memo(function AskDrawer(props: Props) {
   const {
-    jobId, open, focusKey, onClose, tray, setTray, notice, index, mode, timeRef, videoEnd, onAddMoment, onSeek,
+    jobId, open, focusKey, onClose, tray, setTray, notice, index, mode, timeRef, videoEnd, knows, onAddMoment, onSeek,
     onShowItem,
   } = props;
   const [turns, setTurns] = useState<UiTurn[]>([]);
@@ -575,7 +577,7 @@ export const AskDrawer = memo(function AskDrawer(props: Props) {
         <div className="ask-title">
           <SparkIcon size={15} />
           <h2>Ask Muse</h2>
-          <span className="ask-sub">Muse Spark sees the whole lecture</span>
+          <span className={`ask-sub ${knows ? 'partial' : ''}`}>{knows || 'Muse Spark sees the whole lecture'}</span>
         </div>
         <div className="ask-head-actions">
           {turns.length > 0 && (
@@ -629,10 +631,17 @@ export const AskDrawer = memo(function AskDrawer(props: Props) {
             {loadError && <p className="error-line ask-load-error">{loadError}</p>}
             {turns.length === 0 ? (
               <div className="ask-intro">
-                <p>
-                  Ask anything about this lecture. Muse Spark reads all of it, the {what} and every word said, so you
-                  can ask about the start and the end in one question.
-                </p>
+                {knows ? (
+                  <p>
+                    Ask anything about this lecture. It is still being processed: Muse Spark reads the {what} as far as
+                    it is ready and every word transcribed so far.
+                  </p>
+                ) : (
+                  <p>
+                    Ask anything about this lecture. Muse Spark reads all of it, the {what} and every word said, so you
+                    can ask about the start and the end in one question.
+                  </p>
+                )}
                 <p className="muted">
                   {mode === 'slides'
                     ? 'To ask about something on a slide, Shift+click it, or select words in the transcript and press Ask about this.'

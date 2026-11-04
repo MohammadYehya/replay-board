@@ -133,6 +133,51 @@ export async function loadSprite(
   return { id, w, h, full: toCanvas(img), rgba, sorted, upto, ink: inkColour(rgba, lightBoard), cy, goneAt, goneTimes };
 }
 
+/** Decoded sprites shared by every board renderer of one lecture (player/stream.ts spriteKey): a replay swapped in
+ *  while the lecture streams rebuilds the renderer, which takes the sprites it had at once instead of fetching and
+ *  decoding them again (the board would blank and refill on every swap). */
+export class SpriteCache {
+  private done = new Map<string, Sprite>();
+  private pending = new Map<string, Promise<Sprite>>();
+
+  get(key: string): Sprite | undefined {
+    return this.done.get(key);
+  }
+
+  /** The sprite, loaded once however many ask for it. A failure is not kept (the next ask tries again). */
+  load(key: string, make: () => Promise<Sprite>): Promise<Sprite> {
+    const hit = this.done.get(key);
+    if (hit) return Promise.resolve(hit);
+    const going = this.pending.get(key);
+    if (going) return going;
+    const p = make().then(
+      (s) => {
+        if (this.pending.get(key) === p) {
+          this.pending.delete(key);
+          this.done.set(key, s);
+        }
+        return s;
+      },
+      (e) => {
+        if (this.pending.get(key) === p) this.pending.delete(key);
+        throw e;
+      },
+    );
+    this.pending.set(key, p);
+    return p;
+  }
+
+  /** Forget every sprite but these (a piece whose image grew has a new one; the old one is not needed again). */
+  retain(keys: ReadonlySet<string>) {
+    for (const k of [...this.done.keys()]) if (!keys.has(k)) this.done.delete(k);
+    for (const k of [...this.pending.keys()]) if (!keys.has(k)) this.pending.delete(k);
+  }
+
+  get size() {
+    return this.done.size;
+  }
+}
+
 /** Shared LRU of partial frames, bounded by pixel bytes. */
 export class FrameCache {
   private map = new Map<string, HTMLCanvasElement>();

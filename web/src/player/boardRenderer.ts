@@ -2,7 +2,8 @@
 // "was hidden" tags) from the same clock. Pure canvas drawing: the original video is never touched.
 import { jobFileUrl } from '../api';
 import type { BoardData, BoardLine, Piece } from '../types';
-import { FrameCache, goneCount, loadSprite, type Sprite } from './sprites';
+import { FrameCache, goneCount, loadSprite, SpriteCache, type Sprite } from './sprites';
+import { spriteKey } from './stream';
 import { alphaAt, isWrittenLine, progressAt, schedule, stepFor, tagAt, talkingAt, typesetIds, type Schedule } from './timing';
 
 interface Entry {
@@ -64,6 +65,31 @@ export function boardBackground(board: BoardData): { css: string; light: boolean
   return { css: parseColour(board.background) ? board.background! : fallback, light: lum > 120 };
 }
 
+/** A piece's sprite from the lecture's shared cache, loading it (image, order and gone maps) when it is not there. */
+function pieceSprite(sprites: SpriteCache, jobId: string, p: Piece, light: boolean): Promise<Sprite> {
+  const file = (f: string | null | undefined) => (f ? jobFileUrl(jobId, f) : null);
+  return sprites.load(spriteKey(p, light), () =>
+    loadSprite(p.id, jobFileUrl(jobId, p.image), file(p.order), light, file(p.gone)),
+  );
+}
+
+/** The sprite keys a board needs. */
+export function boardSpriteKeys(board: BoardData): Set<string> {
+  const { light } = boardBackground(board);
+  return new Set(board.pieces.map((p) => spriteKey(p, light)));
+}
+
+/** Load every sprite of a board into the cache before it is shown (a swapped-in replay then draws whole on its first
+ *  frame), waiting at most `waitMs`. A sprite that fails to load is just not drawn, as before. */
+export async function preloadBoard(sprites: SpriteCache, jobId: string, board: BoardData, waitMs: number): Promise<void> {
+  const { light } = boardBackground(board);
+  const all = Promise.allSettled(board.pieces.map((p) => pieceSprite(sprites, jobId, p, light)));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)));
+  await Promise.race([all, late]);
+  clearTimeout(timer);
+}
+
 export class BoardRenderer {
   readonly W: number;
   readonly H: number;
@@ -92,8 +118,16 @@ export class BoardRenderer {
 
   private canvas: HTMLCanvasElement;
 
-  constructor(canvas: HTMLCanvasElement, board: BoardData, jobId: string) {
+  /** sprites: the lecture's shared sprite cache (the ones in it are drawn on the first frame); onSpriteLoaded: told
+   *  of each piece's sprite as it is there, those from the cache included. */
+  constructor(
+    canvas: HTMLCanvasElement,
+    board: BoardData,
+    jobId: string,
+    opts: { sprites?: SpriteCache; onSpriteLoaded?: (id: number, s: Sprite) => void } = {},
+  ) {
     this.canvas = canvas;
+    this.onSpriteLoaded = opts.onSpriteLoaded;
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) throw new Error('Canvas is not available in this browser.');
     this.ctx = ctx;
@@ -133,10 +167,16 @@ export class BoardRenderer {
       this.lines.push(le);
       this.lineByKey.set(le.key, le);
     });
+    const sprites = opts.sprites ?? new SpriteCache();
     for (const e of this.entries) {
       const p = e.piece;
-      const file = (f: string | null | undefined) => (f ? jobFileUrl(jobId, f) : null);
-      loadSprite(p.id, jobFileUrl(jobId, p.image), file(p.order), this.light, file(p.gone))
+      const hit = sprites.get(spriteKey(p, this.light));
+      if (hit) {
+        e.sprite = hit;
+        this.onSpriteLoaded?.(p.id, hit);
+        continue;
+      }
+      pieceSprite(sprites, jobId, p, this.light)
         .then((s) => {
           if (this.dead) return;
           e.sprite = s;

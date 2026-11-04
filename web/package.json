@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "test": "node --test tests/timing.test.ts tests/texLayout.test.ts tests/slideTiming.test.ts tests/expr.test.ts tests/scene3dState.test.ts tests/scene3dStage.test.ts tests/labelLayout.test.ts tests/keys.test.ts tests/angle3d.test.ts tests/sceneText.test.ts tests/popout.test.ts tests/boardAnnotations.test.ts tests/askMarkdown.test.ts tests/askSse.test.ts tests/askTray.test.ts tests/askSelection.test.ts tests/askItems.test.ts tests/route.test.ts tests/slides.test.ts tests/stepStrip.test.ts tests/sliceQueue.test.ts"
+    "test": "node --test tests/timing.test.ts tests/texLayout.test.ts tests/slideTiming.test.ts tests/expr.test.ts tests/scene3dState.test.ts tests/scene3dStage.test.ts tests/labelLayout.test.ts tests/keys.test.ts tests/angle3d.test.ts tests/sceneText.test.ts tests/popout.test.ts tests/boardAnnotations.test.ts tests/askMarkdown.test.ts tests/askSse.test.ts tests/askTray.test.ts tests/askSelection.test.ts tests/askItems.test.ts tests/route.test.ts tests/slides.test.ts tests/stepStrip.test.ts tests/sliceQueue.test.ts tests/stream.test.ts"
   },
   "dependencies": {
     "@fontsource-variable/newsreader": "^5.3.0",

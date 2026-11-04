@@ -7,10 +7,11 @@ The result is a replay log from which the board at any time can be rebuilt.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 import cv2
@@ -19,6 +20,7 @@ import numpy as np
 from .media import VideoInfo, clip_range, grab_frame, iter_frames, scaled_size
 
 PersonMask = Callable[[float], "np.ndarray | None"]
+_log = logging.getLogger(__name__)
 
 # Ink pixels a second while the teacher writes, at 800 px wide (scales with the area): the median over the pieces seen
 # as they were written on the real clips (61-92 a clip; 76-104 between the quartiles). Hidden writing is redrawn at it.
@@ -357,7 +359,19 @@ def detect_mode(info: VideoInfo, geom: BoardGeometry, start: float, end: float, 
 
 def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None = None,
                   params: BoardParams | None = None, start: float = 0.0, end: float | None = None,
-                  progress: Callable[[float], None] | None = None, mode: str | None = None) -> BoardResult:
+                  progress: Callable[[float], None] | None = None, mode: str | None = None,
+                  checkpoint: Callable[["BoardResult", float, float], None] | None = None,
+                  checkpoint_every: float = 30.0, checkpoint_wall: float = 8.0,
+                  checkpoint_share: float = 0.1) -> BoardResult:
+    """The board's writing over the clip (SPEC 5.1).
+
+    checkpoint(partial, t, ready_until), for a streamed replay: called during the loop once the video advanced at
+    least `checkpoint_every` seconds and `checkpoint_wall` seconds of wall-clock time passed since the last call, and
+    long enough that checkpoints take at most `checkpoint_share` of the time (finishing a partial result costs 12-30 ms
+    on 8 minutes with the person mask, up to 0.6 s without: it grows with the removals). The partial result is what
+    the loop knows at t, finished on copies of its state (the loop's own state is never touched, so the result
+    returned is the same with or without checkpoints); ready_until is how far that partial is unlikely to change (see
+    _ready_until). A checkpoint that fails is logged once and capture carries on."""
     p = params or BoardParams()
     debug = bool(os.environ.get("RB_DEBUG_BOARD"))
     t_wall = time.perf_counter()
@@ -473,6 +487,9 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
 
     def touches(a, b, padding) -> bool:
         return not (a[2] + padding <= b[0] or b[2] + padding <= a[0] or a[3] + padding <= b[1] or b[3] + padding <= a[1])
+
+    # Checkpoints for a streamed replay: the video time and wall-clock time of the last one, how far it was ready.
+    ck_t, ck_wall, ck_gap, ck_ready, ck_failed = s0, time.perf_counter(), checkpoint_wall, s0, False
 
     for t, frame in iter_frames(info, p.fps, geom.dw, s0, s1):
         board = geom.warp(frame)
@@ -821,6 +838,24 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             add_moved.append(moved)
             add_col.append(board[ys, xs].copy())
 
+        if checkpoint is not None and t - ck_t >= checkpoint_every and time.perf_counter() - ck_wall >= ck_gap:
+            ck_t, ck_wall = t, time.perf_counter()
+            try:
+                part = _finish(p, geom, mode, {k: replace(v, box=list(v.box)) for k, v in pieces.items()},
+                               [{**e, "box": list(e["box"]), "adds": list(e["adds"])} for e in erases],
+                               list(add_t), list(add_idx), _resolved(add_piece, alias), list(add_col),
+                               list(add_drift), list(rem_add), list(rem_t), accepted.copy(), last_board, t_settle, t,
+                               list(add_seen), list(add_show), list(add_lc), list(add_moved))
+                ck_ready = _ready_until(p, t, ck_ready, due_t, accepted, add_t, add_show)
+                checkpoint(part, t, ck_ready)
+            except Exception as e:  # a partial replay is a bonus: never lose the capture over it
+                if not ck_failed:
+                    _log.warning("board: a partial replay at %.1fs failed (%s: %s); capture carries on", t,
+                                 type(e).__name__, str(e).splitlines()[0][:160] if str(e) else "")
+                ck_failed = True
+            cost = time.perf_counter() - ck_wall
+            ck_gap = max(checkpoint_wall, cost / max(1e-6, checkpoint_share))  # from the start of this one
+
         if progress is not None and steps % 30 == 0:
             progress(min(1.0, (t - s0) / max(1e-6, s1 - s0)))
 
@@ -840,6 +875,43 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
 
 def _cat(lst, dtype, shape=(0,)):
     return np.concatenate(lst).astype(dtype) if lst else np.zeros(shape, dtype)
+
+
+def _resolved(add_piece: list, alias: dict) -> list:
+    """The add lists' piece ids with merged pieces resolved to the piece they went into: new arrays, the loop's own
+    are left alone. Vectorised (the loop's resolve is a Python loop per add)."""
+    if not alias or not add_piece:
+        return list(add_piece)
+    top = max(max(alias), max(alias.values()), max((int(a.max()) for a in add_piece if a.size), default=0)) + 1
+    lut = np.arange(top, dtype=np.int64)
+    for src in alias:
+        dst = src
+        while dst in alias:
+            dst = alias[dst]
+        lut[src] = dst
+    return [lut[a] if a.size else a.astype(np.int64) for a in add_piece]
+
+
+def _ready_until(p: BoardParams, t: float, prev: float, due_t: np.ndarray, accepted: np.ndarray, add_t: list,
+                 add_show: list) -> float:
+    """How far a partial result at t is unlikely to change: an add is final once it can no longer be dropped as
+    short-lived (min_life plus the removal wait after it was accepted); thick ink not accepted yet may be shown from
+    its due time, before t; and a young add may be shown from before that horizon. Never before `prev`, never past t."""
+    dt = 1.0 / p.fps
+    ready = t - (p.min_life + (p.remove_n - 1) * dt)
+    horizon = ready
+    pending = due_t[~accepted]
+    if pending.size:
+        first = float(pending.min())
+        if np.isfinite(first):
+            ready = min(ready, first)
+    for i in range(len(add_t) - 1, -1, -1):
+        if not add_t[i].size:
+            continue
+        if float(add_t[i][0]) <= horizon:
+            break
+        ready = min(ready, float(add_show[i].min()))
+    return float(min(max(ready, prev), t))
 
 
 def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift,
