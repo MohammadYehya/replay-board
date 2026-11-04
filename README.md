@@ -19,16 +19,12 @@
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/models-dark.svg">
     <img alt="Powered by Meta models: Muse Spark, SAM 3.1, Muse Voice Transcribe, MMS" src="docs/images/models-light.svg" height="56">
   </picture></a>
-</p>
-
-<p align="center">
+  <br>
   <a href="#run-it"><picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/stack-dark.svg">
-    <img alt="Python 3.10 to 3.13, FastAPI, React, TypeScript, MIT license" src="docs/images/stack-light.svg" height="26">
+    <img alt="Python 3.10 to 3.13, FastAPI, React, TypeScript, MIT license" src="docs/images/stack-light.svg" height="30">
   </picture></a>
 </p>
-
----
 
 ## Why
 
