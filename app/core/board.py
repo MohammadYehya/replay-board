@@ -73,10 +73,12 @@ class BoardParams:
     # `overlay_burst` px (at 800) of ink not drift whose spot was seen blank at most accept_n samples before, after the
     # first pre_window seconds (measured, writing: at most 252 px a step on the self-test, 44 on data/test.mp4 and
     # test2, 214 on test4). A piece that got at least `overlay_part` px of it in that step is part of the burst (test4:
-    # 655 px and more for each caption, at most 59 for the other pieces, writing done as a caption came up), and its
-    # ink (not drift) accepted within `overlay_win` seconds after is overlay, all of it, when at least `overlay_gone` of
-    # it is gone within `overlay_life` seconds (captions: 0.62-1.0, the rest stays accepted where writing lies under the
-    # text; writing that came into view at once, the cut to another board or a banner going: 0). A piece at least
+    # 655 px and more for each caption, at most 59 for the other pieces, writing done as a caption came up). It is a
+    # caption when at least `overlay_gone` of its ink (not drift) accepted within `overlay_win` seconds after is gone
+    # within `overlay_life` seconds (captions: 0.62-1.0, the rest stays accepted where writing lies under the text;
+    # writing that came into view at once, the cut to another board or a banner going: 0). Its overlay is all its ink
+    # in the burst step, and what of those seconds' ink, drift too (edges a fade-in made ink a sample late), is gone
+    # within overlay_life; the rest stays, writing done in the piece as the caption came up. A piece at least
     # `overlay_share` overlay (counting ink not drift) loses all else that is gone within overlay_life too (test4:
     # writing a caption joined, 0.42). Overlay leaves its piece and counts as short-lived for erases. 0 burst = never.
     overlay_burst: int = 600
@@ -1136,8 +1138,8 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
 def _overlay(p: BoardParams, s: float, A_t, A_seen, A_lc, A_drift, A_pid, life, t_settle,
              partial_at: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Per add, whether it is a typed caption overlay (see BoardParams.overlay_burst), and which overlay adds are only
-    pending: in a partial result at `partial_at`, ink of a burst's window still on the board that may yet go within
-    overlay_life counts as overlay for now. Adds are in time order, one run per step."""
+    pending: in a partial result at `partial_at`, ink the final result may still call overlay counts as overlay for
+    now. Adds are in time order, one run per step."""
     n = A_t.size
     none = np.zeros(n, bool)
     if p.overlay_burst <= 0 or A_lc is None or n == 0:
@@ -1157,24 +1159,40 @@ def _overlay(p: BoardParams, s: float, A_t, A_seen, A_lc, A_drift, A_pid, life, 
     key = A_pid * burst.size + jb  # (piece, burst)
     k, c = np.unique(key[fresh & (j >= 0) & (A_t == burst[jb])], return_counts=True)
     took = k[c >= p.overlay_part * s * s]  # the pieces that took part in each burst
-    window = np.zeros(n, bool)
-    near = np.flatnonzero((j >= 0) & (A_t - burst[jb] <= p.overlay_win + 1e-6) & ~A_drift)
-    window[near] = np.isin(key[near], took)
+    near = np.flatnonzero((j >= 0) & (A_t - burst[jb] <= p.overlay_win + 1e-6))
+    window_d = np.zeros(n, bool)  # a burst's window, drift too
+    window_d[near] = np.isin(key[near], took)
+    window = window_d & ~A_drift
     soon = life < p.overlay_life
     top = int(A_pid.max()) + 1
 
     def share(of, among):
         return np.bincount(A_pid[of], minlength=top) / np.maximum(np.bincount(A_pid[among], minlength=top), 1)
 
-    # A piece's window ink that mostly went soon is a caption, all of it: some of it stays accepted where writing lies
-    # within drift_r under the text (38% of data/test3.mp4's "Get more @ ..." banner).
-    over = window & (share(window & soon, window) >= p.overlay_gone)[A_pid]
+    # A piece whose window ink mostly went soon is a caption. Its overlay: all its ink in the burst step, of which some
+    # stays accepted where writing lies within drift_r under the text (38% of data/test3.mp4's "Get more @ ..."
+    # banner); and its window ink that went soon, drift too (edges a fade-in made ink a sample after the letters).
+    # Window ink accepted after the step that stays is writing: he wrote on in the piece as the caption came up.
+    cap = share(window & soon, window) >= p.overlay_gone  # per piece
+    over = cap[A_pid] & ((window & (A_t == burst[jb])) | (window_d & soon))
     pending = none
     if partial_at is not None:
-        pending = window & ~over & ~np.isfinite(life) & (partial_at - A_t < p.overlay_life + (p.remove_n - 1) * dt)
+        # Left out of a partial, as the final may still call it overlay. Ink still on the board may yet go within
+        # overlay_life. A piece that is no caption yet but would be if all that went: all its window ink (a caption's
+        # first part may have gone while its second is up). A caption: its window ink still up, drift too (the edges
+        # of one faded in). And where the share rule below may yet fire, counting all that as overlay: the piece's ink
+        # since its first burst still up, not drift. Holding its drift too held test4's stream a minute behind for
+        # most of it (a card kept taking drift for minutes); the drift that rule may still take is shown (36 px at most).
+        young = ~np.isfinite(life) & (partial_at - A_t < p.overlay_life + (p.remove_n - 1) * dt)
+        maybe = ~cap & (share(window & (soon | young), window) >= p.overlay_gone)  # per piece
+        pending = ~over & window_d & (maybe[A_pid] | (cap[A_pid] & young))
+        first = np.full(top, np.inf)  # per piece, its first burst
+        np.minimum.at(first, took // burst.size, burst[took % burst.size])
+        rest = share((over | pending) & ~A_drift, ~A_drift) >= p.overlay_share  # per piece
+        pending |= ~over & rest[A_pid] & (A_t >= first[A_pid]) & young & ~A_drift
         over = over | pending
-    if over.any():
-        over |= (share(over, ~A_drift) >= p.overlay_share)[A_pid] & soon
+    if over.any():  # counting ink not drift: the drift taken above would lift writing a caption joined (test4: 0.42)
+        over |= (share(over & ~A_drift, ~A_drift) >= p.overlay_share)[A_pid] & soon
     return over, pending
 
 

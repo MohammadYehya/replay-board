@@ -7,7 +7,9 @@ stroke at a time; a caption comes all at once, on board that was blank a moment 
 
 Here: captions alone, next to writing done just before (they join its piece) and across writing (some of their ink
 stays accepted when they go); writing done as a caption comes up, kept even when it is wiped soon after; and streamed
-partials, which leave out what may still turn out a caption and never show writing behind their ready line.
+partials, which leave out what may still turn out a caption and never show writing behind their ready line. Then
+captions that come in two goes: faded in (their edges come a sample late, as drift), or in two parts whose first part
+leaves first; and the next line written in a piece a caption joined, while it is up.
 
 The frames are made here and fed straight to capture_board (no video file), like test_board_merge.
 """
@@ -59,7 +61,8 @@ CAPTIONS = {
 
 
 def _stroke_mask(name, upto=np.inf):
-    x0, x1, y, t0, t1 = STROKES[name]
+    """A stroke of STROKES by name, or an (x0, x1, y, t0, t1) one, as written by time `upto`."""
+    x0, x1, y, t0, t1 = STROKES[name] if isinstance(name, str) else name
     m = np.zeros((H, W), bool)
     xs = np.arange(x0, x1)
     tw = t0 + (xs - x0) / (x1 - x0) * (t1 - t0)  # when each column is written
@@ -69,11 +72,17 @@ def _stroke_mask(name, upto=np.inf):
 
 def _write_time(name):
     """Per pixel of the stroke, when it was written (inf off the stroke)."""
-    x0, x1, y, t0, t1 = STROKES[name]
+    x0, x1, y, t0, t1 = STROKES[name] if isinstance(name, str) else name
     tw = np.full((H, W), np.inf)
     xs = np.arange(x0, x1)
     tw[y:y + 3, xs] = t0 + (xs - x0) / (x1 - x0) * (t1 - t0)
     return tw
+
+
+def _over(f, m, alpha=1.0):
+    """The frame with typed text m (0..255) laid over it, at `alpha` (fading in)."""
+    a = (m.astype(np.float32) / 255.0 * alpha)[..., None]
+    return np.round(f * (1 - a) + np.float32(CAPTION) * a).astype(np.uint8)
 
 
 def _frame(t):
@@ -84,8 +93,7 @@ def _frame(t):
         f[_stroke_mask(name, t)] = CHALK
     for m, t0, t1 in CAPTIONS.values():
         if t0 - 1e-6 <= t < t1 - 1e-6:
-            a = (m.astype(np.float32) / 255.0)[..., None]
-            f = np.round(f * (1 - a) + np.float32(CAPTION) * a).astype(np.uint8)
+            f = _over(f, m)
     return f
 
 
@@ -245,3 +253,149 @@ def test_a_streamed_replay_never_shows_writing_behind_its_ready_line(monkeypatch
             assert now[pid]["t_seen"] > prev, (t, ready, prev, now[pid])
         before, prev = set(now), ready
     assert {q["id"] for q in res.pieces} <= before  # and every piece is shown by the end
+
+
+# --- captions that come in two goes, and writing done while one is up ---------------------------------------------
+# Five lines written one under the other, 14 px apart (one piece), done at 26.5 s. A caption comes up 1.5 s later
+# with its first letter 22 px right of them: it joins their piece and is about half of it (below overlay_share).
+LINES = [(60, 360, 40 + 14 * i, 6.5 + 4 * i, 10.5 + 4 * i) for i in range(5)]
+NEXT = (60, 360, 110, 28.4, 34.4)  # the next line, begun just after the caption came up: it joins the piece too
+DEFN = _caption(["Catenate means the", "ability of carbon"], 382, 70)
+T_DEFN, T_DEFN_GONE = 28.0, 38.0
+# A title, and a subtitle a second later right under it (it joins the title's piece); the title goes first. The title
+# is 44% of the piece: once it has gone, less than overlay_gone of the piece's window is gone, and the subtitle up is
+# less than overlay_share of it.
+FAR = (60, 260, 230, 4.0, 8.0)
+TITLE = (_caption(["Ring Chain and"], 300, 80), 20.0, 28.0)
+SUBTITLE = (_caption(["and straight chains"], 300, 114), 21.0, 36.0)
+SCENE_SECONDS = 50.0
+
+
+def _ink(strokes, upto=np.inf):
+    m = np.zeros((H, W), bool)
+    for s in strokes:
+        m |= _stroke_mask(s, upto)
+    return m
+
+
+def _grown(m, grow=2):
+    return cv2.dilate(m.astype(np.uint8), np.ones((2 * grow + 1,) * 2, np.uint8)) > 0
+
+
+def _faded_frame(t):
+    """The caption next to the lines fades in: at 45% for its first sample (its anti-aliased edges are not ink yet)."""
+    f = np.full((H, W, 3), BOARD_BGR, np.uint8)
+    f[_ink(LINES, t)] = CHALK
+    if T_DEFN - 1e-6 <= t < T_DEFN_GONE - 1e-6:
+        f = _over(f, DEFN, 0.45 if t < T_DEFN + 1 / FPS - 1e-6 else 1.0)
+    return f
+
+
+def _next_line_frame(t):
+    f = np.full((H, W, 3), BOARD_BGR, np.uint8)
+    f[_ink(LINES + [NEXT], t)] = CHALK
+    if T_DEFN - 1e-6 <= t < T_DEFN_GONE - 1e-6:
+        f = _over(f, DEFN)
+    return f
+
+
+def _two_part_frame(t):
+    f = np.full((H, W, 3), BOARD_BGR, np.uint8)
+    f[_stroke_mask(FAR, t)] = CHALK
+    for m, t0, t1 in (TITLE, SUBTITLE):
+        if t0 - 1e-6 <= t < t1 - 1e-6:
+            f = _over(f, m)
+    return f
+
+
+SCENES = {  # frames, the real writing, the caption's pixels and those within 2 px of them (not the writing's own)
+    "faded in": (_faded_frame, _ink(LINES), _grown(DEFN > 0) & ~_ink(LINES)),
+    "next line": (_next_line_frame, _ink(LINES + [NEXT]), _grown(DEFN > 0) & ~_ink(LINES + [NEXT])),
+    "two parts": (_two_part_frame, _ink([FAR]), _grown((TITLE[0] > 0) | (SUBTITLE[0] > 0)) & ~_ink([FAR])),
+}
+
+
+def _run(monkeypatch, scene, stream=False, **params):
+    frame = SCENES[scene][0]
+
+    def frames(info, fps, width, start=0.0, end=None, prefetch=8):
+        for k in range(int(round((end - start) * fps))):
+            yield start + k / fps, frame(start + k / fps)
+
+    monkeypatch.setattr(board, "iter_frames", frames)
+    monkeypatch.setattr(board, "detect_mode", lambda info, geom, s0, s1, p: ("chalk", 92.0))
+    info = VideoInfo(Path("synthetic.mp4"), SCENE_SECONDS, W, H, FPS, False, 0)
+    seen = []
+    kw = {}
+    if stream:
+        kw = dict(checkpoint=lambda part, t, ready: seen.append((part, t, ready)), checkpoint_every=1.0,
+                  checkpoint_wall=0.0, checkpoint_share=1.0)
+    res = capture_board(info, params=BoardParams(width=W, **params), mode="chalk", **kw)
+    return (res, seen) if stream else res
+
+
+def _one_piece_of_writing(res, writing, cap):
+    """The capture is the writing alone, every pixel of it, in one piece that stays: no caption ink, no erase."""
+    assert not _on(cap, res.add_idx).any(), np.unique(res.add_idx[_on(cap, res.add_idx)]).size
+    assert np.unique(res.add_idx[_on(writing, res.add_idx)]).size == writing.sum()
+    assert len(res.pieces) == 1, res.pieces
+    q = res.pieces[0]
+    assert q["box"] == _xywh(writing) and q["removed_at"] is None and not q["revealed"], q
+    assert not res.erases, res.erases
+
+
+def test_a_caption_faded_in_leaves_no_edges(monkeypatch):
+    """Faded in, a caption's anti-aliased edges become ink a sample after the letters next to them, so they are
+    accepted as drift (old ink moved within drift_r). They go with the caption even when it joined writing done just
+    before and is less than overlay_share of its piece."""
+    _, writing, cap = SCENES["faded in"]
+    plain = _run(monkeypatch, "faded in", overlay_burst=0)
+    on = _on(cap, plain.add_idx)
+    assert plain.add_drift[on].sum() > 100  # the scene is the one meant: edges came as drift, in the lines' piece
+    assert np.unique(plain.add_piece[on | _on(writing, plain.add_idx)]).size == 1
+    _one_piece_of_writing(_run(monkeypatch, "faded in"), writing, cap)
+
+
+def test_the_next_line_written_while_a_caption_is_up_is_writing(monkeypatch):
+    """He goes on writing as a caption comes up next to his lines: the caption joined his piece, and so does the next
+    line, accepted within overlay_win after the caption. The caption goes; the line stays, and is writing, shown as
+    it was written."""
+    _, writing, cap = SCENES["next line"]
+    plain = _run(monkeypatch, "next line", overlay_burst=0)
+    nxt = _stroke_mask(NEXT)
+    assert np.unique(plain.add_piece[_on(nxt | cap, plain.add_idx)]).size == 1  # one piece: lines, caption, line
+    res = _run(monkeypatch, "next line")
+    _one_piece_of_writing(res, writing, cap)
+    sel = _on(nxt, res.add_idx)
+    first = np.full(W * H, np.inf)
+    np.minimum.at(first, res.add_idx[sel], res.add_t[sel])
+    px = np.flatnonzero(nxt)
+    late = first[px] - _write_time(NEXT).reshape(-1)[px]
+    assert late.min() >= 0.0 and late.max() <= 1.0 + 1e-3, (late.min(), late.max())
+
+
+@pytest.mark.parametrize("scene", ["two parts", "faded in"])
+def test_a_streamed_replay_never_shows_what_the_final_drops(monkeypatch, scene):
+    """Two parts: once the title has gone, the piece's window ink is not mostly gone yet (the subtitle is up), so it
+    is no caption yet; it is when the subtitle goes. Faded in: the edges accepted as drift are taken with the caption
+    only once they go. Until it is known, a partial shows none of it, nor a piece the final replay drops."""
+    _, writing, cap = SCENES[scene]
+    if scene == "two parts":  # the scene is the one meant: the subtitle joined the title's piece
+        both = _run(monkeypatch, scene, overlay_burst=0)
+        assert np.unique(both.add_piece[_on(cap, both.add_idx)]).size == 1
+    plain = _run(monkeypatch, scene)
+    res, seen = _run(monkeypatch, scene, stream=True)
+    assert len(seen) >= 30
+    assert res.pieces == plain.pieces and res.erases == plain.erases
+    assert np.array_equal(res.add_idx, plain.add_idx) and np.array_equal(res.add_t, plain.add_t)
+    final = {q["id"] for q in plain.pieces}
+    assert not _on(cap, plain.add_idx).any()
+    prev = 0.0
+    for part, t, ready in seen:
+        assert prev <= ready <= t
+        prev = ready
+        shown = {q["id"] for q in ready_pieces(part, ready)}
+        assert shown <= final, (t, ready, shown - final, part.pieces)
+        ink = part.add_idx[np.isin(part.add_piece, list(shown))]
+        assert not _on(cap, ink).any(), (t, ready, int(_on(cap, ink).sum()))
+    assert ready_pieces(seen[-1][0], seen[-1][2])  # the writing is shown by the end
