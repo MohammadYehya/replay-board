@@ -26,9 +26,9 @@
   </picture></a>
 </p>
 
-## Why
+---
 
-Rewatching a recorded lecture is hard:
+**Rewatching a recorded lecture is hard:**
 - the teacher stands in front of what they're writing;
 - the camera can't read the board well;
 - on slides, the cursor never stops moving.
