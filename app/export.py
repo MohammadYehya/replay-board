@@ -113,6 +113,16 @@ class NotReady(Exception):
     """No replay.json yet, it is being rewritten, or no deck to download yet (one plain line, HTTP 409)."""
 
 
+# While a board lecture is still processed, replay.json is written in parts (SPEC "Streaming replay"): what needs the
+# whole lecture (the deck, the notes, 3D views) waits for the final one.
+STILL_PROCESSING = "Available when processing finishes"
+
+
+def is_partial(replay) -> bool:
+    """True for a partial replay.json (written while the lecture is still processed)."""
+    return isinstance(replay, dict) and "partial" in replay
+
+
 class _Cancelled(Exception):
     """A newer run (replay.json changed) took over this lecture's slides."""
 
@@ -2073,8 +2083,11 @@ def slides_status(job_dir: Path) -> dict:
 
 def start_writing(job_dir: Path, make_client: Callable[[], Any]) -> dict:
     """POST slides/write: start writing the deck in the background, unless it is ready or being written (then this
-    joins that run: one lecture is never paid for twice at once). A failed run is tried again."""
+    joins that run: one lecture is never paid for twice at once). A failed run is tried again. NotReady while the
+    replay is partial."""
     raw, replay = read_replay(job_dir)
+    if is_partial(replay):
+        raise NotReady(STILL_PROCESSING)
     version = deck_version(raw)
     with _guard:
         deck = ready_deck(job_dir, replay, version)
@@ -2333,6 +2346,8 @@ def write_pptx(job_dir: Path) -> tuple[bytes, dict]:
     """(the PowerPoint, the deck it shows) of the ready deck (NotReady when there is none), rendered by
     app/pptx_deck.py and kept as export/slides.pptx for this deck and renderer version. No model call."""
     raw, replay = read_replay(job_dir)
+    if is_partial(replay):
+        raise NotReady(STILL_PROCESSING)
     version = deck_version(raw)
     with _guard:
         deck = ready_deck(job_dir, replay, version)

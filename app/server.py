@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from . import ask
 from .config import ROOT
-from .pipeline import JOBS, STAGES, plain_error, replace_file, run
+from .pipeline import JOBS, STAGES, plain_error, recover_interrupted, replace_file, run
 
 app = FastAPI(title="Replay Board")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -144,6 +144,8 @@ async def create_job(file: UploadFile = File(...), start: float | None = Form(No
 
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str):
+    """status.json as the pipeline writes it, with "replay": {seq, partial, ready_until} once a replay.json is
+    written (seq goes up with every write), and ready: a replay.json exists (partial or final)."""
     d = _job_dir(job_id)
     st = _read_json(d / "status.json")
     st["id"] = job_id
@@ -216,6 +218,17 @@ def job_poster(job_id: str, t: float | None = None):
     return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
 
 
+def _final_replay(p: Path) -> dict:
+    """replay.json for what needs the whole lecture (the notes): 409 while it is partial (the lecture is still being
+    processed, SPEC "Streaming replay")."""
+    from .export import STILL_PROCESSING, is_partial
+
+    data = _read_json(p)
+    if is_partial(data):
+        raise HTTPException(409, STILL_PROCESSING)
+    return data
+
+
 @app.get("/api/jobs/{job_id}/notes.md")
 def job_notes(job_id: str):
     from fastapi.responses import PlainTextResponse
@@ -225,7 +238,7 @@ def job_notes(job_id: str):
     p = _job_dir(job_id) / "replay.json"
     if not p.exists():
         raise HTTPException(404, "not processed yet")
-    md = build_notes(_read_json(p))
+    md = build_notes(_final_replay(p))
     return PlainTextResponse(md, media_type="text/markdown; charset=utf-8",
                              headers={"Content-Disposition": f'inline; filename="{job_id}-notes.md"'})
 
@@ -288,7 +301,7 @@ def job_notes_json(job_id: str):
     p = _job_dir(job_id) / "replay.json"
     if not p.exists():
         raise HTTPException(404, "not processed yet")
-    return JSONResponse(notes_data(_read_json(p)), headers=NO_CACHE)
+    return JSONResponse(notes_data(_final_replay(p)), headers=NO_CACHE)
 
 
 def _meta_client():
@@ -560,6 +573,8 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
+    # Jobs the last server left queued or running would show as processing for good (their queue and thread are gone)
+    recover_interrupted(JOBS, log=print)
     print(f"Replay Board on http://{a.host}:{a.port}")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 

@@ -7,10 +7,11 @@ The result is a replay log from which the board at any time can be rebuilt.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 import cv2
@@ -19,6 +20,7 @@ import numpy as np
 from .media import VideoInfo, clip_range, grab_frame, iter_frames, scaled_size
 
 PersonMask = Callable[[float], "np.ndarray | None"]
+_log = logging.getLogger(__name__)
 
 # Ink pixels a second while the teacher writes, at 800 px wide (scales with the area): the median over the pieces seen
 # as they were written on the real clips (61-92 a clip; 76-104 between the quartiles). Hidden writing is redrawn at it.
@@ -61,6 +63,30 @@ class BoardParams:
     touch_r: float = 4.0  # a small bit "touches" a piece if its ink is this close
     settle_tol: float = 25.0
     settle_give_up: float = 30.0  # seconds without settling before we start anyway
+    # A sample that does not show the board (a title or end card, an advert in an edited video) is skipped: the
+    # visible board's median grey is further than max(card_tol, card_share * typical) from the typical board's.
+    # Normal clips stay well inside (camera exposure swings reach about half of it). 0 = never skip.
+    card_tol: float = 40.0
+    card_share: float = 0.5
+    # Typed captions burned into an edited video (white text for a few seconds) are not writing. Writing comes a stroke
+    # at a time; a caption comes all at once on board seen blank just before. A burst step accepts at least
+    # `overlay_burst` px (at 800) of ink not drift whose spot was seen blank at most accept_n samples before, after the
+    # first pre_window seconds (measured, writing: at most 252 px a step on the self-test, 44 on data/test.mp4 and
+    # test2, 214 on test4). A piece that got at least `overlay_part` px of it in that step is part of the burst (test4:
+    # 655 px and more for each caption, at most 59 for the other pieces, writing done as a caption came up). It is a
+    # caption when at least `overlay_gone` of its ink (not drift) accepted within `overlay_win` seconds after is gone
+    # within `overlay_life` seconds (captions: 0.62-1.0, the rest stays accepted where writing lies under the text;
+    # writing that came into view at once, the cut to another board or a banner going: 0). Its overlay is all its ink
+    # in the burst step, and what of those seconds' ink, drift too (edges a fade-in made ink a sample late), is gone
+    # within overlay_life; the rest stays, writing done in the piece as the caption came up. A piece at least
+    # `overlay_share` overlay (counting ink not drift) loses all else that is gone within overlay_life too (test4:
+    # writing a caption joined, 0.42). Overlay leaves its piece and counts as short-lived for erases. 0 burst = never.
+    overlay_burst: int = 600
+    overlay_part: int = 150
+    overlay_win: float = 2.0
+    overlay_life: float = 60.0
+    overlay_gone: float = 0.5
+    overlay_share: float = 0.6
     pre_window: float = 2.5
     group_dilate: int = 13
     join_recent: float = 3.0
@@ -85,6 +111,8 @@ class BoardParams:
     # that comes into view bit by bit as the pen moves on was written in view, however long he stood there before
     # (measured: 0-0.67 s for writing done behind the teacher, 2-2.3 s for a 2.5 s line written with his body at the pen).
     reveal_spread: float = 1.0
+    # Ink colour is pushed away from the board: marker on a whiteboard darkened to this share, chalk lifted towards white
+    # by the same share of its distance to white (darkening chalk drew it dim, close to the board's own colour).
     darken: float = 0.72
 
 
@@ -337,6 +365,21 @@ def _middle(gray: np.ndarray) -> np.ndarray:
     return gray[h // 4: h - h // 4, w // 4: w - w // 4]
 
 
+def _off_board(board: np.ndarray, in_front: np.ndarray | None, typical: float, p: BoardParams) -> bool:
+    """True when the frame does not show the board: the median grey of what is in view (every 4th pixel each way,
+    without the dilated person mask `in_front`, at any size) is far from the typical board's. Never when less than a
+    tenth of the board is in view."""
+    if p.card_tol <= 0:
+        return False
+    g = cv2.cvtColor(board, cv2.COLOR_BGR2GRAY)[::4, ::4]
+    if in_front is not None:
+        view = cv2.resize(in_front, (g.shape[1], g.shape[0]), interpolation=cv2.INTER_NEAREST) == 0
+        if view.sum() < 0.1 * view.size:
+            return False
+        g = g[view]
+    return abs(float(np.median(g)) - typical) > max(p.card_tol, p.card_share * typical)
+
+
 def detect_mode(info: VideoInfo, geom: BoardGeometry, start: float, end: float, p: BoardParams):
     """Median middle brightness at several moments (never the first frame)."""
     n = p.mode_moments
@@ -357,7 +400,19 @@ def detect_mode(info: VideoInfo, geom: BoardGeometry, start: float, end: float, 
 
 def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None = None,
                   params: BoardParams | None = None, start: float = 0.0, end: float | None = None,
-                  progress: Callable[[float], None] | None = None, mode: str | None = None) -> BoardResult:
+                  progress: Callable[[float], None] | None = None, mode: str | None = None,
+                  checkpoint: Callable[["BoardResult", float, float], None] | None = None,
+                  checkpoint_every: float = 30.0, checkpoint_wall: float = 8.0,
+                  checkpoint_share: float = 0.1) -> BoardResult:
+    """The board's writing over the clip (SPEC 5.1).
+
+    checkpoint(partial, t, ready_until), for a streamed replay: called during the loop once the video advanced at
+    least `checkpoint_every` seconds and `checkpoint_wall` seconds of wall-clock time passed since the last call, and
+    long enough that checkpoints take at most `checkpoint_share` of the time (finishing a partial result costs 12-30 ms
+    on 8 minutes with the person mask, up to 0.6 s without: it grows with the removals). The partial result is what
+    the loop knows at t, finished on copies of its state (the loop's own state is never touched, so the result
+    returned is the same with or without checkpoints); ready_until is how far that partial is unlikely to change (see
+    _ready_until). A checkpoint that fails is logged once and capture carries on."""
     p = params or BoardParams()
     debug = bool(os.environ.get("RB_DEBUG_BOARD"))
     t_wall = time.perf_counter()
@@ -474,6 +529,12 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     def touches(a, b, padding) -> bool:
         return not (a[2] + padding <= b[0] or b[2] + padding <= a[0] or a[3] + padding <= b[1] or b[3] + padding <= a[1])
 
+    # Checkpoints for a streamed replay: the video time and wall-clock time of the last one, how far it was ready.
+    ck_t, ck_wall, ck_gap, ck_ready, ck_failed = s0, time.perf_counter(), checkpoint_wall, s0, False
+    # A PersonTrack says where SAM did not look (its chunk failed); a plain callable looked everywhere.
+    looked = getattr(person_mask, "looked", None)
+    skipped = 0  # samples that did not show the board
+
     for t, frame in iter_frames(info, p.fps, geom.dw, s0, s1):
         board = geom.warp(frame)
         if t_settle is None:
@@ -482,6 +543,15 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                 continue
             t_settle = t
             last_clean[:] = t
+        # The person mask at the "in front" masks' scale, dilated.
+        person_front = None
+        if person_mask is not None:
+            pm = person_mask(t)
+            if pm is not None:
+                person_front = cv2.dilate((geom8 if s > 1.05 else geom).warp_mask(pm).astype(np.uint8), k_person_c)
+        if _off_board(board, person_front, typical, p):
+            skipped += 1  # a card or another shot: nothing is seen, nothing changes
+            continue
         steps += 1
         last_board = board
         b, g, r = cv2.split(board)
@@ -510,12 +580,15 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             bg_ref = closed_f.copy()
         else:
             np.maximum(closed_f, bg_ref - p.bg_decay, out=bg_ref)
-        front = cv2.dilate(((bg_ref - closed_f) > p.dark_thr).astype(np.uint8), k_dark_c)
-        if person_mask is not None:
-            pm = person_mask(t)
-            if pm is not None:
-                pw = (geom8 if coarse else geom).warp_mask(pm).astype(np.uint8)
-                front = cv2.max(front, cv2.dilate(pw, k_person_c))
+        if mode == "chalk" and person_mask is not None and (looked is None or looked(t)):
+            # Not on a chalkboard SAM looked at: there its grey is 255 - max(B, G, R), so a dark shirt is brighter
+            # than the board, lifts the reference as it passes and leaves the clean board behind it "in front" for
+            # as long as the reference takes to sink back (half a minute or more), long after the teacher left.
+            front = np.zeros_like(closed_s)
+        else:
+            front = cv2.dilate(((bg_ref - closed_f) > p.dark_thr).astype(np.uint8), k_dark_c)
+        if person_front is not None:
+            front = cv2.max(front, person_front)
         # In view unless something other than too-thick ink is in front.
         visible_nt = (cv2.resize(front, (W, H), interpolation=cv2.INTER_NEAREST) if coarse else front) == 0
         dist = cv2.distanceTransform(ink.astype(np.uint8), cv2.DIST_L2, 3)
@@ -823,6 +896,25 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             add_moved.append(moved)
             add_col.append(board[ys, xs].copy())
 
+        if checkpoint is not None and t - ck_t >= checkpoint_every and time.perf_counter() - ck_wall >= ck_gap:
+            ck_t, ck_wall = t, time.perf_counter()
+            try:
+                part = _finish(p, geom, mode, {k: replace(v, box=list(v.box)) for k, v in pieces.items()},
+                               [{**e, "box": list(e["box"]), "adds": list(e["adds"])} for e in erases],
+                               list(add_t), list(add_idx), _resolved(add_piece, alias), list(add_col),
+                               list(add_drift), list(rem_add), list(rem_t), accepted.copy(), last_board, t_settle, t,
+                               list(add_seen), list(add_show), list(add_lc), list(add_moved), partial=True)
+                ck_ready = _ready_until(p, t, ck_ready, due_t, accepted, add_t, add_show,
+                                        hold=part.stats.pop("overlay_hold", np.inf))
+                checkpoint(part, t, ck_ready)
+            except Exception as e:  # a partial replay is a bonus: never lose the capture over it
+                if not ck_failed:
+                    _log.warning("board: a partial replay at %.1fs failed (%s: %s); capture carries on", t,
+                                 type(e).__name__, str(e).splitlines()[0][:160] if str(e) else "")
+                ck_failed = True
+            cost = time.perf_counter() - ck_wall
+            ck_gap = max(checkpoint_wall, cost / max(1e-6, checkpoint_share))  # from the start of this one
+
         if progress is not None and steps % 30 == 0:
             progress(min(1.0, (t - s0) / max(1e-6, s1 - s0)))
 
@@ -833,7 +925,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     add_piece = [np.array([resolve(int(v)) for v in a], np.int64) if alias else a for a in add_piece]
     res = _finish(p, geom, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift, rem_add, rem_t,
                   accepted, last_board, t_settle, s1, add_seen, add_show, add_lc, add_moved)
-    res.stats.update(steps=steps, seconds=time.perf_counter() - t_wall, typical_brightness=typical,
+    res.stats.update(steps=steps, skipped=skipped, seconds=time.perf_counter() - t_wall, typical_brightness=typical,
                      clip_seconds=s1 - s0, speed=(s1 - s0) / max(1e-6, time.perf_counter() - t_wall))
     if progress is not None:
         progress(1.0)
@@ -844,9 +936,51 @@ def _cat(lst, dtype, shape=(0,)):
     return np.concatenate(lst).astype(dtype) if lst else np.zeros(shape, dtype)
 
 
+def _resolved(add_piece: list, alias: dict) -> list:
+    """The add lists' piece ids with merged pieces resolved to the piece they went into: new arrays, the loop's own
+    are left alone. Vectorised (the loop's resolve is a Python loop per add)."""
+    if not alias or not add_piece:
+        return list(add_piece)
+    top = max(max(alias), max(alias.values()), max((int(a.max()) for a in add_piece if a.size), default=0)) + 1
+    lut = np.arange(top, dtype=np.int64)
+    for src in alias:
+        dst = src
+        while dst in alias:
+            dst = alias[dst]
+        lut[src] = dst
+    return [lut[a] if a.size else a.astype(np.int64) for a in add_piece]
+
+
+def _ready_until(p: BoardParams, t: float, prev: float, due_t: np.ndarray, accepted: np.ndarray, add_t: list,
+                 add_show: list, hold: float = np.inf) -> float:
+    """How far a partial result at t is unlikely to change: an add is final once it can no longer be dropped as
+    short-lived (min_life plus the removal wait after it was accepted); thick ink not accepted yet may be shown from
+    its due time, before t; a young add may be shown from before that horizon; and ink that may still turn out a
+    caption overlay is left out of the partial, shown from `hold` if it does not (see _overlay). Never before `prev`,
+    never past t."""
+    dt = 1.0 / p.fps
+    ready = t - (p.min_life + (p.remove_n - 1) * dt)
+    horizon = ready
+    pending = due_t[~accepted]
+    if pending.size:
+        first = float(pending.min())
+        if np.isfinite(first):
+            ready = min(ready, first)
+    for i in range(len(add_t) - 1, -1, -1):
+        if not add_t[i].size:
+            continue
+        if float(add_t[i][0]) <= horizon:
+            break
+        ready = min(ready, float(add_show[i].min()))
+    ready = min(ready, hold - 0.5 * dt)  # strictly before it: a piece whose first ink is there is not shown yet
+    return float(min(max(ready, prev), t))
+
+
 def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift,
             rem_add, rem_t, accepted, last_board, t_settle, t_end, add_seen=None, add_show=None,
-            add_lc=None, add_moved=None) -> BoardResult:
+            add_lc=None, add_moved=None, partial: bool = False) -> BoardResult:
+    """The result from the capture loop's state. partial: a streamed checkpoint at t_end (ink that may still turn out
+    a caption overlay is left out, and stats["overlay_hold"] says from when it would be shown if it does not)."""
     W, H = geom.width, geom.height
     s = W / 800.0
     A_t = _cat(add_t, np.float64)  # accepted: lifetimes, removals, erases and drift go by this
@@ -865,7 +999,11 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
     if R_add.size:
         removed_at[R_add] = R_t
     life = removed_at - A_t
+    over, pending = _overlay(p, s, A_t, A_seen, A_lc, A_drift, A_pid, life, t_settle, t_end if partial else None)
+    any_over = bool(over.any())
     short = life < p.min_life
+    if any_over:
+        short |= over
     shown_removed, replaced = _display_removals(A_t, A_idx, A_drift, removed_at, W, H, s, p)
 
     bx, by = p.band_frac * W, p.band_frac * H
@@ -877,6 +1015,12 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
     ends = list(starts[1:]) + [pid_sorted.size]
     for u, a, b in zip(uniq, starts, ends):
         members = order[a:b]
+        if any_over:
+            # A caption overlay is not part of the piece (writing it joined is judged on its own ink)
+            members = members[~over[members]]
+            if members.size == 0:
+                keep_piece[int(u)] = False
+                continue
         q = pieces[int(u)]
         uniq_px = np.unique(A_idx[members])
         ys, xs = np.divmod(uniq_px, W)
@@ -962,7 +1106,9 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
     kept_ids = np.nonzero(keep)[0]
     o = np.argsort(A_show[kept_ids], kind="stable")
     kept_ids = kept_ids[o]
-    col = np.clip(A_col[kept_ids].astype(np.float32) * p.darken, 0, 255).astype(np.uint8)
+    col = A_col[kept_ids].astype(np.float32)
+    col = 255.0 - (255.0 - col) * p.darken if mode == "chalk" else col * p.darken
+    col = np.clip(col, 0, 255).astype(np.uint8)
     rmask = np.isfinite(removed_at[kept_ids])
     rem_ids = kept_ids[rmask]
     ro = np.argsort(removed_at[rem_ids], kind="stable")
@@ -973,6 +1119,10 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
     mask = ~accepted[H // 4: H - H // 4, W // 4: W - W // 4].reshape(-1)
     bg = tuple(int(v) for v in np.median(mid[mask] if mask.any() else mid, axis=0))
 
+    stats = {"pieces_raw": len(pieces), "pieces_kept": len(out_pieces), "erases": len(out_erases),
+             "overlay_adds": int(over.sum())}
+    if partial:
+        stats["overlay_hold"] = float(A_show[pending].min()) if pending.any() else np.inf
     return BoardResult(
         width=W, height=H, mode=mode, corners=[[round(float(x), 1), round(float(y), 1)] for x, y in geom.corners_video],
         background=bg, t_start=float(t_settle), t_end=float(t_end), fps=p.fps,
@@ -981,8 +1131,69 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
         rem_t=removed_at[rem_ids], rem_idx=A_idx[rem_ids],
         add_drift=A_drift[kept_ids], add_moved=A_moved[kept_ids], add_gone=shown_removed[kept_ids],
         add_blank=None if A_lc is None else np.where(np.isfinite(A_lc[kept_ids]), A_lc[kept_ids], -np.inf),
-        stats={"pieces_raw": len(pieces), "pieces_kept": len(out_pieces), "erases": len(out_erases)},
+        stats=stats,
     )
+
+
+def _overlay(p: BoardParams, s: float, A_t, A_seen, A_lc, A_drift, A_pid, life, t_settle,
+             partial_at: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Per add, whether it is a typed caption overlay (see BoardParams.overlay_burst), and which overlay adds are only
+    pending: in a partial result at `partial_at`, ink the final result may still call overlay counts as overlay for
+    now. Adds are in time order, one run per step."""
+    n = A_t.size
+    none = np.zeros(n, bool)
+    if p.overlay_burst <= 0 or A_lc is None or n == 0:
+        return none, none
+    dt = 1.0 / p.fps
+    # Ink accepted on time, not after the wait for too-thick ink to stay put: typed text is thin, while a thick dot or
+    # a still wrist accepted after that wait can land in one step with other ink (tests/test_board_thick.py).
+    fresh = (np.isfinite(A_lc) & (A_seen - A_lc <= (p.accept_n + 0.5) * dt) & ~A_drift & (A_t - A_seen <= 0.5 * dt)
+             & (A_t - t_settle > p.pre_window))
+    starts = np.r_[0, np.flatnonzero(A_t[1:] != A_t[:-1]) + 1]
+    count = np.add.reduceat(fresh.astype(np.int32), starts)
+    burst = A_t[starts[count >= p.overlay_burst * s * s]]
+    if burst.size == 0:
+        return none, none
+    j = np.searchsorted(burst, A_t, side="right") - 1  # the latest burst step at or before each add
+    jb = np.maximum(j, 0)
+    key = A_pid * burst.size + jb  # (piece, burst)
+    k, c = np.unique(key[fresh & (j >= 0) & (A_t == burst[jb])], return_counts=True)
+    took = k[c >= p.overlay_part * s * s]  # the pieces that took part in each burst
+    near = np.flatnonzero((j >= 0) & (A_t - burst[jb] <= p.overlay_win + 1e-6))
+    window_d = np.zeros(n, bool)  # a burst's window, drift too
+    window_d[near] = np.isin(key[near], took)
+    window = window_d & ~A_drift
+    soon = life < p.overlay_life
+    top = int(A_pid.max()) + 1
+
+    def share(of, among):
+        return np.bincount(A_pid[of], minlength=top) / np.maximum(np.bincount(A_pid[among], minlength=top), 1)
+
+    # A piece whose window ink mostly went soon is a caption. Its overlay: all its ink in the burst step, of which some
+    # stays accepted where writing lies within drift_r under the text (38% of data/test3.mp4's "Get more @ ..."
+    # banner); and its window ink that went soon, drift too (edges a fade-in made ink a sample after the letters).
+    # Window ink accepted after the step that stays is writing: he wrote on in the piece as the caption came up.
+    cap = share(window & soon, window) >= p.overlay_gone  # per piece
+    over = cap[A_pid] & ((window & (A_t == burst[jb])) | (window_d & soon))
+    pending = none
+    if partial_at is not None:
+        # Left out of a partial, as the final may still call it overlay. Ink still on the board may yet go within
+        # overlay_life. A piece that is no caption yet but would be if all that went: all its window ink (a caption's
+        # first part may have gone while its second is up). A caption: its window ink still up, drift too (the edges
+        # of one faded in). And where the share rule below may yet fire, counting all that as overlay: the piece's ink
+        # since its first burst still up, not drift. Holding its drift too held test4's stream a minute behind for
+        # most of it (a card kept taking drift for minutes); the drift that rule may still take is shown (36 px at most).
+        young = ~np.isfinite(life) & (partial_at - A_t < p.overlay_life + (p.remove_n - 1) * dt)
+        maybe = ~cap & (share(window & (soon | young), window) >= p.overlay_gone)  # per piece
+        pending = ~over & window_d & (maybe[A_pid] | (cap[A_pid] & young))
+        first = np.full(top, np.inf)  # per piece, its first burst
+        np.minimum.at(first, took // burst.size, burst[took % burst.size])
+        rest = share((over | pending) & ~A_drift, ~A_drift) >= p.overlay_share  # per piece
+        pending |= ~over & rest[A_pid] & (A_t >= first[A_pid]) & young & ~A_drift
+        over = over | pending
+    if over.any():  # counting ink not drift: the drift taken above would lift writing a caption joined (test4: 0.42)
+        over |= (share(over & ~A_drift, ~A_drift) >= p.overlay_share)[A_pid] & soon
+    return over, pending
 
 
 def _display_removals(A_t, A_idx, A_drift, removed_at, W, H, s, p):

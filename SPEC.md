@@ -88,6 +88,7 @@ Writing stays where it is; the teacher moves.
 **What's in front (hidden pixels keep their state)**
 - Primary: SAM 3.1 person mask, dilated.
 - Fallback 1, large dark things: keep a per-pixel `bg_ref`, initialised to `closed` and then updated each step as `max(closed, bg_ref - 0.5)`. Where `bg_ref - closed > 45`, dilate by an ellipse of 15 px.
+  - Not on a chalkboard where SAM looked (it is still used where a SAM chunk failed, and on chalkboards without a person mask). There the grey is `255 - max(B, G, R)`, so a dark shirt is brighter than the board: it lifts `bg_ref` as it passes, and the clean board behind it counts as "in front" until `bg_ref` sinks back, half a minute or more after the teacher left (measured on a real 27-min chalkboard lecture: writing shown a median 22 s late, 95 pieces wrongly tagged "written while hidden"; without it, 2).
 - Fallback 2, too thick to be a pen stroke: where the distance transform of the ink exceeds `max_stroke/2` (max_stroke = 11 px), dilate by an ellipse of 31 px. Except thick ink that stays put: a thick pixel whose contrast against the clean board changes by at most 10 levels for 3 samples in a row is writing (a filled arrowhead, a heavy underline, strokes crossing), and it and thick pixels within 9 px of it leave this mask. Its count may only start while the whole thick shape is more than 6 px from the dilated person mask and the large-dark mask, so a still hand or sleeve that SAM missed never counts. Shapes wider than the closing (21 px) are not ink at all.
   - The replay shows ink this mask held back from when it would have been accepted as thin ink: a second count like `on`, in view of everything except this mask, and the pixel is shown from when it reached 3 (never later than its real acceptance, which still waits for the shape to stay put). That count restarts when the contrast of the pixel, or of any counted pixel within a 9 px ellipse around it (`jump_zone`: covers a replacing stroke up to 8 px wide), changes by more than 10 levels between samples (a stroke replacing a thing of another width or darkness changes only some of its rows). It is dropped for ink that was part of a too-thick thing whose middle turned into clean board without being accepted (a hand or sleeve SAM missed). Behind the teacher it waits, like `on`. Not caught: a thing SAM missed that is replaced by ink of exactly its width and darkness.
 
@@ -106,6 +107,7 @@ A global image alignment was tried and did **not** help: the drift is not a pure
 
 **Start of the clip**
 - Ignore frames until the picture settles, meaning the middle's brightness is within 25 levels of the typical brightness (this covers fade-ins).
+- After that, skip any sample that does not show the board: a title or end card, an advert, in an edited video. Its visible board's median grey (without the dilated person mask, when at least a tenth of the board is in view) is further than `max(40, typical / 2)` from the typical brightness. A skipped sample changes nothing: no counter moves, so a card is never writing, never erases the board and never gives the board its colour (the colour comes from the last sample that showed it). Measured margins: normal clips stay under half the threshold (an exposure swing reached 48 of 97); every card sample is far past it.
 - Anything accepted in the first 2.5 s after that is **pre-existing**: show it, but it is not a timed event.
 - Content never seen blank since the start that touches pre-existing content is pre-existing too.
 
@@ -125,6 +127,14 @@ These kinds of piece are dropped:
 - more than 60% of its pixels removed within 6 s of being accepted (`min_life`);
 - a long hairline: at most 1.5 px thick and at least 15× longer than thick;
 - lying entirely inside the outer **3% band** of the board area (frame or wall edges).
+- a typed caption burned into an edited video. Writing comes a stroke at a time; a caption comes all at once, on board that was seen blank a moment before, and goes within a minute.
+  - A **burst** step is one that accepts at least 600 px (at 800) of ink that is not drift, was accepted on time (not after the wait for too-thick ink: typed text is thin) and whose spot was seen blank at most `accept_n` samples before. Only steps after the first `pre_window` seconds count. Measured: writing reaches at most 252 px a step on the self-test, 44 on the owner's clips and 214 on an edited lecture.
+  - A piece is part of the burst if it got at least 150 px of that ink in that step. Captions got 655 px and more each; other pieces, including writing done as a caption came up, got at most 59.
+  - Such a piece is a caption if at least half of the ink it accepts within 2 s of the burst (not drift) is gone within 60 s. Measured: captions 0.62–1.0. Ink that came into view all at once and stays (a cut to another board, a banner leaving) measured 0.
+  - A caption's overlay is all its ink from the burst step (some of it stays accepted where chalk lies under the text), and the rest of its ink from those 2 s that is gone within 60 s, drift included: a caption that fades in makes its anti-aliased edges ink a sample after its letters, and they are accepted as drift. Ink from those 2 s after the burst step that stays is writing: the teacher wrote on, in the piece the caption joined.
+  - A piece that is at least 60% overlay (counting ink that is not drift) also loses the rest of its ink that is gone within 60 s.
+  - Overlay ink is taken out of its piece before the piece is judged, so writing a caption joined keeps its own ink. It counts as short-lived for erases, so a caption leaving is not an erase.
+  - A streamed partial leaves out what the final replay may still call overlay, and its ready line stays before that ink. Ink still on the board may yet go within 60 s. A piece that would be a caption if all that went has all its 2 s ink left out, drift included (a caption in two parts whose first part has gone while the second is up); a caption has its 2 s ink that is still up left out. Where the 60% rule may yet fire, counting all that as overlay, the piece's ink since its first burst that is still up and not drift is left out too. Drift that rule may still take is shown (test4: at most 36 px). On an edited lecture the median lag stays 8 s, but about 4 partials in 10 are 20–60 s behind; no step on the owner's clips comes near a burst.
 
 When replaying, also leave out any mark that will be removed within 6 s, since the whole video is known by then. Leave out pre-existing marks lying entirely in the 3% band too (a ruler hanging on the board).
 
@@ -133,7 +143,7 @@ When replaying, also leave out any mark that will be removed within 6 s, since t
 - Discard an erase if more than 60% of its pixels lived less than 6 s.
 
 **Output**
-- A per-step replay log of `(t, added pixel ids, their piece ids, their colours, removed pixel ids)`. The board at any time is rebuilt from it; ink colour is the original darkened ×0.72. An add's `t` is when it is shown (Fallback 2), never later than when it was accepted; lifetimes (`min_life`), removals, erases and drift go by acceptance time.
+- A per-step replay log of `(t, added pixel ids, their piece ids, their colours, removed pixel ids)`. The board at any time is rebuilt from it; ink colour is the original pushed away from the board: darkened ×0.72 on a whiteboard, and on a chalkboard lifted towards white by the same share (`255 - (255 - c) × 0.72`; darkening chalk drew it dim, close to the board's colour). An add's `t` is when it is shown (Fallback 2), never later than when it was accepted; lifetimes (`min_life`), removals, erases and drift go by acceptance time.
 - Speed at 800 px: the prototype did 9–15x real time; the full capture measures 6–7.5x in software on 1080p lectures on a 4-core laptop (6.1–6.6x over a whole hour), and 8–9x with GPU decoding.
 
 ### 5.2 Slides: states, clean slides, pointer
@@ -265,6 +275,26 @@ Generate videos with known answers, score the analysis against them, and keep th
 - `pieces/NNN.png` is an RGBA crop of the piece's strokes, made from the replay log, with a transparent background.
 - `pieces/NNN_order.png` is an 8-bit drawing-order map: accept time first, then left to right. The player reveals pixels whose order is at or below the progress, which gives the stroke-by-stroke look. It steps one order level at a time and draws a level only once all of it is due, so no pixel is drawn more than one capture step (1/3 s) before the replay log shows it. In a revealed piece, ink that may be redrawn early (its spot was last seen blank before the redraw can start) comes first within each capture step.
 
+### Streaming replay (board lectures)
+
+While a board lecture is processed, `replay.json` is written in parts, so the player opens as soon as the board is found and plays the original video at once; the clean board fills in as capture goes (capture runs 4-9x real time). Measured at $0 on the 8-minute test lecture with saved answers: first partial after 7.8 s, first writing after 30 s (once the first SAM person chunk is back), then a partial about every 8 s, the whole board at 79 s, the final replay at 132 s. The final `replay.json` is exactly what it is without streaming. `STREAM_REPLAY=off` in `.env` turns it off (no partial writes, no `stream/` folder). Slide lectures never stream.
+
+- **A partial replay** has the final shape plus `"partial": {"seq", "ready_until"}`:
+  - `seq` starts at 1 and goes up with every write of `replay.json` during the job; `ready_until` is a time on the video's clock up to which the board is not expected to change.
+  - The first partial is written right after the board is found, before capture: no pieces, `ready_until` = the clip's start. `video` (with `end` the clip's end), `type`, `board.size`, `board.corners` and `board.mode` are final from it; `board.background` may change.
+  - `board.pieces`: the capture so far, only pieces seen by `ready_until` whose first ink is shown by then too. Ids are capture's own (stable). Pictures are `stream/<sha1, 12 hex>.png`, named by their bytes and never rewritten. `read` is a partial reading when there is one, else empty; `spoken` is `[]` and `redraw_at` null. `lines`, `annotations` and `chapters` are `[]`.
+  - `transcript`: all of it with proportional word times once transcription is done (`timing` "none" when there was no speech), else empty with `timing` "proportional".
+  - After capture, one more partial has the whole board (`ready_until` = the clip's end); once the read stage is done it gets those readings.
+- **Ready until:** capture's time minus 7.67 s (an add can still be dropped as short-lived until `min_life` plus the removal wait after it was accepted), and never past thick ink not accepted yet (it may be shown from its due time) or young ink shown early. It only grows.
+- **Checkpoints** in capture (`capture_board(checkpoint=...)`): every 30 s of video, at least 8 s of wall-clock time apart, and at most 10% of capture's time. Each finishes a copy of the loop's state; capture's result is the same with or without them (tested on the self-test clips and on 2 minutes of a real lecture).
+- **A piece once shown stays:** a growing piece can fail capture's shape checks for a while or have its seen time move past `ready_until`; it stays as last shown until it is back, unless an erase after it was seen covers it. The final replay decides.
+- **Partial reads:** pieces new in a partial are read in the background (two calls at once, up to 10 pieces a call) and the partial is written again with their readings. New pieces wait until there are 5, or the first has waited 20 s, because every call also sends the whole board. They are extra calls (about $0.01 a call); a failure leaves the pieces unread and never fails the job. When capture is done, reads not started are dropped (the read stage reads every piece).
+- **One writer:** every write of `replay.json` takes one lock; after the final one nothing partial is written. If the job fails or is stopped (Ctrl+C) while the replay is partial, `replay.json` and `stream/` are taken away and the job reads as failed, as before. `stream/` is also removed once the job is done.
+- **Re-runs:** a run in a job folder that already has a final `replay.json` (`python -m app.process` on the same video) does not stream: the old replay stays until the new one replaces it, also if the run fails.
+- **Interrupted jobs:** status.json names the process running the job (`pid`). When the server starts, a job left queued, or running by a process that is gone, is marked failed ("processing was interrupted…") and its partial replay taken away; one stopped while refining word times is done with the replay it has.
+- **status.json** gets `"replay": {"seq", "partial", "ready_until"}` after every write (partial, final and the refined rewrite); `GET /api/jobs/{id}` passes it through and `ready` still means a `replay.json` exists.
+- **Gates while partial:** 3D views, writing or downloading the slide deck and the notes answer 409 "Available when processing finishes"; the 3D list is empty. Ask Muse answers from what there is. The player disables Notes, Slides and 3D, freezes the board at `ready_until` with a calm note when the playhead is past it, and shows how much is ready.
+
 ## 7. The app
 
 - **Backend:** Python, FastAPI and uvicorn.
@@ -319,6 +349,9 @@ Generate videos with known answers, score the analysis against them, and keep th
 
 - Camera drift of about 1 px makes strokes "erase and rewrite" themselves. Use the 2 px tolerance (5.1).
 - Black first frames from a fade-in. Judge modes from several moments, and wait for the picture to settle.
+- Edited videos (YouTube lectures) end on a black card: it was taken for the board, wiped every piece at the end and made the background black. Skip samples that don't show the board (5.1).
+- On a chalkboard a dark shirt looks bright (the grey is `255 - max`), so a running-max reference is lifted by every pass of the teacher. Don't use the large-dark fallback there when SAM gives the person.
+- On a chalkboard, typed white captions in an edited video look like chalk and became writing, and their leaving became erases. They come in one burst and go within a minute: drop them (5.1).
 - Board frame and wall edges inside the analysed area turn into fake writing. Give the board corners and drop anything in the outer 3% band.
 - A webcam person who barely moves. Use the flicker rule and the furthest-strip growth (5.2).
 - A cursor parked for a whole slide gets baked into the clean slide. Remove it with the template, then re-track.

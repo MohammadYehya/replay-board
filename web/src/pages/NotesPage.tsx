@@ -57,7 +57,14 @@ export function NotesPage({ jobId }: { jobId: string }) {
     const ac = new AbortController();
     fetch(`/api/jobs/${encodeURIComponent(jobId)}/notes.json`, { signal: ac.signal })
       .then(async (r) => {
-        if (!r.ok) throw new Error(r.status === 404 ? 'This lecture is not processed yet.' : `Error ${r.status}`);
+        if (!r.ok) {
+          // The server's own line when it has one ("Available when processing finishes" while the lecture streams)
+          const detail = await r
+            .json()
+            .then((b) => (b && typeof b.detail === 'string' && r.status !== 404 ? b.detail : null))
+            .catch(() => null);
+          throw new Error(r.status === 404 ? 'This lecture is not processed yet.' : detail || `Error ${r.status}`);
+        }
         return (await r.json()) as NotesData;
       })
       .then(setData)

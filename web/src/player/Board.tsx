@@ -14,6 +14,7 @@ import { badgePlaces, boxOverlap, canPopout, drawingOnBoard, explainedAt, type B
 import { preloadView3D } from './popoutLoader';
 import { labelText } from './sceneText';
 import { SliceQueue } from './sliceQueue';
+import type { SpriteCache } from './sprites';
 import { kindLabel, sameReading, tipTex } from './tip';
 
 export interface BoardHandle {
@@ -38,6 +39,17 @@ interface Props {
   /** Drawings whose 3D view is made already: a "3D" badge on each (once it is on the board), and "Watch in 3D" while
    *  the lecture explains it. */
   made?: MadeScene[];
+  /** The lecture's decoded sprites, shared by every renderer of it: a replay swapped in while the lecture streams
+   *  is drawn whole at once instead of blanking while its images load again. */
+  sprites?: SpriteCache;
+  /** The replay is partial (the lecture is still processed): an empty board is not "no writing" yet. */
+  partial?: boolean;
+  /** A calm line over the board while the playhead is past what is ready ("Board catching up: ready up to 3:20"). */
+  catchUp?: string | null;
+  /** The job failed: the line says the board stops there (no spinner, the error colour). */
+  catchUpFailed?: boolean;
+  /** While set, the 3D buttons and badges are shown disabled with this title (the replay is not final yet). */
+  popoutLock?: string | null;
 }
 
 const HIGHLIGHT_MS = 2400;
@@ -226,7 +238,10 @@ const TypesetPiece = memo(function TypesetPiece(props: {
 // Memoised: the player re-renders on every spoken word, the board only needs to when its props change.
 export const Board = memo(
   forwardRef<BoardHandle, Props>(function Board(props, ref) {
-    const { jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay, onPopout, onAsk, made } = props;
+    const {
+      jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay, onPopout, onAsk, made, sprites,
+      partial, catchUp, catchUpFailed, popoutLock,
+    } = props;
     const [W, H] = board.size;
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const stageRef = useRef<HTMLDivElement>(null);
@@ -293,27 +308,35 @@ export const Board = memo(
       [legible],
     );
 
-    // The renderer (with its loaded sprites and frame cache) is rebuilt only when the board's writing changes.
-    // A replay rewritten with refined word times keeps the same pieces and only moves when they are talked
-    // about and redrawn: that is handed to the live renderer below instead.
+    // The renderer (with its frame cache) is rebuilt only when the board's writing changes: a new version of a
+    // streaming replay (more pieces), or the final one. It takes the sprites it had from the shared cache, so the
+    // board never blanks. A replay rewritten with refined word times keeps the same pieces and only moves when they
+    // are talked about and redrawn: that is handed to the live renderer below instead.
     const latestBoard = useRef(board);
     latestBoard.current = board;
     const structure = useMemo(
       () =>
         [jobId, W, H, board.mode ?? '', board.background ?? '']
           .concat(board.pieces.map((p) => `${p.id}:${p.image}:${p.order ?? ''}:${p.gone ?? ''}:${p.box.join(',')}`))
+          .concat((board.lines ?? []).map((ln) => `${ln.id}:${ln.pieces.join(',')}:${ln.box.join(',')}`))
           .join('|'),
       [board, jobId, W, H],
     );
+    const spritesRef = useRef(sprites);
+    spritesRef.current = sprites;
 
     useLayoutEffect(() => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const board = latestBoard.current;
-      const r = new BoardRenderer(canvas, board, jobId);
+      const r = new BoardRenderer(canvas, board, jobId, {
+        sprites: spritesRef.current,
+        // the same ink as before (a sprite from the cache) changes nothing
+        onSpriteLoaded: (id, s) =>
+          setInks((m) => (m[id]?.ink === s.ink && m[id]?.cy === s.cy ? m : { ...m, [id]: { ink: s.ink, cy: s.cy } })),
+      });
       r.typesetEls = typesetEls;
       r.tagEls = tagEls;
-      r.onSpriteLoaded = (id, s) => setInks((m) => ({ ...m, [id]: { ink: s.ink, cy: s.cy } }));
       r.setTypeset(typesetRef.current);
       for (const [id, ok] of legible) r.setTypesetOk(id, ok);
       rendererRef.current = r;
@@ -443,7 +466,9 @@ export const Board = memo(
         const r = rendererRef.current;
         if (!r || !badgeEls.size) return;
         const made = new Map(madeRef.current.map((x) => [x.m.drawing, x.m]));
-        const seen = (pid: number) => r.isVisible(pid, t);
+        // A drawing goes when it is erased (removed_at), even if the teacher left a bit of it: the 3D view is of the
+        // whole drawing, and a leftover must not take the pill from a drawing that is on the board.
+        const seen = (pid: number) => r.isWholeVisible(pid, t);
         const now = new Set(
           explainedAt(madeRef.current.map((x) => x.m), t, (m) => drawingOnBoard(m, seen)).map((m) => m.drawing),
         );
@@ -589,13 +614,14 @@ export const Board = memo(
     const tipText = tipHtml && sameReading(rawText, tipLatex) ? '' : rawText || (tipHtml ? '' : tipLatex);
     const noSpoken = hover ? !(hover.spoken && hover.spoken.length) : false;
     const can3d = !!onPopout && canPopout(hover);
+    const locked3d = popoutLock || undefined;
     useEffect(() => {
-      if (can3d) preloadView3D();
-    }, [can3d]);
+      if (can3d && !locked3d) preloadView3D();
+    }, [can3d, locked3d]);
     const open3d = (e: React.MouseEvent) => {
       e.stopPropagation();
       const h = hoverRef.current;
-      if (!h || !onPopout) return;
+      if (!h || !onPopout || locked3d) return;
       cancelLeave();
       changeHover(null);
       onPopout(h);
@@ -752,10 +778,12 @@ export const Board = memo(
                     } as CSSProperties
                   }
                   aria-label={`View in 3D: ${name}`}
-                  title={`${name}: open its 3D view${m.steps ? `, ${m.steps} steps` : ''}`}
+                  aria-disabled={locked3d ? true : undefined}
+                  title={locked3d ?? `${name}: open its 3D view${m.steps ? `, ${m.steps} steps` : ''}`}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (locked3d) return;
                     cancelLeave();
                     changeHover(null);
                     onPopout(p);
@@ -799,7 +827,12 @@ export const Board = memo(
                     </button>
                   )}
                   {can3d && (
-                    <button className="tip-3d" onClick={open3d} title="View in 3D, explained step by step (made by Muse Spark)">
+                    <button
+                      className="tip-3d"
+                      onClick={open3d}
+                      aria-disabled={locked3d ? true : undefined}
+                      title={locked3d ?? 'View in 3D, explained step by step (made by Muse Spark)'}
+                    >
                       3D
                     </button>
                   )}
@@ -817,7 +850,12 @@ export const Board = memo(
                 : `Click to hear it explained · ${formatTime(tipTime)}`}
             </div>
             {can3d && (
-              <button className="tip-view3d" onClick={open3d}>
+              <button
+                className="tip-view3d"
+                onClick={open3d}
+                aria-disabled={locked3d ? true : undefined}
+                title={locked3d}
+              >
                 <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
                   <path
                     d="M8 1.6l5.6 3.2v6.4L8 14.4l-5.6-3.2V4.8zM2.4 4.8L8 8l5.6-3.2M8 8v6.4"
@@ -868,7 +906,13 @@ export const Board = memo(
           </div>
         )}
 
-        {board.pieces.length === 0 && <div className="board-empty">No writing was found on this board.</div>}
+        {catchUp && (
+          <div className={`board-catchup ${catchUpFailed ? 'failed' : ''}`} role="status">
+            {catchUp}
+          </div>
+        )}
+
+        {board.pieces.length === 0 && !partial && <div className="board-empty">No writing was found on this board.</div>}
       </div>
     );
   }),

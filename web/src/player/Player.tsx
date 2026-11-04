@@ -8,8 +8,14 @@ import {
   addEntry, askStartsOpen, loadTray, rememberAskOpen, saveTray, session, takeAskRequest, TRAY_MAX, type TrayEntry,
 } from '../ask/tray';
 import { SlidesIcon } from '../slides/icons';
-import type { AskRef, BoardLine, Piece, Replay, SlideElement } from '../types';
+import type { AskRef, BoardLine, JobStatus, Piece, Replay, SlideElement } from '../types';
 import { Board, type BoardHandle } from './Board';
+import { boardSpriteKeys, preloadBoard } from './boardRenderer';
+import { SpriteCache } from './sprites';
+import {
+  accepts, boardTime, catchUpText, failureOf, gateTitle, heldOf, jobEnded, knowsUpTo, pastReady, planPoll,
+  PRELOAD_MS, readyFraction, readyUntil, replaySeq, reuseUnchanged, shouldWatch, stopAfterTaking, streamLine, WATCH_MS,
+} from './stream';
 import { Slides, type SlidesHandle } from './Slides';
 import { drawable } from './slideTiming';
 import {
@@ -85,6 +91,7 @@ export function Player({
   replay: first,
   name,
   running,
+  status: firstStatus = null,
   startAt = null,
 }: {
   jobId: string;
@@ -94,22 +101,43 @@ export function Player({
   startAt?: number | null;
   /** Whether the job was still running when the replay was loaded (false: its word times are final). */
   running?: boolean;
+  /** The job's status when the replay was loaded (the player then watches the job itself). */
+  status?: JobStatus | null;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const boardRef = useRef<BoardHandle>(null);
   const slidesRef = useRef<SlidesHandle>(null);
-  // The replay can be swapped for a rewritten one (refined word times) while it plays; the video is never reset.
+  // The replay is swapped for each newer version while it plays (a streaming lecture's board as it is captured, then
+  // the final replay, then the one with refined word times); the video, play position, typeset mode, drawers and tray
+  // are kept.
   const [replay, setReplay] = useState(first);
-  // Proportional word times are refined only while the job runs; a finished job keeps the ones it has.
-  const refinable = (r: Replay) => r.transcript?.timing === 'proportional' && running !== false;
-  const [refining, setRefining] = useState(() => refinable(first));
+  const replayRef = useRef(replay);
+  replayRef.current = replay;
+  // The job as last seen: the player watches it while it runs.
+  const [job, setJob] = useState<JobStatus | null>(firstStatus);
+  const [watching, setWatching] = useState(() => shouldWatch(first, running));
   useEffect(() => {
     setReplay(first);
-    setRefining(refinable(first));
+    setWatching(shouldWatch(first, running));
   }, [first]); // `running` describes the job when this replay was loaded
+  const jobRunning = job ? !jobEnded(job) : running !== false;
+  // Proportional word times are refined only while the job runs; a finished job keeps the ones it has.
+  const refining = replay.transcript?.timing === 'proportional' && jobRunning;
+  // Decoded board images, shared by every version of the board (preloaded before a version is swapped in).
+  const [sprites] = useState(() => new SpriteCache());
   const clipStart = replay.video.start ?? 0;
   const clipEnd = replay.video.end ?? replay.video.duration;
+  // A partial replay (the lecture still streams): its board covers only the part up to `ready`.
+  const ready = readyUntil(replay);
+  const streaming = ready != null;
+  /** The job failed (or was interrupted) while the replay was partial: the board stops where it is, for good. */
+  const failure = streaming ? failureOf(job, clipStart, clipEnd) : null;
+  /** Notes, Slides and 3D need the final replay: their title while they wait for it (or will not get it), else null. */
+  const gate = gateTitle(streaming, failure);
   const timeRef = useRef<number>(clipStart);
+  /** The board's clock: the video's, held at `ready` while the playhead is past it. */
+  const boardTimeRef = useRef<number>(clipStart);
+  const [pastReadyNow, setPastReady] = useState(false);
   const [typeset, setTypeset] = useState(false);
   const [showPointer, setShowPointer] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -144,67 +172,86 @@ export function Player({
   const showKeysRef = useRef(showKeys);
   showKeysRef.current = showKeys;
 
+  // Built from the transcript only (a streaming version keeps the transcript object when it did not change).
+  const transcript = replay.transcript;
   const words = useMemo(
     () =>
-      (replay.transcript?.words ?? [])
+      (transcript?.words ?? [])
         .filter((w) => w && Number.isFinite(w.s) && Number.isFinite(w.e))
         .slice()
         .sort((a, b) => a.s - b.s),
-    [replay],
+    [transcript],
   );
   const turns = useMemo(() => {
-    const given = (replay.transcript?.turns ?? []).slice().sort((a, b) => a.start - b.start);
+    const given = (transcript?.turns ?? []).slice().sort((a, b) => a.start - b.start);
     return given.length || !words.length ? given : turnsFromWords(words);
-  }, [replay, words]);
+  }, [transcript, words]);
   const groups = useMemo(() => groupWords(turns, words), [turns, words]);
   const wordTurn = useMemo(() => {
     const a = new Int32Array(words.length).fill(-1);
     groups.forEach((g, ti) => g.forEach((i) => (a[i] = ti)));
     return a;
   }, [groups, words]);
-  const chapters = useMemo(() => (replay.chapters ?? []).slice().sort((a, b) => a.t - b.t), [replay]);
+  const chapters = useMemo(() => (replay.chapters ?? []).slice().sort((a, b) => a.t - b.t), [replay.chapters]);
   const board = replay.board;
   const slides = board ? undefined : replay.slides;
   const mode = board ? 'board' : slides ? 'slides' : 'none';
   /** The 3D view of a board drawing is open in place of the board. */
   const view3d = !!popout && !!board;
 
-  // The first version of a replay has proportional word times while MMS still aligns them: watch the job and
-  // swap in the rewritten replay (transcript, spoken ranges, chapters, redraw times) as soon as it lands.
+  // One watch loop while the job runs and its replay can still change: a streaming board lecture's partial versions
+  // (status.json's replay.seq grows with each), then the final replay, then the rewrite with refined word times. Each
+  // newer version's board images are loaded first, so the swap never blanks the board. An older server has no seq:
+  // its one rewrite comes once the aligner is done.
   useEffect(() => {
-    if (!refining) return;
+    if (!watching) return;
     let stopped = false;
     let timer: number | undefined;
     const ctrl = new AbortController();
+    // The status seq the replay held was fetched at (a partial replay carries its own).
+    let seen = replaySeq(replayRef.current);
     const poll = async () => {
       try {
         const st = await getJob(jobId, ctrl.signal);
         if (stopped) return;
-        const align = st.stages?.align?.state;
-        const ended = st.state !== 'running' && st.state !== 'queued';
-        if (ended || align === 'done' || align === 'skipped') {
+        setJob(st);
+        const held = replayRef.current;
+        const plan = planPoll(heldOf(held, seen), st);
+        if (plan.fetch) {
           const next = await getReplay(jobId, ctrl.signal);
           if (stopped) return;
-          // The aligner finishes a moment before the replay is rewritten: wait for the new file unless the job ended.
-          if (next.transcript?.timing !== 'proportional' || ended) {
-            setReplay(next);
-            setRefining(false);
-            return;
+          if (accepts(held, next, { bySeq: plan.bySeq, ended: jobEnded(st) })) {
+            if (next.board) await preloadBoard(sprites, jobId, next.board, PRELOAD_MS);
+            if (stopped) return;
+            const taken = reuseUnchanged(held, next);
+            replayRef.current = taken;
+            setReplay(taken);
+            if (next.board) sprites.retain(boardSpriteKeys(next.board));
+            if (stopAfterTaking(plan, next)) return setWatching(false);
           }
+          if (plan.bySeq) seen = replaySeq(next) ?? st.replay?.seq ?? seen;
         }
+        if (plan.stop) return setWatching(false);
       } catch (e) {
         if (stopped || (e as Error).name === 'AbortError') return;
         // the server may be restarting, or the file is being replaced: try again
       }
-      timer = window.setTimeout(poll, 4000);
+      timer = window.setTimeout(poll, WATCH_MS);
     };
-    timer = window.setTimeout(poll, 4000);
+    timer = window.setTimeout(poll, WATCH_MS);
     return () => {
       stopped = true;
       ctrl.abort();
       window.clearTimeout(timer);
     };
-  }, [jobId, refining]);
+  }, [jobId, watching, sprites]);
+
+  // The tab: the lecture's subject, also when a later version of the replay names it first.
+  const subject = replay.subject?.trim();
+  const title = subject ? subject.charAt(0).toUpperCase() + subject.slice(1) : '';
+  useEffect(() => {
+    if (title) document.title = `${title} · Replay Board`;
+  }, [title]);
 
   // The poster: the video's own frame where it opens (the server clamps the time to the processed part, as
   // onLoadedMetadata does), until the video has a frame of its own. A move before then (a chapter clicked in the first
@@ -242,7 +289,7 @@ export function Player({
   useEffect(() => {
     let raf = 0;
     let prev = -1;
-    const last = { active: -2, upTo: -2, turn: -2, chapter: -2 };
+    const last = { active: -2, upTo: -2, turn: -2, chapter: -2, past: null as boolean | null };
     const tick = () => {
       const v = videoRef.current;
       if (v) {
@@ -258,7 +305,12 @@ export function Player({
         prev = t;
         timeRef.current = t;
         if (!hadFrame.current && (startAt == null || startedAt.current)) followPoster(t);
-        if (!popoutOpen.current) boardRef.current?.render(t); // the 3D view reads timeRef itself
+        // The board holds at `ready` past it (drawn as there, never blank) while the video plays on.
+        const bt = boardTime(t, ready);
+        boardTimeRef.current = bt;
+        if (!popoutOpen.current) boardRef.current?.render(bt); // the 3D view reads timeRef itself
+        const past = pastReady(t, ready);
+        if (past !== last.past) setPastReady((last.past = past));
         slidesRef.current?.render(t);
         const up = lastStartedWord(words, t);
         const act = activeWord(words, t);
@@ -274,7 +326,7 @@ export function Player({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [words, wordTurn, turns, chapters, clipEnd, followPoster, startAt]);
+  }, [words, wordTurn, turns, chapters, clipEnd, followPoster, startAt, ready]);
 
   useEffect(() => {
     if (!toast) return;
@@ -312,16 +364,16 @@ export function Player({
   const madeRef = useRef(made);
   madeRef.current = made;
   const hasBoard = !!replay.board;
-  // While the word times are refined the server lists none (a view made then would follow the old times): asked
-  // again once they are.
+  // While the word times are refined (or the replay is partial) the server lists none (a view made then would
+  // follow the old times): asked again once they are.
   useEffect(() => {
-    if (!hasBoard || refining) return setMade([]);
+    if (!hasBoard || refining || streaming) return setMade([]);
     const ctrl = new AbortController();
     getMadeScenes(jobId, ctrl.signal).then((raw) => {
       if (!ctrl.signal.aborted) setMade(cleanMadeScenes(raw));
     });
     return () => ctrl.abort();
-  }, [jobId, hasBoard, madeAsk, refining]);
+  }, [jobId, hasBoard, madeAsk, refining, streaming]);
   const onMade = useCallback((pieceId: number) => {
     if (!madeRef.current.some((m) => m.drawing === pieceId || m.pieces.includes(pieceId))) setMadeAsk((k) => k + 1);
   }, []);
@@ -480,7 +532,7 @@ export function Player({
 
   const viewSize = board?.size ?? slides?.size;
   const boardAspect = viewSize && viewSize[0] > 0 && viewSize[1] > 0 ? viewSize[0] / viewSize[1] : 16 / 9;
-  const partial = clipStart > 0.5 || clipEnd < replay.video.duration - 0.5;
+  const clipped = clipStart > 0.5 || clipEnd < replay.video.duration - 0.5;
   const pieces = board?.pieces ?? [];
   const hiddenCount = pieces.filter((p) => p.revealed && !p.pre_existing).length;
   const gestureCount = (board?.annotations ?? []).filter(drawable).length; // the hand pointing at writing, as drawn
@@ -489,7 +541,12 @@ export function Player({
   const buildSteps = slideStates.length - slideCount;
   const annotationCount = slides?.annotations?.length ?? 0;
   const api = replay.stats?.api;
-  const subject = replay.subject?.trim();
+  const readyPct = Math.round(readyFraction(ready, clipStart, clipEnd) * 1000) / 10;
+  // Past what is ready (or before anything is): the board says how far it is, or that it stops there.
+  const catchUp =
+    ready != null && board && (pastReadyNow || ready - clipStart < 1) ? catchUpText(ready, failure, clipStart) : null;
+  /** "so far" while more of the board is coming. */
+  const soFar = streaming && !failure ? ' so far' : '';
   const rowStyle = {
     '--cols': `${videoAspect.toFixed(4)}fr ${boardAspect.toFixed(4)}fr`,
     '--av': videoAspect.toFixed(4),
@@ -504,7 +561,7 @@ export function Player({
           <span>Replay Board</span>
         </a>
         <div className="topbar-title">
-          <span className="subject">{subject ? subject.charAt(0).toUpperCase() + subject.slice(1) : 'Lecture'}</span>
+          <span className="subject">{title || 'Lecture'}</span>
           {name && <span className="file-name">{name}</span>}
         </div>
         <div className="topbar-actions">
@@ -512,10 +569,11 @@ export function Player({
             All lectures
           </a>
           <a
-            className="ghost-btn notes-btn"
+            className={`ghost-btn notes-btn ${gate ? 'disabled' : ''}`}
             aria-label="Notes"
-            href={`#/job/${encodeURIComponent(jobId)}/notes`}
-            title="Study notes for this lecture, by chapter"
+            {...(gate
+              ? { role: 'link', 'aria-disabled': true, title: gate }
+              : { href: `#/job/${encodeURIComponent(jobId)}/notes`, title: 'Study notes for this lecture, by chapter' })}
           >
             <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
               <path
@@ -529,10 +587,14 @@ export function Player({
             <span className="notes-btn-label">Notes</span>
           </a>
           <a
-            className="ghost-btn slides-btn"
+            className={`ghost-btn slides-btn ${gate ? 'disabled' : ''}`}
             aria-label="Slides"
-            href={`#/job/${encodeURIComponent(jobId)}/slides`}
-            title="This lecture as a slide deck: present it, save it as a PDF or download a PowerPoint"
+            {...(gate
+              ? { role: 'link', 'aria-disabled': true, title: gate }
+              : {
+                  href: `#/job/${encodeURIComponent(jobId)}/slides`,
+                  title: 'This lecture as a slide deck: present it, save it as a PDF or download a PowerPoint',
+                })}
           >
             <SlidesIcon />
             <span className="slides-btn-label">Slides</span>
@@ -567,7 +629,7 @@ export function Player({
               <h2>Lecture</h2>
               <span className="panel-note">
                 original video, untouched
-                {partial &&
+                {clipped &&
                   ` · ${slides ? 'slides cover' : 'board covers'} ${formatTime(clipStart)}–${formatTime(clipEnd)}`}
               </span>
             </header>
@@ -596,6 +658,29 @@ export function Player({
                 }}
               />
             </div>
+            {ready != null && (
+              <div className="stream-status">
+                <div
+                  className={`ready-bar ${failure ? 'failed' : ''}`}
+                  role="progressbar"
+                  aria-label="Board ready"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={readyPct}
+                  title={`${failure ? 'The board stops at' : 'The board is ready up to'} ${formatTime(ready)}`}
+                >
+                  <div style={{ width: `${readyPct}%` }} />
+                </div>
+                {failure ? (
+                  <p className="error-line stream-failed" role="alert">
+                    {/* the job's whole line (with where its details are) is the tooltip */}
+                    <span title={failure.error || undefined}>{streamLine(job, ready, clipStart, clipEnd)}</span>
+                  </p>
+                ) : (
+                  <p className="stream-line">{streamLine(job, ready, clipStart, clipEnd)}</p>
+                )}
+              </div>
+            )}
             {videoError && <p className="error-line">{videoError}</p>}
           </section>
 
@@ -607,7 +692,7 @@ export function Player({
               {board && (
                 <>
                   <span className="panel-note">
-                    {pieces.length} {pieces.length === 1 ? 'piece' : 'pieces'} of writing
+                    {pieces.length} {pieces.length === 1 ? 'piece' : 'pieces'} of writing{soFar}
                     {hiddenCount > 0 && ` · ${hiddenCount} written while hidden`}
                     {gestureCount > 0 &&
                       ` · ${gestureCount} pointing ${gestureCount === 1 ? 'gesture' : 'gestures'}`}
@@ -646,7 +731,7 @@ export function Player({
                 jobId={jobId}
                 board={board}
                 typeset={typeset}
-                timeRef={timeRef}
+                timeRef={boardTimeRef}
                 clipStart={clipStart}
                 playing={playing}
                 onSeekPiece={seekPiece}
@@ -654,6 +739,11 @@ export function Player({
                 onPopout={openPopout}
                 onAsk={askPiece}
                 made={made}
+                sprites={sprites}
+                partial={streaming}
+                catchUp={catchUp}
+                catchUpFailed={!!failure}
+                popoutLock={gate}
               />
             ) : slides ? (
               <Slides
@@ -701,7 +791,7 @@ export function Player({
               <ul className="facts">
                 {board && (
                   <li>
-                    <b>{pieces.length}</b> pieces of writing
+                    <b>{pieces.length}</b> pieces of writing{soFar}
                     {hiddenCount ? (
                       <>
                         , <b>{hiddenCount}</b> uncovered from behind the teacher
@@ -722,13 +812,13 @@ export function Player({
                 )}
                 <li>
                   <b>{words.length}</b> words transcribed
-                  {replay.stats?.seconds != null && (
+                  {replay.stats?.seconds != null && !streaming && (
                     <>
                       {' '}
                       · processed in <b>{formatTime(replay.stats.seconds)}</b>
                     </>
                   )}
-                  {api?.calls != null && (
+                  {api?.calls != null && !streaming && (
                     <>
                       {' '}
                       · <b>{api.calls}</b> Meta model calls
@@ -748,6 +838,7 @@ export function Player({
             currentTurn={turnIdx}
             timing={replay.transcript?.timing}
             refining={refining}
+            pending={streaming && !failure}
             onSeek={seekWord}
             onAskSpan={askSpan}
           />
@@ -767,6 +858,7 @@ export function Player({
           mode={mode}
           timeRef={timeRef}
           videoEnd={replay.video.duration}
+          knows={ready != null ? knowsUpTo(ready) : null}
           onAddMoment={addMoment}
           onSeek={seekOnly}
           onShowItem={showItem}

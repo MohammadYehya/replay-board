@@ -1,6 +1,6 @@
 // Decodes each piece's PNG and drawing-order map once, then builds partially drawn frames on demand.
 // Frames are cached per quantised progress step (timing.STEPS) in one shared LRU so long lectures stay bounded.
-import { STEPS, thresholdFor } from './timing';
+import { STEPS, thresholdFor } from './timing.ts';
 
 export interface Sprite {
   id: number;
@@ -21,6 +21,9 @@ export interface Sprite {
   goneAt: Float32Array | null;
   /** Distinct erase times of this piece, ascending. */
   goneTimes: number[];
+  /** Share 0..1 of its drawn pixels (order > 0) ever erased, or null without a gone map (goneAt null): under
+   *  timing.REMNANT_MAX, what is left of it stays on the board after removed_at. */
+  erased: number | null;
 }
 
 /** How many of the piece's partial erases have happened by t. */
@@ -114,23 +117,83 @@ export async function loadSprite(
     sw += c * c;
   }
   const cy = sw ? sy / sw / h : 0.5;
-  // Partly erased pieces: decode when each pixel leaves the board.
+  const { goneAt, goneTimes, erased } = goneOf(order, gone, w, h);
+  return { id, w, h, full: toCanvas(img), rgba, sorted, upto, ink: inkColour(rgba, lightBoard), cy, goneAt, goneTimes, erased };
+}
+
+/** Partly erased pieces: when each drawn pixel (order > 0) leaves the board, from the piece's gone map (RGBA pixels the
+ *  size of its image, a code R << 16 | G << 8 | B: 0 = never, else (code - 1) / 10 s), and the share of its drawn pixels
+ *  ever erased (timing.ts keepsRemnant). All empty (null) without a map, with one of the wrong size, or with one that
+ *  erases none of its drawn pixels. */
+export function goneOf(
+  order: Uint8Array, gone: { width: number; height: number; data: ArrayLike<number> } | null, w: number, h: number,
+): Pick<Sprite, 'goneAt' | 'goneTimes' | 'erased'> {
+  const n = w * h;
   let goneAt: Float32Array | null = null;
   const times = new Set<number>();
+  let drawn = 0;
+  let erased = 0;
   if (gone && gone.width === w && gone.height === h) {
     goneAt = new Float32Array(n).fill(Infinity);
     for (let i = 0; i < n; i++) {
       if (!order[i]) continue;
+      drawn++;
       const code = (gone.data[i * 4] << 16) | (gone.data[i * 4 + 1] << 8) | gone.data[i * 4 + 2];
       if (!code) continue;
       const t = (code - 1) / 10;
       goneAt[i] = t;
       times.add(t);
+      erased++;
     }
     if (!times.size) goneAt = null;
   }
   const goneTimes = [...times].sort((a, b) => a - b);
-  return { id, w, h, full: toCanvas(img), rgba, sorted, upto, ink: inkColour(rgba, lightBoard), cy, goneAt, goneTimes };
+  return { goneAt, goneTimes, erased: goneAt && drawn ? erased / drawn : null };
+}
+
+/** Decoded sprites shared by every board renderer of one lecture (player/stream.ts spriteKey): a replay swapped in
+ *  while the lecture streams rebuilds the renderer, which takes the sprites it had at once instead of fetching and
+ *  decoding them again (the board would blank and refill on every swap). */
+export class SpriteCache {
+  private done = new Map<string, Sprite>();
+  private pending = new Map<string, Promise<Sprite>>();
+
+  get(key: string): Sprite | undefined {
+    return this.done.get(key);
+  }
+
+  /** The sprite, loaded once however many ask for it. A failure is not kept (the next ask tries again). */
+  load(key: string, make: () => Promise<Sprite>): Promise<Sprite> {
+    const hit = this.done.get(key);
+    if (hit) return Promise.resolve(hit);
+    const going = this.pending.get(key);
+    if (going) return going;
+    const p = make().then(
+      (s) => {
+        if (this.pending.get(key) === p) {
+          this.pending.delete(key);
+          this.done.set(key, s);
+        }
+        return s;
+      },
+      (e) => {
+        if (this.pending.get(key) === p) this.pending.delete(key);
+        throw e;
+      },
+    );
+    this.pending.set(key, p);
+    return p;
+  }
+
+  /** Forget every sprite but these (a piece whose image grew has a new one; the old one is not needed again). */
+  retain(keys: ReadonlySet<string>) {
+    for (const k of [...this.done.keys()]) if (!keys.has(k)) this.done.delete(k);
+    for (const k of [...this.pending.keys()]) if (!keys.has(k)) this.pending.delete(k);
+  }
+
+  get size() {
+    return this.done.size;
+  }
 }
 
 /** Shared LRU of partial frames, bounded by pixel bytes. */
@@ -157,7 +220,8 @@ export class FrameCache {
     const img = new ImageData(s.w, s.h);
     const out = img.data;
     const count = s.upto[thresholdFor(Math.min(step, STEPS))];
-    const cut = gone > 0 && s.goneAt ? s.goneTimes[gone - 1] : -Infinity;
+    // goneAt is float32: compare with the erase time as float32 too (141.3 rounds up there), or its pixels stay drawn.
+    const cut = gone > 0 && s.goneAt ? Math.fround(s.goneTimes[gone - 1]) : -Infinity;
     for (let k = 0; k < count; k++) {
       if (s.goneAt && s.goneAt[s.sorted[k]] <= cut) continue;
       const p = s.sorted[k] * 4;

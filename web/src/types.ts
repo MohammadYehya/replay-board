@@ -153,6 +153,9 @@ export interface Replay {
   transcript?: { turns?: Turn[]; words?: Word[]; timing?: string };
   chapters?: Chapter[];
   stats?: ReplayStats;
+  /** Present only while the lecture is still processed (a board lecture streams): the board covers the part up to
+   *  ready_until (seconds on the video clock); seq grows with every rewrite. The final replay has no such key. */
+  partial?: { seq: number; ready_until: number };
 }
 
 export interface StageStatus {
@@ -171,6 +174,9 @@ export interface JobStatus {
   started?: number;
   seconds?: number;
   stages?: Record<string, StageStatus>;
+  /** The replay.json on disk: seq grows with every write (partial ones, the final one, the rewrite with refined word
+   *  times). Absent on an older server. */
+  replay?: { seq: number; partial: boolean; ready_until: number | null };
 }
 
 export interface JobSummary {

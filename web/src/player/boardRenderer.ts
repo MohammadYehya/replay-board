@@ -2,8 +2,12 @@
 // "was hidden" tags) from the same clock. Pure canvas drawing: the original video is never touched.
 import { jobFileUrl } from '../api';
 import type { BoardData, BoardLine, Piece } from '../types';
-import { FrameCache, goneCount, loadSprite, type Sprite } from './sprites';
-import { alphaAt, isWrittenLine, progressAt, schedule, stepFor, tagAt, talkingAt, typesetIds, type Schedule } from './timing';
+import { FrameCache, goneCount, loadSprite, SpriteCache, type Sprite } from './sprites';
+import { spriteKey } from './stream';
+import {
+  alphaAt, handwritingAlpha, hitBy, inkAlphaAt, isWrittenLine, keepsRemnant, progressAt, schedule, stepFor, tagAt, talkingAt,
+  typesetIds, visibleAt, type Schedule,
+} from './timing';
 
 interface Entry {
   piece: Piece;
@@ -12,7 +16,12 @@ interface Entry {
   typeset: boolean;
   area: number;
   p: number; // progress at the last render
-  a: number; // alpha at the last render
+  /** Opacity of its handwriting at the last render (inkAlphaAt): what is left of a half-erased piece stays after
+   *  removed_at. The canvas, the highlighter and hover go by it. */
+  a: number;
+  /** Opacity of the piece as a whole at the last render (alphaAt, fading at removed_at): its typeset reading, its
+   *  finished line and its "was hidden" tag go by it. */
+  whole: number;
   /** Bigger typeset pieces whose box holds this one and whose reading repeats it (the reader saw it twice). */
   coveredBy: Entry[];
   hide: number; // 0..1, how far a covering piece has replaced this one in typeset mode (last render)
@@ -64,6 +73,31 @@ export function boardBackground(board: BoardData): { css: string; light: boolean
   return { css: parseColour(board.background) ? board.background! : fallback, light: lum > 120 };
 }
 
+/** A piece's sprite from the lecture's shared cache, loading it (image, order and gone maps) when it is not there. */
+function pieceSprite(sprites: SpriteCache, jobId: string, p: Piece, light: boolean): Promise<Sprite> {
+  const file = (f: string | null | undefined) => (f ? jobFileUrl(jobId, f) : null);
+  return sprites.load(spriteKey(p, light), () =>
+    loadSprite(p.id, jobFileUrl(jobId, p.image), file(p.order), light, file(p.gone)),
+  );
+}
+
+/** The sprite keys a board needs. */
+export function boardSpriteKeys(board: BoardData): Set<string> {
+  const { light } = boardBackground(board);
+  return new Set(board.pieces.map((p) => spriteKey(p, light)));
+}
+
+/** Load every sprite of a board into the cache before it is shown (a swapped-in replay then draws whole on its first
+ *  frame), waiting at most `waitMs`. A sprite that fails to load is just not drawn, as before. */
+export async function preloadBoard(sprites: SpriteCache, jobId: string, board: BoardData, waitMs: number): Promise<void> {
+  const { light } = boardBackground(board);
+  const all = Promise.allSettled(board.pieces.map((p) => pieceSprite(sprites, jobId, p, light)));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)));
+  await Promise.race([all, late]);
+  clearTimeout(timer);
+}
+
 export class BoardRenderer {
   readonly W: number;
   readonly H: number;
@@ -92,8 +126,16 @@ export class BoardRenderer {
 
   private canvas: HTMLCanvasElement;
 
-  constructor(canvas: HTMLCanvasElement, board: BoardData, jobId: string) {
+  /** sprites: the lecture's shared sprite cache (the ones in it are drawn on the first frame); onSpriteLoaded: told
+   *  of each piece's sprite as it is there, those from the cache included. */
+  constructor(
+    canvas: HTMLCanvasElement,
+    board: BoardData,
+    jobId: string,
+    opts: { sprites?: SpriteCache; onSpriteLoaded?: (id: number, s: Sprite) => void } = {},
+  ) {
     this.canvas = canvas;
+    this.onSpriteLoaded = opts.onSpriteLoaded;
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) throw new Error('Canvas is not available in this browser.');
     this.ctx = ctx;
@@ -110,6 +152,7 @@ export class BoardRenderer {
       area: Math.max(1, piece.box[2] * piece.box[3]),
       p: 0,
       a: 0,
+      whole: 0,
       coveredBy: [],
       hide: 0,
       lineHide: 0,
@@ -133,10 +176,16 @@ export class BoardRenderer {
       this.lines.push(le);
       this.lineByKey.set(le.key, le);
     });
+    const sprites = opts.sprites ?? new SpriteCache();
     for (const e of this.entries) {
       const p = e.piece;
-      const file = (f: string | null | undefined) => (f ? jobFileUrl(jobId, f) : null);
-      loadSprite(p.id, jobFileUrl(jobId, p.image), file(p.order), this.light, file(p.gone))
+      const hit = sprites.get(spriteKey(p, this.light));
+      if (hit) {
+        e.sprite = hit;
+        this.onSpriteLoaded?.(p.id, hit);
+        continue;
+      }
+      pieceSprite(sprites, jobId, p, this.light)
         .then((s) => {
           if (this.dead) return;
           e.sprite = s;
@@ -227,9 +276,18 @@ export class BoardRenderer {
     return this.byId.get(id)?.sprite?.ink ?? null;
   }
 
+  /** Whether anything of a piece is on the board at t: what is left of a half-erased piece counts (it is drawn, and
+   *  can be hovered and clicked). */
   isVisible(id: number, t: number): boolean {
     const e = this.byId.get(id);
-    return !!e && progressAt(e.sched, t) > 0 && alphaAt(e.sched, t) >= 0.05;
+    return !!e && visibleAt(e.sched, t, keeps(e));
+  }
+
+  /** Whether a piece as a whole is on the board at t: drawn and not erased (removed_at); what is left of a half-erased
+   *  piece does not count. A 3D view's badge goes by it. */
+  isWholeVisible(id: number, t: number): boolean {
+    const e = this.byId.get(id);
+    return !!e && visibleAt(e.sched, t, false);
   }
 
   private setStyle(el: HTMLElement, opacity: number, clip: string) {
@@ -254,16 +312,18 @@ export class BoardRenderer {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
+    // Worked out afresh every frame from the schedule (setPieces replaces it) and the sprite (keeps): nothing is kept.
     for (const e of this.entries) {
       e.p = progressAt(e.sched, t);
-      e.a = alphaAt(e.sched, t);
+      e.a = inkAlphaAt(e.sched, t, keeps(e));
+      e.whole = alphaAt(e.sched, t);
     }
     // In typeset mode a repeated reading fades out as the piece that repeats it is drawn.
     for (const e of this.entries) {
       e.hide = 0;
       e.lineHide = 0;
       if (!this.typesetMode || !e.typeset) continue;
-      for (const o of e.coveredBy) if (o.typeset) e.hide = Math.max(e.hide, o.p * o.a);
+      for (const o of e.coveredBy) if (o.typeset) e.hide = Math.max(e.hide, o.p * o.whole);
     }
     // A finished line replaces its fragments: shown once every piece of it is fully drawn (fading in over
     // LINE_FADE after the last one finishes) and faded with the first of them to be erased.
@@ -274,7 +334,7 @@ export class BoardRenderer {
       let alpha = 1;
       for (const m of le.members) {
         if (m.sched.end !== -Infinity) since = Math.min(since, t - m.sched.end);
-        alpha = Math.min(alpha, m.a);
+        alpha = Math.min(alpha, m.whole);
       }
       le.w = Math.min(1, since / LINE_FADE) * alpha;
       for (const m of le.members) m.lineHide = Math.max(m.lineHide, le.w);
@@ -301,14 +361,16 @@ export class BoardRenderer {
       ctx.fill();
     }
 
+    // Handwriting. A piece shown typeset draws none until its reading fades at removed_at; what is left of a
+    // half-erased one then comes in as the reading goes (timing.ts handwritingAlpha).
     for (const e of this.entries) {
-      if (e.p <= 0 || e.a <= 0 || !e.sprite) continue;
-      if (this.typesetMode && e.typeset) continue;
-      if (e.lineHide > 0.98) continue;
+      if (e.p <= 0 || !e.sprite) continue;
+      const alpha = handwritingAlpha(e.a, e.whole, this.typesetMode && e.typeset, e.hide, e.lineHide);
+      if (alpha <= 0) continue;
       const step = stepFor(e.p);
       if (!step) continue;
       const [x, y, w, h] = e.piece.box;
-      ctx.globalAlpha = e.a * (1 - e.lineHide);
+      ctx.globalAlpha = alpha;
       ctx.drawImage(this.cache.frame(e.sprite, step, goneCount(e.sprite, t)), x, y, w || e.sprite.w, h || e.sprite.h);
     }
     ctx.globalAlpha = 1;
@@ -330,13 +392,13 @@ export class BoardRenderer {
       }
       const e = this.byId.get(id);
       if (!e) continue;
-      const vis = e.p > 0 && e.typeset ? e.a * (1 - e.hide) * (1 - e.lineHide) : 0;
+      const vis = e.p > 0 && e.typeset ? e.whole * (1 - e.hide) * (1 - e.lineHide) : 0;
       this.setStyle(el, vis, e.p >= 1 ? 'none' : `inset(-20% ${((1 - e.p) * 100).toFixed(1)}% -20% -5%)`);
     }
     for (const [id, el] of this.tagEls) {
       const e = this.byId.get(id);
       if (!e) continue;
-      this.setStyle(el, tagAt(e.sched, t) * e.a, 'none');
+      this.setStyle(el, tagAt(e.sched, t) * e.whole, 'none');
     }
   }
 
@@ -366,18 +428,24 @@ export class BoardRenderer {
     return n;
   }
 
-  /** The visible piece whose ink is nearest to board point (bx, by), within a few pixels. */
+  /** The visible piece whose ink is nearest to board point (bx, by), within a few pixels. Only what is drawn is found
+   *  (timing.ts hitBy): a typeset reading by its box, handwriting by its ink not yet erased. */
   hitTest(bx: number, by: number, t: number): Piece | null {
     const R = Math.max(4, 9 / this.cssScale);
     let best: Entry | null = null;
     let bestD = Infinity;
     for (const e of this.entries) {
-      if (progressAt(e.sched, t) <= 0 || alphaAt(e.sched, t) < 0.05) continue;
-      if (this.typesetMode && e.typeset && e.hide > 0.95) continue;
+      const mode = hitBy(e.sched, t, {
+        remnant: keeps(e),
+        reading: this.typesetMode && e.typeset,
+        hide: this.typesetMode ? e.hide : 0,
+        lineHide: this.typesetMode ? e.lineHide : 0,
+      });
+      if (!mode) continue;
       const [x, y, w, h] = e.piece.box;
       if (bx < x - R || bx > x + w + R || by < y - R || by > y + h + R) continue;
       let d: number;
-      if (this.typesetMode && (e.typeset || e.lineHide > 0.5)) {
+      if (mode === 'box') {
         const dx = Math.max(x - bx, 0, bx - (x + w));
         const dy = Math.max(y - by, 0, by - (y + h));
         d = Math.hypot(dx, dy);
@@ -394,6 +462,10 @@ export class BoardRenderer {
     return best?.piece ?? null;
   }
 }
+
+/** Whether what is left of a piece stays on the board after removed_at (timing.ts keepsRemnant). Before its sprite is
+ *  loaded nothing of it is drawn, and the old rule holds. */
+const keeps = (e: Entry) => !!e.sprite && keepsRemnant(e.sprite.erased);
 
 function nearestInk(s: Sprite, lx: number, ly: number, R: number, t: number): number {
   const x0 = Math.max(0, Math.floor(lx - R));
