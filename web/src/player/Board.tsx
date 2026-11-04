@@ -466,7 +466,9 @@ export const Board = memo(
         const r = rendererRef.current;
         if (!r || !badgeEls.size) return;
         const made = new Map(madeRef.current.map((x) => [x.m.drawing, x.m]));
-        const seen = (pid: number) => r.isVisible(pid, t);
+        // A drawing goes when it is erased (removed_at), even if the teacher left a bit of it: the 3D view is of the
+        // whole drawing, and a leftover must not take the pill from a drawing that is on the board.
+        const seen = (pid: number) => r.isWholeVisible(pid, t);
         const now = new Set(
           explainedAt(madeRef.current.map((x) => x.m), t, (m) => drawingOnBoard(m, seen)).map((m) => m.drawing),
         );

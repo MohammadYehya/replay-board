@@ -116,6 +116,55 @@ export function alphaAt(s: Schedule, t: number): number {
   return clamp01(1 - (t - s.removedAt) / FADE_OUT);
 }
 
+/** Half-erased writing: the backend sets removed_at once half of a piece's shown pixels are erased, but the teacher can
+ *  leave the rest (test.mp4 #39: a "$1" he circles at about 300 s; 73% of the piece's drawn pixels are ever erased). A
+ *  piece with a gone map erased less than this share of its drawn pixels keeps drawing what is left of it after
+ *  removed_at; one erased this much or more fades whole at removed_at (never fading those leaves more residue than ink
+ *  on test4). */
+export const REMNANT_MAX = 0.9;
+
+/** Whether a piece keeps what is left of it after removed_at. `erased`: the share of its drawn pixels ever erased
+ *  (sprites.ts goneOf), null without a gone map (or before its sprite is loaded): then it fades whole, as before. */
+export function keepsRemnant(erased: number | null | undefined): boolean {
+  return typeof erased === 'number' && Number.isFinite(erased) && erased < REMNANT_MAX;
+}
+
+/** Opacity of a piece's handwriting at t. A remnant (keepsRemnant) stays: its erased pixels leave the frame as each
+ *  is erased (sprites.ts FrameCache.frame), the rest stay drawn. Any other piece fades whole from removed_at (alphaAt).
+ *  removed_at keeps its meaning everywhere else: the piece as a whole (its typeset reading, its finished line, its
+ *  "was hidden" tag, a 3D view's badge) still goes by alphaAt. */
+export function inkAlphaAt(s: Schedule, t: number, remnant: boolean): number {
+  return remnant ? 1 : alphaAt(s, t);
+}
+
+/** How strongly a piece's handwriting is drawn: `ink` (inkAlphaAt) and `whole` (alphaAt) at t; `reading`: its typeset
+ *  reading stands in for it (typeset mode); `hide`: how far a bigger reading that repeats it has replaced it; `lineHide`:
+ *  how far its finished line has. A piece shown typeset draws no handwriting while its reading is up; a remnant's comes
+ *  in as its reading fades at removed_at (the two never show the piece twice over). */
+export function handwritingAlpha(ink: number, whole: number, reading: boolean, hide: number, lineHide: number): number {
+  if (lineHide > 0.98) return 0;
+  const a = reading ? Math.max(0, ink - whole) * (1 - hide) : ink;
+  return a * (1 - lineHide);
+}
+
+/** Whether anything of a piece is on the board at t (drawn, and its handwriting not faded): what can be hovered.
+ *  With remnant false, whether the piece as a whole is (the old rule: a 3D view's badge goes by it). */
+export function visibleAt(s: Schedule, t: number, remnant: boolean): boolean {
+  return progressAt(s, t) > 0 && inkAlphaAt(s, t, remnant) >= 0.05;
+}
+
+/** What a hover or click finds a piece by at t, so that only what is drawn is found: 'box' (a typeset reading, its own
+ *  or its finished line's, anywhere in its box), 'ink' (its handwriting: the board looks for unerased ink near the
+ *  point), or null (nothing of it is shown). `reading`, `hide`, `lineHide` as for handwritingAlpha (typeset mode). */
+export function hitBy(
+  s: Schedule, t: number, o: { remnant: boolean; reading: boolean; hide: number; lineHide: number },
+): 'box' | 'ink' | null {
+  if (!visibleAt(s, t, o.remnant)) return null;
+  if (o.reading && o.hide > 0.95) return null; // a bigger reading that repeats it has replaced it (its remnant too)
+  if ((o.reading && alphaAt(s, t) >= 0.05) || o.lineHide > 0.5) return 'box';
+  return 'ink';
+}
+
 /** Opacity of the "was hidden" tag at time t. */
 export function tagAt(s: Schedule, t: number): number {
   if (s.tagStart == null || s.tagEnd == null) return 0;
