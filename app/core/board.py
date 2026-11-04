@@ -109,6 +109,8 @@ class BoardParams:
     # that comes into view bit by bit as the pen moves on was written in view, however long he stood there before
     # (measured: 0-0.67 s for writing done behind the teacher, 2-2.3 s for a 2.5 s line written with his body at the pen).
     reveal_spread: float = 1.0
+    # Ink colour is pushed away from the board: marker on a whiteboard darkened to this share, chalk lifted towards white
+    # by the same share of its distance to white (darkening chalk drew it dim, close to the board's own colour).
     darken: float = 0.72
 
 
@@ -1102,7 +1104,9 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
     kept_ids = np.nonzero(keep)[0]
     o = np.argsort(A_show[kept_ids], kind="stable")
     kept_ids = kept_ids[o]
-    col = np.clip(A_col[kept_ids].astype(np.float32) * p.darken, 0, 255).astype(np.uint8)
+    col = A_col[kept_ids].astype(np.float32)
+    col = 255.0 - (255.0 - col) * p.darken if mode == "chalk" else col * p.darken
+    col = np.clip(col, 0, 255).astype(np.uint8)
     rmask = np.isfinite(removed_at[kept_ids])
     rem_ids = kept_ids[rmask]
     ro = np.argsort(removed_at[rem_ids], kind="stable")

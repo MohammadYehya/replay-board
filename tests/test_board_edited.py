@@ -159,3 +159,21 @@ def test_a_normal_clip_skips_nothing(monkeypatch):
     res = capture_board(info, person_mask=lambda t: TEACHER.copy() if 5.0 - 1e-6 <= t < 9.0 - 1e-6 else None,
                         params=BoardParams(width=W), mode="white")
     assert res.stats["skipped"] == 0 and res.stats["steps"] == 36
+
+
+# --- ink colour -----------------------------------------------------------------------------------------------------
+def test_chalk_is_drawn_lighter_and_marker_darker(monkeypatch):
+    # Ink colour is pushed away from the board: marker on a whiteboard darkened (x0.72), chalk on a chalkboard lifted
+    # towards white by the same share. Darkening chalk too drew it dim, close to the green board (data/test4.mp4).
+    info = _feed(monkeypatch, _shirt_frame, SHIRT_SECONDS, "chalk", 92)
+    res = capture_board(info, person_mask=_sam, params=BoardParams(width=W), mode="chalk")
+    sel = np.isin(res.add_idx, np.flatnonzero(STROKE.reshape(-1)))
+    chalk = np.median(res.add_color[sel], axis=0)
+    assert (chalk >= CHALK[0]).all() and (chalk <= 255 - 0.6 * (255 - CHALK[0])).all(), chalk  # 255 - 40 * 0.72
+
+    board_bgr, ink, *_ = CARDS["whiteboard-black-card"]
+    info = _feed(monkeypatch, _card_frame(board_bgr, ink, board_bgr, ink), 7.0, "white", 232)
+    res = capture_board(info, params=BoardParams(width=W), mode="white")
+    sel = np.isin(res.add_idx, np.flatnonzero(WRITING.reshape(-1)))
+    marker = np.median(res.add_color[sel], axis=0)
+    assert (marker <= ink[0]).all() and (marker >= 0.6 * ink[0]).all(), marker  # 40 * 0.72

@@ -142,7 +142,7 @@ When replaying, also leave out any mark that will be removed within 6 s, since t
 - Discard an erase if more than 60% of its pixels lived less than 6 s.
 
 **Output**
-- A per-step replay log of `(t, added pixel ids, their piece ids, their colours, removed pixel ids)`. The board at any time is rebuilt from it; ink colour is the original darkened ×0.72. An add's `t` is when it is shown (Fallback 2), never later than when it was accepted; lifetimes (`min_life`), removals, erases and drift go by acceptance time.
+- A per-step replay log of `(t, added pixel ids, their piece ids, their colours, removed pixel ids)`. The board at any time is rebuilt from it; ink colour is the original pushed away from the board: darkened ×0.72 on a whiteboard, and on a chalkboard lifted towards white by the same share (`255 - (255 - c) × 0.72`; darkening chalk drew it dim, close to the board's colour). An add's `t` is when it is shown (Fallback 2), never later than when it was accepted; lifetimes (`min_life`), removals, erases and drift go by acceptance time.
 - Speed at 800 px: the prototype did 9–15x real time; the full capture measures 6–7.5x in software on 1080p lectures on a 4-core laptop (6.1–6.6x over a whole hour), and 8–9x with GPU decoding.
 
 ### 5.2 Slides: states, clean slides, pointer
