@@ -210,19 +210,19 @@ flowchart LR
   S1 --> BC[Board capture<br/>code, per pixel]
   S2 --> BC
   BC --> R1[Muse Spark<br/>read each piece]
-  S3 --> PT[Pointing samples<br/>code: hand stretched out,<br/>on writing, not writing]
+  S3 --> PT[Pointing check<br/>code: arm out,<br/>over writing]
   BC --> PT
   PT --> G1[Muse Spark<br/>gesture meaning]
-  C -->|slides| SA[Slide analysis<br/>code: states, clean slides,<br/>pointer track, gesture guesses]
+  C -->|slides| SA[Slide analysis<br/>code: clean<br/>slides, pointer<br/>track, gestures]
   SA --> R2[Muse Spark<br/>read slides +<br/>gesture meaning]
-  V --> T[Muse Voice Transcribe<br/>parallel pieces]
-  T --> A[MMS forced aligner<br/>word times]
-  R1 --> L[Muse Spark<br/>link writing to speech,<br/>redraw times, chapters]
+  V --> T[Muse Voice<br/>Transcribe<br/>parallel pieces]
+  T --> A[MMS aligner<br/>word times]
+  R1 --> L[Muse Spark<br/>link writing<br/>to speech,<br/>redraw times,<br/>chapters]
   G1 --> J
   R2 --> L
   A --> L
   L --> J[(replay.json)]
-  J --> P[Player<br/>video + board/slides<br/>on one clock]
+  J --> P[Player<br/>video + board<br/>or slides on<br/>one clock]
   classDef meta fill:#0467DF,stroke:#0467DF,color:#fff
   class C,S1,S2,S3,R1,G1,R2,T,A,L meta
 ```
