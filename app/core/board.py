@@ -770,7 +770,9 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                             touch_img = cv2.dilate(pimg, k_touch)
                         near = touch_img[cy - ry0, cx - rx0].astype(np.int64)
                         if (near > 0).any():
-                            target = int(np.bincount(near[near > 0]).argmax())
+                            # touch_img is made once a step: a component before this one may have merged the piece
+                            # it shows into another since (piece_img was relabelled, touch_img was not).
+                            target = resolve(int(np.bincount(near[near > 0]).argmax()))
                             if t - pieces[target].last_update > p.join_recent:
                                 # Joining an old piece must not make it "recent", or the rest of
                                 # new writing that starts next to it would chain into it.
