@@ -33,6 +33,11 @@ export interface Piece {
   read?: Reading;
   spoken?: Span[];
   redraw_at?: number | null;
+  /** Written while hidden: the highest order-map level (0..255) that may be redrawn before the camera shows it; the
+   *  rest (ink seen as it was written) is drawn when the replay shows it. Absent: all of it, as before. */
+  redraw_to?: number | null;
+  /** Written while hidden: how long writing what is redrawn early takes at a typical speed, seconds. */
+  redraw_secs?: number | null;
 }
 
 export interface Erase {

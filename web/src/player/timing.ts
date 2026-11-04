@@ -8,7 +8,11 @@ export const DRAWING_KINDS = new Set([
   'drawing', 'figure', 'sketch', 'plot', 'chart', 'circle', 'line', 'shape', 'picture', 'bracket',
 ]);
 
-export const STEPS = 64; // reveal progress is quantised to this many frames per piece
+// Reveal progress is quantised to one step per level of the piece's drawing-order map (1..255, linear in time over
+// its draw window, board.py piece_image): a level is drawn once the latest pixel it can hold is due, so no pixel is
+// drawn before its time in the order map (which spreads each sample's new ink over the sample interval before it, so at
+// most one capture step, 1/3 s, before the replay log shows it). 64 steps drew a 3-minute piece up to 2.6 s early.
+export const STEPS = 255;
 const FADE_OUT = 0.4; // seconds for an erased piece to fade away
 const TAG_FADE = 0.25;
 const REDRAW_MAX = 6; // longest redraw of writing that was hidden, seconds
@@ -21,6 +25,11 @@ export interface Schedule {
   /** "was hidden" tag window, or null when the piece was never hidden. */
   tagStart: number | null;
   tagEnd: number | null;
+  /** When each level of the order map is due, linear over this window (absent: over start..end). */
+  due?: readonly [number, number];
+  /** A hidden piece that kept growing, or gained ink seen as it was written: levels 1..to are redrawn from start to
+   *  end, the rest are drawn when due. */
+  redraw?: { start: number; end: number; to: number };
 }
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -42,10 +51,27 @@ export function schedule(p: Piece): Schedule {
     const redraw = num(p.redraw_at);
     const after = num(p.written_after) ?? -Infinity;
     const start = redraw == null ? tSeen : Math.min(tSeen, Math.max(redraw, after));
-    // Capped: a hidden piece that kept growing for minutes (t_shown far after t_seen) is still redrawn briskly.
-    const span = draw ? draw[1] - draw[0] : tShown - tSeen;
-    const dur = Math.min(REDRAW_MAX, Math.max(1.2, span + 0.6));
-    return { start, end: start + dur, removedAt, tagStart: start, tagEnd: start + Math.max(3, dur + 1) };
+    // Redrawn early: what the camera showed in the first REDRAW_MAX s after it came into view, and of that only the
+    // levels the backend allows (redraw_to: ink whose spot was last seen blank before the redraw can start). Ink the
+    // piece gained later (it kept growing), or saw written in view, is drawn when the replay shows it, never before.
+    const cut = tSeen + REDRAW_MAX;
+    let to = draw && draw[1] > cut ? levelIn(draw, cut) : STEPS;
+    const allowed = num(p.redraw_to);
+    if (draw && allowed != null) to = Math.min(to, Math.max(0, Math.floor(allowed)));
+    const upto = draw ? (to >= STEPS ? draw[1] : Math.min(draw[1], draw[0] + ((draw[1] - draw[0]) * to) / (STEPS - 1))) : tShown;
+    const span = draw ? Math.min(upto, cut) - draw[0] : tShown - tSeen;
+    // As long as writing it takes (redraw_secs: its ink at a typical writing speed; the camera showed it at once), but
+    // done soon after the camera shows it all.
+    const write = num(p.redraw_secs);
+    const asWritten = write == null ? 0 : Math.min(write, Math.min(upto, cut) + 0.6 - start);
+    const dur = Math.min(REDRAW_MAX, Math.max(1.2, span + 0.6, asWritten));
+    const s: Schedule = { start, end: start + dur, removedAt, tagStart: start, tagEnd: start + Math.max(3, dur + 1) };
+    if (draw && to < STEPS) {
+      s.due = draw;
+      s.redraw = { start, end: start + dur, to };
+      s.end = Math.max(start + dur, draw[1]);
+    }
+    return s;
   }
   if (draw) return { start: draw[0], end: Math.max(draw[1], draw[0] + 0.3), removedAt, tagStart: null, tagEnd: null };
   const start = tSeen - 0.7;
@@ -55,12 +81,32 @@ export function schedule(p: Piece): Schedule {
 
 const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
-/** Drawing progress 0..1 at time t. */
+/** The highest order-map level (0..STEPS) all of whose pixels are due by t, for a map linear in time over [a, b]:
+ *  board.py gives a pixel at fraction f the level 1 + round(254 f), so level v holds f up to (v - 0.5) / 254. */
+function levelIn([a, b]: readonly [number, number], t: number): number {
+  if (t <= a) return 0;
+  if (t >= b) return STEPS;
+  return Math.min(STEPS, Math.floor(((STEPS - 1) * (t - a)) / (b - a) + 0.5));
+}
+
+/** New partial frames a second, at most, for a piece being drawn (each is built from its pixels, sprites.ts): one per
+ *  display frame at 60 Hz, so a short piece draws as smoothly as with continuous progress; a long one is limited by its
+ *  255 levels instead. */
+export const FRAME_HZ = 60;
+
+/** Drawing progress 0..1 at time t: the share of the order map's levels drawn (a whole number of levels, see STEPS),
+ *  as of the last 1/FRAME_HZ tick (never ahead of t). */
 export function progressAt(s: Schedule, t: number): number {
   if (s.end === -Infinity) return 1;
   if (t <= s.start) return 0;
   if (t >= s.end) return 1;
-  return clamp01((t - s.start) / (s.end - s.start));
+  const tick = Math.floor(t * FRAME_HZ + 1e-9) / FRAME_HZ;
+  let level = levelIn(s.due ?? [s.start, s.end], tick);
+  if (s.redraw) {
+    const r = s.redraw;
+    level = Math.max(level, Math.floor(r.to * clamp01((tick - r.start) / (r.end - r.start)) + 1e-9));
+  }
+  return level >= STEPS ? 1 : level / STEPS;
 }
 
 /** Opacity 0..1 at time t (fades out over 0.4 s from removed_at). */
@@ -77,11 +123,12 @@ export function tagAt(s: Schedule, t: number): number {
   return clamp01(Math.min((t - s.tagStart) / TAG_FADE, (s.tagEnd - t) / TAG_FADE));
 }
 
-/** Quantised reveal step 0..STEPS (0 = nothing drawn, STEPS = the whole piece). */
+/** Quantised reveal step 0..STEPS (0 = nothing drawn, STEPS = the whole piece): the levels progressAt says are drawn,
+ *  rounded down (a level is never drawn before it is due). */
 export function stepFor(progress: number): number {
   if (progress <= 0) return 0;
   if (progress >= 1) return STEPS;
-  return Math.max(1, Math.min(STEPS, Math.round(progress * STEPS)));
+  return Math.min(STEPS - 1, Math.floor(progress * STEPS + 1e-6));
 }
 
 /** Highest order value (1..255) visible at a step. */

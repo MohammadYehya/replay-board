@@ -63,18 +63,46 @@ def job_id_for(video: Path, start: float | None, end: float | None) -> str:
     return f"{slug}-{h}"
 
 
-class Status:
-    """Per-stage progress written to status.json (read by the server and the upload page)."""
+def _saved_name(status_path: Path) -> str:
+    """The lecture's file name an earlier status.json gives ("" when there is none)."""
+    try:
+        name = json.loads(status_path.read_text(encoding="utf-8")).get("name")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return name.strip() if isinstance(name, str) else ""
 
-    def __init__(self, job_dir: Path, on_change: Callable[[dict], None] | None = None):
+
+def source_name(video: Path, job_dir: Path) -> str:
+    """The lecture's own file name, shown in the lecture list and on its pages: the video's name, except for a video
+    the server saved in the job folder as upload.mp4, whose real name the server wrote in status.json."""
+    video = Path(video)
+    try:
+        uploaded = video.resolve().parent == Path(job_dir).resolve()
+    except OSError:
+        uploaded = False
+    return (_saved_name(Path(job_dir) / "status.json") if uploaded else "") or video.name
+
+
+class Status:
+    """Per-stage progress written to status.json (read by the server and the upload page), with the lecture's file
+    name. Without a name it keeps the one status.json has: the server writes the uploaded file's name there."""
+
+    def __init__(self, job_dir: Path, on_change: Callable[[dict], None] | None = None, name: str | None = None):
         self.path = job_dir / "status.json"
         self.lock = threading.Lock()
         self.on_change = on_change
+        name = (name or "").strip() or _saved_name(self.path)
         self.data = {"state": "running", "error": None, "started": time.time(),
                      "stages": {s: {"state": "pending", "progress": 0.0, "seconds": None, "note": ""} for s in STAGES}}
+        if name:
+            self.data["name"] = name
         self._t0: dict[str, float] = {}
         self._last_write = 0.0
         self.write(force=True)
+
+    @property
+    def name(self) -> str:
+        return self.data.get("name") or ""
 
     def write(self, force: bool = False):
         now = time.time()
@@ -236,9 +264,10 @@ def hexcolor(bgr) -> str:
 def run(video: str | Path, job_dir: Path | None = None, start: float | None = None, end: float | None = None,
         use_sam: bool = True, width: int = 800, log: Callable[[str], None] = print,
         on_status: Callable[[dict], None] | None = None, use_cache: bool = True,
-        deck: str | Path | None = None, gestures: bool = True) -> Path:
+        deck: str | Path | None = None, gestures: bool = True, name: str | None = None) -> Path:
     """Process one lecture. Returns the path of replay.json. gestures=False skips the teacher's pointing on a
-    board (hand tracking and its Muse Spark calls, about half the API cost)."""
+    board (hand tracking and its Muse Spark calls, about half the API cost). name is the lecture's file name as the
+    owner knows it (default: source_name)."""
     video = Path(video)
     info = media.probe(video)
     s0, s1 = media.clip_range(info, start, end)
@@ -250,7 +279,7 @@ def run(video: str | Path, job_dir: Path | None = None, start: float | None = No
             raise JobError(f"slide deck not found: {deck}")
         if deck.resolve() != (job_dir / "deck.pdf").resolve():
             shutil.copy2(deck, job_dir / "deck.pdf")
-    status = Status(job_dir, on_status)
+    status = Status(job_dir, on_status, name=(name or "").strip() or source_name(video, job_dir))
     try:
         out = _run(info, s0, s1, job_dir, status, use_sam, width, log, use_cache, gestures)
         status.finish()
@@ -374,6 +403,7 @@ def _run_board(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, 
             p["gone"] = f"pieces/{p['id']:03d}_gone.png"
         p["image_box"] = box
         p["draw"] = draw
+        p.update(board.redraw_part(p["id"]) or {})  # written while hidden: what may be redrawn early, and how fast
 
     status.start("read")
     # Sharp crops from the video itself (the 800 px board is too coarse for small handwriting).
@@ -429,21 +459,20 @@ def _run_board(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, 
             r = reads.get(p["id"], {"kind": "other", "text": "", "latex": ""})
             lk = links["elements"].get(str(p["id"]), {})
             spoken = understand.snap_to_words(lk.get("spoken", []), words)
-            redraw = lk.get("redraw_at") if p["revealed"] else None
-            if p["revealed"] and redraw is None:
-                redraw = spoken[0]["start"] if spoken and spoken[0]["start"] < p["t_seen"] else None
+            redraw = redraw_time(p, lk.get("redraw_at"), spoken)
             out_pieces.append({
                 "id": p["id"], "box": p["image_box"], "image": p["image"], "order": p["order"], "gone": p["gone"],
                 "draw": p["draw"],
                 "t_seen": p["t_seen"], "t_shown": p["t_shown"], "written_after": p["written_after"],
                 "revealed": p["revealed"], "removed_at": p["removed_at"], "pre_existing": p["pre_existing"],
                 "read": r, "spoken": spoken, "redraw_at": redraw,
+                "redraw_to": p.get("redraw_to"), "redraw_secs": p.get("redraw_secs"),
             })
         replay = {
             "version": 1,
             "video": {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width,
                       "height": info.height, "start": round(s0, 3), "end": round(s1, 3),
-                      "source": info.path.name},
+                      "source": status.name or info.path.name},
             "type": "board",
             "subject": kind.get("subject", ""),
             "board": {
@@ -462,6 +491,22 @@ def _run_board(info, s0, s1, job_dir: Path, status: Status, client: MetaClient, 
         log(f"wrote replay.json ({how} word times) after {replay['stats']['seconds']}s, API {client.summary()}")
 
     return _finish_with_speech(speech_job, link_and_write, job_dir, pool, log)
+
+
+def redraw_time(piece: dict, redraw_at, spoken: list[dict]) -> float | None:
+    """When the board redraws writing done while hidden (piece["revealed"]): when the link says it was written, else
+    its first mention before the camera showed it; never before any of its hidden ink's spots was last seen blank
+    (redraw_after, else written_after): talked about first and written later, it is drawn once it can exist."""
+    if not piece.get("revealed"):
+        return None
+    t = redraw_at if isinstance(redraw_at, (int, float)) and redraw_at >= 0 else None
+    if t is None and spoken and spoken[0]["start"] < piece["t_seen"]:
+        t = spoken[0]["start"]
+    if t is None:
+        return None
+    floor = piece.get("redraw_after")
+    floor = piece.get("written_after") if floor is None else floor
+    return round(max(float(t), float(floor)), 2) if floor is not None else round(float(t), 2)
 
 
 def _gestures(hands_job, find, status: Status, job_dir: Path, log) -> list[dict]:
@@ -748,7 +793,7 @@ def _run_slides(info, s0, s1, job_dir: Path, status: Status, client: MetaClient,
             "version": 1,
             "video": {"file": lecture.name, "duration": round(info.duration, 3), "width": info.width,
                       "height": info.height, "start": round(s0, 3), "end": round(s1, 3),
-                      "source": info.path.name},
+                      "source": status.name or info.path.name},
             "type": "slides",
             "subject": kind.get("subject", ""),
             "slides": {"size": [res.width, res.height], "background": hexcolor(res.background), "live": res.live,

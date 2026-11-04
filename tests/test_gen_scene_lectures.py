@@ -1,7 +1,8 @@
 """Fast checks of the 3D-figure lecture generator (tests/gen_scene_lectures.py): the timeline and the truth agree.
 
 No rendering, speech or ffmpeg here: the plans use estimated speech times, and a built truth JSON (data/synth3d/)
-is checked only when it exists.
+is checked only when it exists. The board-capture check at the end (marked selftest: run with -m selftest)
+decodes the built videos.
 """
 import copy
 import json
@@ -294,3 +295,46 @@ def test_open_piece_in_the_processed_job(name):
         ys, xs = np.nonzero(a > 200)
         if len(xs):
             assert np.hypot(xs + ox - hx, ys + oy - hy).min() > 12, other["id"]
+
+
+# ---------- board capture on the built videos: none of it was written while hidden ----------
+def _silhouette(name: str, truth: dict):
+    """The generated teacher's exact silhouette (video px) at t, from the timeline in the truth."""
+    import numpy as np
+
+    pl = {"inks": {k: {kk: v[kk] for kk in ("t_start", "t_end", "stage")} for k, v in truth["inks"].items()},
+          "stages": truth["stages"], "duration": truth["duration"], "segments": truth["segments"]}
+    motion = g.Scene(g.lecture(name), pl).motion
+
+    def person(t: float):
+        parts, (x0, y0, x1, y1), _ = g._teacher_parts(motion, t)
+        m = np.zeros((g.H, g.W), np.uint8)
+        if x1 > x0:
+            c = np.zeros((y1 - y0, x1 - x0), np.uint8)
+            for _, _, draw in parts:
+                draw(c, x0, y0)
+            m[y0:y1, x0:x1] = c
+        return m > 0
+    return person
+
+
+@pytest.mark.selftest
+@pytest.mark.parametrize("name", g.LECTURES)
+def test_board_capture_flags_nothing_as_written_while_hidden(name):
+    """The teacher stands right of the pen, so all the writing is in view as it is written: no piece is "revealed"
+    (redrawn when talked about, with a "was hidden" tag), or the board would show writing before he writes it. His
+    body covers each spot for a few seconds before the pen gets there; the old 3 s rule flagged 2 pieces a lecture
+    with his exact silhouette as the person mask (2-4 with SAM's). Skipped until the video is built."""
+    from app.core.board import BoardParams, capture_board
+    from app.core.media import probe
+
+    path, video = g.OUT_DIR / f"{name}.json", g.OUT_DIR / f"{name}.mp4"
+    if not path.is_file() or not video.is_file():
+        pytest.skip("not built")
+    truth = json.loads(path.read_text(encoding="utf-8"))
+    if truth.get("GEN_VERSION") != g.GEN_VERSION or truth.get("TRUTH_VERSION") != g.TRUTH_VERSION:
+        pytest.skip("built by an older generator")
+    res = capture_board(probe(video), corners=truth["board_corners"], person_mask=_silhouette(name, truth),
+                        params=BoardParams(width=800))
+    assert len(res.pieces) >= 5
+    assert [p["id"] for p in res.pieces if p["revealed"]] == []

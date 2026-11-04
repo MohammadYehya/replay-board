@@ -20,6 +20,10 @@ from .media import VideoInfo, clip_range, grab_frame, iter_frames, scaled_size
 
 PersonMask = Callable[[float], "np.ndarray | None"]
 
+# Ink pixels a second while the teacher writes, at 800 px wide (scales with the area): the median over the pieces seen
+# as they were written on the real clips (61-92 a clip; 76-104 between the quartiles). Hidden writing is redrawn at it.
+WRITE_RATE = 88.0
+
 
 @dataclass(frozen=True)
 class BoardParams:
@@ -71,8 +75,23 @@ class BoardParams:
     band_frac: float = 0.03
     erase_min_px: int = 60
     erase_merge: float = 2.5
-    reveal_gap: float = 3.0
+    # Written while hidden: at least `reveal_share` of a piece's pixels were out of view for more than `reveal_gap`
+    # seconds between last seen blank and seen as ink. The hand, arm or body covers a spot before the pen gets there,
+    # so a few seconds out of view say nothing about when it was written (measured: up to 8.3 s for writing seen as it
+    # was written on test-full, 16-17 s for writing done behind the teacher in the self-test).
+    reveal_gap: float = 10.0
+    reveal_share: float = 0.75
+    # ...and that ink came into view in one go (10%-90% of it within this many seconds): the teacher stepped away. Ink
+    # that comes into view bit by bit as the pen moves on was written in view, however long he stood there before
+    # (measured: 0-0.67 s for writing done behind the teacher, 2-2.3 s for a 2.5 s line written with his body at the pen).
+    reveal_spread: float = 1.0
     darken: float = 0.72
+
+
+def _inc(a: np.ndarray) -> np.ndarray:
+    """a + 1, saturating at 255 (uint8). Not OpenCV's add with the number 1: it reads a 4x1 array as a 4-value scalar
+    and fails ("input arrays ... different types")."""
+    return cv2.add(a, np.ones_like(a))
 
 
 def _odd(d: float) -> int:
@@ -170,8 +189,10 @@ class BoardResult:
     add_color: np.ndarray  # N x 3 BGR, already darkened
     rem_t: np.ndarray
     rem_idx: np.ndarray
-    add_drift: np.ndarray | None = None  # per add: ink re-accepted after the camera drifted
+    add_drift: np.ndarray | None = None  # per add: ink re-accepted next to old ink (not an update of its piece)
+    add_moved: np.ndarray | None = None  # per add: of those, ink the camera moved (left out of piece images)
     add_gone: np.ndarray | None = None  # per add: when it leaves the replayed board (inf = never)
+    add_blank: np.ndarray | None = None  # per add: when its spot was last seen blank (-inf: never since the clip started)
     stats: dict = field(default_factory=dict)
 
     def ink_at(self, t: float) -> np.ndarray:
@@ -204,14 +225,12 @@ class BoardResult:
           (within one sample, left to right); 0 where there is no ink.
         - removal map: 24-bit RGB per pixel = deciseconds + 1 when that pixel leaves the board
           (partial erases), 0 = stays; None when nothing of the piece is ever removed.
-        Ink re-accepted after the camera drifted is left out: the original marks stand for it.
+        Ink re-accepted after the camera moved is left out: the original marks stand for it.
         A pixel added more than once keeps its first order and its last colour.
         """
-        sel = self.add_piece == piece_id
-        if self.add_drift is not None and (sel & ~self.add_drift).any():
-            sel &= ~self.add_drift
-        idx, t, col = self.add_idx[sel], self.add_t[sel], self.add_color[sel]
-        gone = self.add_gone[sel] if self.add_gone is not None else np.full(idx.size, np.inf)
+        ids, early = self._piece_adds(piece_id)
+        idx, t, col = self.add_idx[ids], self.add_t[ids], self.add_color[ids]
+        gone = self.add_gone[ids] if self.add_gone is not None else np.full(idx.size, np.inf)
         if idx.size == 0:
             return np.zeros((1, 1, 4), np.uint8), np.zeros((1, 1), np.uint8), [0, 0, 1, 1], None, [0.0, 0.0]
         ys, xs = np.divmod(idx, self.width)
@@ -219,17 +238,9 @@ class BoardResult:
         bgra = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
         bgra[ys - y0, xs - x0, :3] = col  # adds are in time order, so later colours win
         bgra[ys - y0, xs - x0, 3] = 255
-        # Order follows real time: each sample's new pixels were written during the sample
-        # interval before it, so spread them over it left to right. Then 1..255 maps linearly
-        # onto [draw_start, draw_end], so a piece written in bursts replays in bursts.
-        te = t.astype(np.float64).copy()
-        dt = 1.0 / max(1e-6, self.fps)
-        for tv in np.unique(t):
-            m = t == tv
-            r = np.argsort(np.argsort(xs[m], kind="stable"), kind="stable")
-            te[m] = tv - dt + dt * (r + 1) / max(1, m.sum())
+        te = self._write_times(ids, early)
         lo, hi = float(te.min()), float(te.max())
-        val = (1 + np.round(254 * (te - lo) / max(1e-6, hi - lo))).astype(np.int64).clip(1, 255).astype(np.uint8)
+        val = _levels(te)
         omap = np.zeros((y1 - y0, x1 - x0), np.uint8)
         rev = np.argsort(-te, kind="stable")  # write latest first so the earliest order wins
         omap[ys[rev] - y0, xs[rev] - x0] = val[rev]
@@ -241,6 +252,66 @@ class BoardResult:
             last[ys - y0, xs - x0] = code  # adds are in time order
             gmap = np.stack([last & 255, (last >> 8) & 255, (last >> 16) & 255], axis=2).astype(np.uint8)  # BGR
         return bgra, omap, [int(x0), int(y0), int(x1 - x0), int(y1 - y0)], gmap, [round(lo, 2), round(hi, 2)]
+
+    def redraw_part(self, piece_id: int) -> dict | None:
+        """For a piece written while hidden, what the player may redraw before the camera shows it (None for any other
+        piece):
+        - redraw_to: the highest level of its order map (0..255) it may redraw early. Every pixel at or below it had its
+          spot last seen blank no later than the redraw can start (min(t_seen, redraw_after)); the rest (ink seen as it
+          was written that joined the piece) is drawn when the replay shows it.
+        - redraw_secs: how long writing those pixels takes at a typical speed (WRITE_RATE): the camera did not see it
+          written, and showing it in the time it came into view drew real handwriting seconds before the pen got there."""
+        ids, early = self._piece_adds(piece_id)
+        if early is None:
+            return None
+        if ids.size == 0:
+            return {"redraw_to": 0, "redraw_secs": 0.0}
+        te = self._write_times(ids, early)
+        val = _levels(te)
+        o = np.lexsort((te, self.add_idx[ids]))  # per pixel, its first add sets its order (piece_image)
+        px = self.add_idx[ids][o]
+        first = o[np.r_[True, px[1:] != px[:-1]]]
+        late = val[first][~early[first]]
+        to = int(late.min()) - 1 if late.size else 255
+        s = self.width / 800.0
+        secs = int((val[first] <= to).sum()) / (WRITE_RATE * s * s)
+        return {"redraw_to": to, "redraw_secs": round(secs, 2)}
+
+    def _piece_adds(self, piece_id: int) -> tuple[np.ndarray, np.ndarray | None]:
+        """The adds a piece's image is made of (ink the camera moved is left out: the original marks stand for it), and
+        for a piece written while hidden, per add whether it may be redrawn early (see redraw_part); else None."""
+        sel = self.add_piece == piece_id
+        moved = self.add_moved if self.add_moved is not None else self.add_drift
+        if moved is not None and (sel & ~moved).any():
+            sel &= ~moved
+        ids = np.nonzero(sel)[0]
+        q = next((d for d in self.pieces if d["id"] == piece_id), None)
+        if q is None or not q.get("revealed") or self.add_blank is None:
+            return ids, None
+        ra = q.get("redraw_after")
+        floor = q["t_seen"] if ra is None else min(q["t_seen"], ra)
+        return ids, self.add_blank[ids] <= floor + 0.01
+
+    def _write_times(self, ids: np.ndarray, early: np.ndarray | None) -> np.ndarray:
+        """Per add, its time in the order map. Order follows real time: each sample's new pixels were written during
+        the sample interval before it, so spread them over it left to right (ink that may be redrawn early first)."""
+        t = self.add_t[ids]
+        xs = self.add_idx[ids] % self.width
+        te = t.astype(np.float64).copy()
+        dt = 1.0 / max(1e-6, self.fps)
+        for tv in np.unique(t):
+            m = t == tv
+            o = np.argsort(xs[m], kind="stable") if early is None else np.lexsort((xs[m], ~early[m]))
+            r = np.argsort(o, kind="stable")
+            te[m] = tv - dt + dt * (r + 1) / max(1, m.sum())
+        return te
+
+
+def _levels(te: np.ndarray) -> np.ndarray:
+    """Order-map levels 1..255, linear in time over [te.min(), te.max()], so a piece written in bursts replays in
+    bursts."""
+    lo, hi = float(te.min()), float(te.max())
+    return (1 + np.round(254 * (te - lo) / max(1e-6, hi - lo))).astype(np.int64).clip(1, 255).astype(np.uint8)
 
 
 def _roi(ys: np.ndarray, xs: np.ndarray, pad: int, H: int, W: int) -> tuple[int, int, int, int]:
@@ -316,6 +387,10 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     min_px = p.min_px * s * s
     pad = p.join_pad * s
     dt = 1.0 / p.fps
+    # A camera move re-accepts ink next to ink that was there before it moved, so at least accept_n samples old. Ink
+    # next to ink accepted a sample or two before is the rest of fresh writing (a stroke beside an arrowhead that the
+    # thick mask held back a sample longer): it stays in the piece's image (it is still drift for grouping and timing).
+    moved_age = (p.accept_n - 0.5) * dt
 
     accepted = np.zeros((H, W), bool)
     on = np.zeros((H, W), np.uint8)
@@ -359,8 +434,10 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
     next_piece = 1
     add_t, add_idx, add_piece, add_col = [], [], [], []
     add_seen = []  # per add: when it was in view without the thick mask's wait (for "written while hidden")
+    add_lc = []  # per add: when its spot was last seen blank (inf: never since the clip started)
     add_show = []  # per add: when the replay shows it (see on_nt)
     add_drift = []  # True for ink re-accepted next to old ink (camera drift), not new writing
+    add_moved = []  # True for drift next to ink at least `moved_age` old: the camera moved it
     n_adds = 0
     rem_add, rem_t = [], []  # removal events: which add, when the clean run began
     erases: list[dict] = []
@@ -477,7 +554,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                 # Compare contrast with the clean board, not raw grey: exposure jumps move both.
                 con = np.clip(contrast[sl], 0, 255).astype(np.uint8)
                 same = c & (run > 0) & (cv2.absdiff(con, stay_grey[sl]) <= p.stay_tol)
-                np.copyto(run, np.where(same, cv2.add(run, 1), start.view(np.uint8)), where=vis)
+                np.copyto(run, np.where(same, _inc(run), start.view(np.uint8)), where=vis)
                 np.copyto(stay_grey[sl], con, where=vis)
             else:
                 run[vis] = 0
@@ -557,13 +634,13 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             jump = vi & (c_on > 0) & (cv2.absdiff(contrast[sl], c_con) > p.stay_tol)
             if jump.any():
                 jump = vi & (c_on > 0) & (cv2.dilate(jump.view(np.uint8), k_jump) > 0)
-            c_on[:] =np.where(vi, np.where(jump, np.uint8(1), cv2.add(c_on, 1)), np.where(vc, np.uint8(0), c_on))
+            c_on[:] = np.where(vi, np.where(jump, np.uint8(1), _inc(c_on)), np.where(vc, np.uint8(0), c_on))
             np.copyto(c_due, np.float32(np.inf), where=vc | jump)
             np.copyto(c_due, np.float32(t), where=(c_on >= p.accept_n) & np.isinf(c_due))
             np.copyto(c_con, contrast[sl], where=vi)
             nt_box = _union(reach, _rect((c_on > 0) | cs | bs, x0, y0))
-        on = np.where(upd_ink, cv2.add(on, 1), np.where(upd_clean, np.uint8(0), on))
-        off = np.where(upd_clean, cv2.add(off, 1), np.where(upd_ink, np.uint8(0), off))
+        on = np.where(upd_ink, _inc(on), np.where(upd_clean, np.uint8(0), on))
+        off = np.where(upd_clean, _inc(off), np.where(upd_ink, np.uint8(0), off))
         np.copyto(last_clean, np.float32(t), where=upd_clean)
         np.copyto(never_clean, False, where=upd_clean)
 
@@ -616,6 +693,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             n_adds += nnew
             pid = np.zeros(nnew, np.int64)
             drift = np.zeros(nnew, bool)
+            moved = np.zeros(nnew, bool)
             stale = np.zeros(nnew, bool)  # small bits that joined an old piece: not an update
             pre_window = t - t_settle <= p.pre_window
 
@@ -627,8 +705,11 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             ly, lx = ys - ry0, xs - rx0
             pimg = piece_img[ry0:ry1, rx0:rx1]
             owner = np.zeros(nnew, np.int64)
+            owner_old = owner
             if not pre_window and accepted.any():
                 owner = cv2.dilate(pimg, k_drift)[ly, lx].astype(np.int64)
+                old = np.where(acc_time[ry0:ry1, rx0:rx1] <= t - moved_age, pimg, np.float32(0))
+                owner_old = cv2.dilate(old, k_drift)[ly, lx].astype(np.int64)
             if True:
                 rmask = np.zeros(pimg.shape, np.uint8)
                 rmask[ly, lx] = 1
@@ -650,6 +731,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
                         major = int(np.bincount(own[own > 0]).argmax())
                         pid[members] = np.where(own > 0, own, major)
                         drift[members] = True
+                        moved[members] = (owner_old[members] > 0).mean() >= p.drift_share
                         continue
                     cx, cy = xs[members], ys[members]
                     box = [int(cx.min()), int(cy.min()), int(cx.max()) + 1, int(cy.max()) + 1]
@@ -725,6 +807,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             cur_add[ys, xs] = ids
             piece_img[ys, xs] = pid.astype(np.float32)
             add_seen.append(np.minimum(np.float32(t), held_t[ys, xs] + np.float32((p.accept_n - 1) * dt)))
+            add_lc.append(np.where(never_clean[ys, xs], np.float32(np.inf), last_clean[ys, xs]))
             held_t[ys, xs] = np.inf
             add_show.append(np.minimum(np.float32(t), due_t[ys, xs]))
             on_nt[ys, xs] = 0
@@ -735,6 +818,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
             add_idx.append((ys * W + xs).astype(np.int64))
             add_piece.append(pid)
             add_drift.append(drift)
+            add_moved.append(moved)
             add_col.append(board[ys, xs].copy())
 
         if progress is not None and steps % 30 == 0:
@@ -746,7 +830,7 @@ def capture_board(info: VideoInfo, corners=None, person_mask: PersonMask | None 
 
     add_piece = [np.array([resolve(int(v)) for v in a], np.int64) if alias else a for a in add_piece]
     res = _finish(p, geom, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift, rem_add, rem_t,
-                  accepted, last_board, t_settle, s1, add_seen, add_show)
+                  accepted, last_board, t_settle, s1, add_seen, add_show, add_lc, add_moved)
     res.stats.update(steps=steps, seconds=time.perf_counter() - t_wall, typical_brightness=typical,
                      clip_seconds=s1 - s0, speed=(s1 - s0) / max(1e-6, time.perf_counter() - t_wall))
     if progress is not None:
@@ -759,15 +843,18 @@ def _cat(lst, dtype, shape=(0,)):
 
 
 def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, add_idx, add_piece, add_col, add_drift,
-            rem_add, rem_t, accepted, last_board, t_settle, t_end, add_seen=None, add_show=None) -> BoardResult:
+            rem_add, rem_t, accepted, last_board, t_settle, t_end, add_seen=None, add_show=None,
+            add_lc=None, add_moved=None) -> BoardResult:
     W, H = geom.width, geom.height
     s = W / 800.0
     A_t = _cat(add_t, np.float64)  # accepted: lifetimes, removals, erases and drift go by this
     A_seen = _cat(add_seen, np.float64) if add_seen else A_t
+    A_lc = _cat(add_lc, np.float64) if add_lc else None  # last seen blank (inf: never since the start)
     A_show = _cat(add_show, np.float64) if add_show else A_t  # shown in the replay (<= A_t)
     A_idx = _cat(add_idx, np.int64)
     A_pid = _cat(add_piece, np.int64)
     A_drift = _cat(add_drift, bool)
+    A_moved = _cat(add_moved, bool) if add_moved else A_drift
     A_col = _cat(add_col, np.uint8, (0, 3))
     R_add = _cat(rem_add, np.int64)
     R_t = _cat(rem_t, np.float64)
@@ -817,10 +904,23 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
         times = np.sort(A_show[written if written.size else kept])
         t_seen = float(times[int(np.floor(p.seen_frac * (times.size - 1)))])
         t_shown = float(times[int(np.floor(0.95 * (times.size - 1)))])
-        # Written while hidden is judged from when the ink was in view, before any wait for
-        # thick ink to show it stays put.
-        in_view = np.sort(A_seen[written if written.size else kept])
-        t_view = float(in_view[int(np.floor(p.seen_frac * (in_view.size - 1)))])
+        # Written while hidden: most of its ink was out of view for long between its spot last seen blank and the ink
+        # in view (before any wait for thick ink to show it stays put). Ink whose spot was never seen blank since the
+        # clip started may have been there all along (behind the teacher at the start): no sign of when it was written.
+        w_ids = written if written.size else kept
+        revealed, redraw_after = False, None
+        if not q.pre_existing and A_lc is not None:
+            away = A_seen[w_ids] - A_lc[w_ids]  # -inf where never seen blank
+            if np.sort(away)[int(np.floor((1.0 - p.reveal_share) * (away.size - 1)))] > p.reveal_gap:
+                hid = away > p.reveal_gap
+                came = np.sort(A_seen[w_ids][hid])  # in one go when he stepped away, not bit by bit behind the pen
+                n_h = came.size - 1
+                revealed = bool(came[int(np.floor(0.9 * n_h))] - came[int(np.ceil(0.1 * n_h))] <= p.reveal_spread)
+                if revealed:  # never redrawn before any of its hidden ink's spots was last seen blank
+                    redraw_after = float(np.ceil(A_lc[w_ids][hid].max() * 100.0 - 1e-6) / 100.0)
+        elif not q.pre_existing:
+            in_view = np.sort(A_seen[w_ids])
+            revealed = float(in_view[int(np.floor(p.seen_frac * (in_view.size - 1)))]) - q.written_after > p.reveal_gap
         shown = kept[~A_drift[kept]] if (~A_drift[kept]).any() else kept
         rem = shown_removed[shown]
         removed = rem[np.isfinite(rem)]
@@ -833,7 +933,7 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
             "id": int(u), "box": [int(kxs.min()), int(kys.min()), int(kxs.max() - kxs.min() + 1), int(kys.max() - kys.min() + 1)],
             "t_seen": round(t_seen, 2), "t_commit": round(t_seen, 2), "t_shown": round(t_shown, 2),
             "written_after": round(wa, 2),
-            "revealed": bool(not q.pre_existing and t_view - wa > p.reveal_gap),
+            "revealed": bool(revealed), "redraw_after": redraw_after,
             "removed_at": None if rem_when is None else round(rem_when, 2),
             "pre_existing": bool(q.pre_existing), "pixels": int(kept.size),
         })
@@ -877,7 +977,8 @@ def _finish(p: BoardParams, geom: BoardGeometry, mode, pieces, erases, add_t, ad
         pieces=out_pieces, erases=out_erases,
         add_t=A_show[kept_ids], add_idx=A_idx[kept_ids], add_piece=A_pid[kept_ids], add_color=col,
         rem_t=removed_at[rem_ids], rem_idx=A_idx[rem_ids],
-        add_drift=A_drift[kept_ids], add_gone=shown_removed[kept_ids],
+        add_drift=A_drift[kept_ids], add_moved=A_moved[kept_ids], add_gone=shown_removed[kept_ids],
+        add_blank=None if A_lc is None else np.where(np.isfinite(A_lc[kept_ids]), A_lc[kept_ids], -np.inf),
         stats={"pieces_raw": len(pieces), "pieces_kept": len(out_pieces), "erases": len(out_erases)},
     )
 

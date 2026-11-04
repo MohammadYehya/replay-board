@@ -208,7 +208,10 @@ def test_writing_under_the_hand_where_a_missed_cuff_rested_is_not_shown_before_i
     t = _shown(res, _box_mask(*line))
     assert t.size > 300 and t.min() >= 10.0 and np.median(t) <= 12.5, (t.size, t.min(), np.median(t))
     p = [q for q in res.pieces if q["box"][1] <= 200 <= q["box"][1] + q["box"][3]]
-    assert len(p) == 1 and p[0]["t_seen"] >= 10.0 and p[0]["revealed"]  # written while hidden, shown on uncover
+    # Shown when the hand leaves, 1-2 s after it was written. Its spot was not seen blank from 3 s (the cuff lay there),
+    # but that says nothing about when it was written: not "written while hidden", which a redraw at the time it was
+    # talked about could put up to 7 s before the pen got there (SPEC 5.1 `revealed`).
+    assert len(p) == 1 and p[0]["t_seen"] >= 10.0 and not p[0]["revealed"]
 
 
 UNDERLINE = (250, 150, 400, 164)  # heavy (14 px) writing at 3 s, the hand (SAM) resting at its end until 9 s

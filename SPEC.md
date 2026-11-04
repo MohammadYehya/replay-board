@@ -99,6 +99,7 @@ Counters move only where the board is visible:
 **Camera drift tolerance (essential on real video).** Real cameras drift by about 1 px, from a tripod settling or autofocus, and strokes are only 1–3 px wide. Without this, every stroke "erases and rewrites itself". So:
 - an accepted pixel counts as ink if any faint ink (`contrast > 12`) is within a 2 px radius (5×5 ellipse);
 - new ink within 2 px of accepted ink joins *that* ink's piece instead of starting a new one. To find the owner, max-dilate an image of piece ids.
+- such ink is left out of the piece's image (the original marks stand for it) only when the ink beside it was accepted at least 2.5 samples before: a camera move takes 3 samples to re-accept ink. Ink beside ink accepted a sample or two before is the rest of fresh writing (a stroke beside an arrowhead the thick mask held back a sample longer).
 
 A global image alignment was tried and did **not** help: the drift is not a pure shift, and the reference follows it. Don't rebuild that.
 
@@ -114,7 +115,7 @@ A global image alignment was tried and did **not** help: the drift is not a pure
 - Each piece records:
   - `t_seen` and `t_commit`, both taken from when **10% of its pixels** are shown in the replay (see Fallback 2), so one stray early pixel doesn't set the time, and `t_shown` from when 95% are;
   - `written_after` (the median `last_clean` of its pixels; the minimum across batches);
-  - `revealed`, true when the 10% point of when its pixels were in view as ink (before any wait for thick ink to stay put) is more than 3 s after `written_after`, meaning it was written while hidden.
+  - `revealed`, meaning it was written while hidden: at least 75% of its pixels were out of view for more than 10 s between when their spot was last seen blank and when they were in view as ink (before any wait for thick ink to stay put). The hand, arm or body covers a spot before the pen gets there, so a few seconds out of view say nothing about when it was written (measured: up to 8.3 s for writing seen as it was written, 16–17 s for writing done behind the teacher). A spot never seen blank since the clip started counts as not out of view: the ink may have been there all along. That hidden ink must also have come into view in one go (10–90% of it within 1 s), as when the teacher steps away: ink that comes into view bit by bit as the pen moves on was written in view, however long he stood on the spot first (measured: 0–0.67 s for writing done behind the teacher, 2–2.3 s for a 2.5 s line written with his body at the pen). The rule errs late, never early: hidden writing that was out of view under 10 s, came into view in parts, or sat behind the teacher since the clip started is shown when it comes into view, without the tag. A revealed piece also records `redraw_after`, the latest time any of its hidden ink's spots was seen blank: it is never redrawn before that.
 
 **Not writing (drop it)**
 
@@ -132,7 +133,7 @@ When replaying, also leave out any mark that will be removed within 6 s, since t
 
 **Output**
 - A per-step replay log of `(t, added pixel ids, their piece ids, their colours, removed pixel ids)`. The board at any time is rebuilt from it; ink colour is the original darkened ×0.72. An add's `t` is when it is shown (Fallback 2), never later than when it was accepted; lifetimes (`min_life`), removals, erases and drift go by acceptance time.
-- Speed is 9–15x real time at 800 px.
+- Speed at 800 px: the prototype did 9–15x real time; the full capture measures 6–9x on 1080p lectures on a 4-core laptop (6.1–6.6x over a whole hour).
 
 ### 5.2 Slides: states, clean slides, pointer
 
@@ -261,7 +262,7 @@ Generate videos with known answers, score the analysis against them, and keep th
 ```
 
 - `pieces/NNN.png` is an RGBA crop of the piece's strokes, made from the replay log, with a transparent background.
-- `pieces/NNN_order.png` is an 8-bit drawing-order map: accept time first, then left to right. The player reveals pixels whose order is at or below the progress, which gives the stroke-by-stroke look.
+- `pieces/NNN_order.png` is an 8-bit drawing-order map: accept time first, then left to right. The player reveals pixels whose order is at or below the progress, which gives the stroke-by-stroke look. It steps one order level at a time and draws a level only once all of it is due, so no pixel is drawn more than one capture step (1/3 s) before the replay log shows it. In a revealed piece, ink that may be redrawn early (its spot was last seen blank before the redraw can start) comes first within each capture step.
 
 ## 7. The app
 
@@ -280,7 +281,7 @@ Generate videos with known answers, score the analysis against them, and keep th
     - circle: an ellipse drawn with stroke-dashoffset;
     - underline and arrow: drawn progressively;
     - pulse: rings.
-  - Hidden writing is drawn at `redraw_at`, with a small "was hidden" tag the first time.
+  - Hidden writing is drawn at `redraw_at`, with a small "was hidden" tag the first time. `redraw_at` is never before the piece's `redraw_after`; only what the camera showed in the first 6 s after the piece came into view, and of that only the order levels up to `redraw_to` (ink whose spot was last seen blank before the redraw can start), is redrawn early; ink it gained later or that was seen as it was written is drawn when the replay log shows it. The redraw takes `redraw_secs`, the time writing that ink takes at the speed measured on real lectures (88 px/s at 800 px wide), at least 1.2 s and at most 6 s; the writing speed never stretches it past 0.6 s after the camera shows it all.
 - **Upload page:** drag and drop, the stages with their progress, then the player.
 
 ## 8. Milestones (each ends with something the owner can see working)
