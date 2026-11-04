@@ -127,6 +127,13 @@ These kinds of piece are dropped:
 - more than 60% of its pixels removed within 6 s of being accepted (`min_life`);
 - a long hairline: at most 1.5 px thick and at least 15× longer than thick;
 - lying entirely inside the outer **3% band** of the board area (frame or wall edges).
+- a typed caption burned into an edited video. Writing comes a stroke at a time; a caption comes all at once, on board that was seen blank a moment before, and goes within a minute.
+  - A **burst** step is one that accepts at least 600 px (at 800) of ink that is not drift, was accepted on time (not after the wait for too-thick ink: typed text is thin) and whose spot was seen blank at most `accept_n` samples before. Only steps after the first `pre_window` seconds count. Measured: writing reaches at most 252 px a step on the self-test, 44 on the owner's clips and 214 on an edited lecture.
+  - A piece is part of the burst if it got at least 150 px of that ink in that step. Captions got 655 px and more each; other pieces, including writing done as a caption came up, got at most 59.
+  - The ink such a piece accepts within 2 s of the burst (not drift) is overlay, all of it, if at least half of it is gone within 60 s. Measured: captions 0.62–1.0. Some caption ink stays accepted where chalk lies under the text. Ink that came into view all at once and stays (a cut to another board, a banner leaving) measured 0.
+  - A piece that is at least 60% overlay also loses the rest of its ink that is gone within 60 s.
+  - Overlay ink is taken out of its piece before the piece is judged, so writing a caption joined keeps its own ink. It counts as short-lived for erases, so a caption leaving is not an erase.
+  - A streamed partial leaves out window ink that may still turn out to be overlay, and its ready line stays before that ink. After ink that appears at once and stays, the stream lags about a minute; no step on the owner's clips comes near a burst.
 
 When replaying, also leave out any mark that will be removed within 6 s, since the whole video is known by then. Leave out pre-existing marks lying entirely in the 3% band too (a ruler hanging on the board).
 
@@ -343,6 +350,7 @@ While a board lecture is processed, `replay.json` is written in parts, so the pl
 - Black first frames from a fade-in. Judge modes from several moments, and wait for the picture to settle.
 - Edited videos (YouTube lectures) end on a black card: it was taken for the board, wiped every piece at the end and made the background black. Skip samples that don't show the board (5.1).
 - On a chalkboard a dark shirt looks bright (the grey is `255 - max`), so a running-max reference is lifted by every pass of the teacher. Don't use the large-dark fallback there when SAM gives the person.
+- On a chalkboard, typed white captions in an edited video look like chalk and became writing, and their leaving became erases. They come in one burst and go within a minute: drop them (5.1).
 - Board frame and wall edges inside the analysed area turn into fake writing. Give the board corners and drop anything in the outer 3% band.
 - A webcam person who barely moves. Use the flicker rule and the furthest-strip growth (5.2).
 - A cursor parked for a whole slide gets baked into the clean slide. Remove it with the template, then re-track.
