@@ -1,11 +1,19 @@
 <p align="center">
-  <img src="docs/images/banner.svg" width="100%"
-       alt="Replay Board: a chalkboard that redraws a lecture's writing stroke by stroke as the video's playhead moves">
+  <img src="docs/images/logo.svg" width="104" alt="Replay Board logo">
+</p>
+
+<h1 align="center">Replay Board</h1>
+
+<p align="center">
+  <b>Upload a recorded lecture. Watch the original, untouched, beside a clean board<br>
+  that redraws the writing stroke by stroke, in sync with the voice.</b>
 </p>
 
 <p align="center">
-  <img alt="Built for the Meta Global AI Developer Hackathon 2026"
-       src="https://img.shields.io/badge/Meta_Global_AI_Developer_Hackathon-2026_entry-0467DF?style=for-the-badge&logo=meta&logoColor=white">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/hackathon-dark.svg">
+    <img alt="Built for the 2026 Meta Global AI Developer Hackathon" src="docs/images/hackathon-light.svg" height="56">
+  </picture>
 </p>
 
 <p align="center">
@@ -15,11 +23,6 @@
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white">
   <img alt="React and TypeScript" src="https://img.shields.io/badge/React-TypeScript-3178C6?logo=react&logoColor=white">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e8c25a"></a>
-</p>
-
-<p align="center">
-  <b>Upload a recorded lecture. Watch the original, untouched, beside a clean board<br>
-  that redraws the writing stroke by stroke, in sync with the voice.</b>
 </p>
 
 <p align="center">
@@ -336,7 +339,7 @@ app/            pipeline, CLI (app.process), server (app.server), Ask Muse (ask)
 app/core/       meta_api (one client), board, board_gestures (pointing), lines, slides, deck (PDF decks), sam,
                 sam_codec, speech, understand, media, texrender, scene_expr (the 3D maths grammar)
 web/            player: React + Vite + TypeScript + KaTeX
-docs/           Meta API notes, demo script, submission text, README banner
+docs/           Meta API notes, demo script, submission text, README images
 tests/          generated-lecture self-tests and unit tests
 data/           videos, job folders and the model cache (never committed)
 ```
