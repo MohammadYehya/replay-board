@@ -77,6 +77,7 @@ Writing stays where it is; the teacher moves.
 
 **Frames and ink**
 - Sample at **3 fps**. Flatten the board to **800 px wide** with a perspective warp from the 4 corners (decode at 1280 px first). With no corners, use the whole frame scaled to 800 px wide.
+- Decoding (also SAM's low-fps copies): on Windows, decode on the GPU (D3D11VA; `VIDEO_DECODE=auto`, `cpu` turns it off) only where it gives the very same pixels as software, because model answers are cached by the bytes sent. That means 8-bit 4:2:0 H.264, HEVC, VP9 or AV1, with no turn or flip. Once per file, 8 frames are decoded both ways and compared. Damaged data (`-xerror`) or any GPU failure switches that file to software, carrying on from the next frame.
 - Board type: take the median brightness of the middle half of the board at 9 moments spread across the clip (seek to each; don't use the first frame). If it is above 110 it is a whiteboard, otherwise chalk.
 - Grey image: on a whiteboard, `min(B,G,R)` (coloured markers come out dark); on chalk, `255 - max(B,G,R)`.
 - `closed` = morphological closing of the grey image with an ellipse of 21 px.
@@ -133,7 +134,7 @@ When replaying, also leave out any mark that will be removed within 6 s, since t
 
 **Output**
 - A per-step replay log of `(t, added pixel ids, their piece ids, their colours, removed pixel ids)`. The board at any time is rebuilt from it; ink colour is the original darkened ×0.72. An add's `t` is when it is shown (Fallback 2), never later than when it was accepted; lifetimes (`min_life`), removals, erases and drift go by acceptance time.
-- Speed at 800 px: the prototype did 9–15x real time; the full capture measures 6–9x on 1080p lectures on a 4-core laptop (6.1–6.6x over a whole hour).
+- Speed at 800 px: the prototype did 9–15x real time; the full capture measures 6–7.5x in software on 1080p lectures on a 4-core laptop (6.1–6.6x over a whole hour), and 8–9x with GPU decoding.
 
 ### 5.2 Slides: states, clean slides, pointer
 
@@ -325,5 +326,6 @@ Generate videos with known answers, score the analysis against them, and keep th
 - `cv2.imread`/`imwrite` fail silently on non-ASCII Windows paths. Use `cv2.imencode`/`imdecode` with `Path.write_bytes`/`np.fromfile`.
 - `.env` saved by PowerShell is UTF-16, and Notepad may add a BOM. Decode with `utf-8-sig`, then fall back to `utf-16`.
 - A sound track that starts late puts words seconds off. Use `aresample first_pts=0`.
+- GPU-decoded frames are not turned or flipped by ffmpeg's autorotate (a flip reports rotation 0), and the GPU hides damaged data differently from software. Gate on the display matrix and use `-xerror`.
 - torchaudio 2.9 removed MMS_FA, so pin it below 2.9.
 - Image, frame and audio handling must survive: rotated phone videos, odd sizes, variable frame rate, no audio track, clips under 3 s, `--start` past the end, `--end` before `--start`, and paths with spaces or accents. Give clear one-line errors, not tracebacks.

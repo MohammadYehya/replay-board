@@ -46,6 +46,19 @@ class Settings:
     model_sam: str
     cache_dir: Path
     max_parallel: int
+    # "auto", "cpu" (never decode lectures on the GPU, see media.gpu_decode_ok), or a value not understood, which
+    # media.decode_setting treats as cpu
+    video_decode: str = "auto"
+
+
+# Words for VIDEO_DECODE: people write "off" or "false" as often as "cpu"
+_DECODE_CPU = {"cpu", "software", "sw", "off", "no", "none", "false", "0", "disable", "disabled"}
+_DECODE_AUTO = {"auto", "gpu", "on", "yes", "true", "1", ""}
+
+
+def _decode_mode(value: str) -> str:
+    v = value.strip().lower()
+    return "cpu" if v in _DECODE_CPU else "auto" if v in _DECODE_AUTO else v
 
 
 def load_settings(env_path: Path | None = None) -> Settings:
@@ -66,4 +79,5 @@ def load_settings(env_path: Path | None = None) -> Settings:
         model_sam=get("MODEL_SAM", "sam-3.1"),
         cache_dir=cache,
         max_parallel=int(get("META_API_MAX_PARALLEL", "8")),
+        video_decode=_decode_mode(get("VIDEO_DECODE", "auto")),
     )

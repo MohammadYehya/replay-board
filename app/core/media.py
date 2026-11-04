@@ -3,17 +3,26 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import queue
+import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 import wave
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 import cv2
 import numpy as np
+
+from ..config import load_settings
+
+log = logging.getLogger(__name__)
 
 
 class MediaError(Exception):
@@ -29,6 +38,9 @@ class VideoInfo:
     fps: float
     has_audio: bool
     rotation: int
+    codec: str = ""  # ffprobe's codec_name, e.g. "h264"
+    pix_fmt: str = ""  # what the software decoder gives, e.g. "yuv420p"
+    display_matrix: bool = False  # the file asks players to turn or flip the picture (a flip has rotation 0)
 
 
 def _tool(name: str) -> str:
@@ -83,10 +95,13 @@ def probe(path: str | Path) -> VideoInfo:
     sar = _ratio(video.get("sample_aspect_ratio"))
     if sar > 0 and abs(sar - 1) > 1e-3:
         w = int(round(w * sar))
-    rotation = 0
+    rotation, display_matrix = 0, False
     for sd in video.get("side_data_list", []) or []:
         if "rotation" in sd:
             rotation = int(round(float(sd["rotation"])))
+        # Listed only when it isn't the identity: a turn, or a flip that ffprobe reports as rotation 0
+        if "displaymatrix" in sd or str(sd.get("side_data_type", "")).lower().replace(" ", "") == "displaymatrix":
+            display_matrix = True
     if "rotate" in (video.get("tags") or {}):
         rotation = int(video["tags"]["rotate"])
     if abs(rotation) % 180 == 90:
@@ -96,7 +111,8 @@ def probe(path: str | Path) -> VideoInfo:
         raise MediaError(f"{path.name}: could not read the video duration")
     fps = _ratio(video.get("avg_frame_rate")) or _ratio(video.get("r_frame_rate")) or 25.0
     has_audio = any(s.get("codec_type") == "audio" for s in streams)
-    return VideoInfo(path, duration, w, h, fps, has_audio, rotation)
+    return VideoInfo(path, duration, w, h, fps, has_audio, rotation, str(video.get("codec_name") or ""),
+                     str(video.get("pix_fmt") or ""), display_matrix)
 
 
 def clip_range(info: VideoInfo, start: float | None, end: float | None) -> tuple[float, float]:
@@ -118,15 +134,159 @@ def scaled_size(info: VideoInfo, width: int) -> tuple[int, int]:
     return width, even(width * info.height / info.width)
 
 
-def iter_frames(info: VideoInfo, fps: float, width: int, start: float = 0.0,
-                end: float | None = None, prefetch: int = 8) -> Iterator[tuple[float, np.ndarray]]:
-    """Decode frames at `fps`, scaled to `width` (height keeps the aspect). Yields (t, BGR)."""
-    s, e = clip_range(info, start, end)
-    w, h = scaled_size(info, width)
-    args = [_tool("ffmpeg"), "-v", "error", "-nostdin", "-ss", f"{s:.3f}", "-i", str(info.path),
-            "-t", f"{e - s:.3f}", "-an", "-sn",
-            "-vf", f"fps={fps}:round=up,scale={w}:{h}:flags=area,setsar=1",
-            "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+# ------------------------------------------------------------------ GPU decoding
+# Decoding a 1080p lecture is most of board capture's ffmpeg work and of the low-fps copies made for SAM. Windows'
+# D3D11VA lets the GPU decode instead; the fps filter then runs on the GPU frames, so only the frames used are
+# copied back. It is used only where it gives the very same pixels as software decoding: model answers are cached
+# by the bytes sent (board pieces, SAM's copies), so one changed pixel would mean paying for them again, and
+# different board results.
+
+HWACCEL = "d3d11va"  # tests point this at a name ffmpeg doesn't know, to check the fallback
+# Codecs whose standard fixes the decoded pixels to the bit (integer transforms), so any conforming decoder,
+# GPU or not, must give the same frames. MPEG-2 and MPEG-4 part 2 leave the IDCT's rounding to the decoder.
+_GPU_CODECS = ("h264", "hevc", "vp9", "av1")
+_GPU_PIX_FMTS = ("yuv420p", "yuvj420p")  # 8-bit 4:2:0: the GPU hands it back as nv12, losslessly
+_gpu_ok: dict[tuple, bool] = {}  # (path, size, mtime, probed facts) -> checked result, for this process
+_gpu_lock = threading.Lock()
+_warned: set[str] = set()  # VIDEO_DECODE values already warned about
+_FFMPEG_PREFIX = re.compile(r"^(?:\[[^\]]* @ [^\]]*\]\s*)+(?:Terminating thread with error: )?")
+
+
+def last_line(stderr: bytes) -> str:
+    """The last line ffmpeg printed, without its "[h264 @ 000001c5...]" prefixes: one plain line for the owner."""
+    lines = stderr.decode("utf-8", "replace").strip().splitlines()
+    return _FFMPEG_PREFIX.sub("", lines[-1].strip()) if lines else ""
+
+
+def _gpu_parts(info: VideoInfo) -> tuple[list[str], str]:
+    """Input options and the filters that bring GPU frames back as the software decoder's own pixel format, so
+    scaling and colour conversion after it run exactly the same code as with software decoding. -xerror: damaged
+    data stops the GPU run, so software takes over, rather than the GPU hiding the damage in its own way (software
+    hides it differently)."""
+    return (["-xerror", "-hwaccel", HWACCEL, "-hwaccel_output_format", "d3d11"],
+            f"hwdownload,format=nv12,format={info.pix_fmt},")
+
+
+def decode_args(info: VideoInfo, start: float, dur: float, fps: float, w: int, h: int, gpu: bool = False,
+                overwrite: bool = False) -> list[str]:
+    """ffmpeg up to its output options: `dur` seconds from `start` at `fps`, scaled to w x h. gpu=True decodes
+    with D3D11VA (see gpu_decode_ok)."""
+    pre, back = _gpu_parts(info) if gpu else ([], "")
+    vf = f"fps={fps}:round=up,{back}scale={w}:{h}:flags=area,setsar=1"
+    return [_tool("ffmpeg"), "-v", "error", "-nostdin", *(["-y"] if overwrite else []), *pre,
+            "-ss", f"{start:.3f}", "-i", str(info.path), "-t", f"{dur:.3f}", "-an", "-sn", "-vf", vf]
+
+
+def decode_setting() -> str:
+    """VIDEO_DECODE: "auto" (default; the GPU where it gives the same frames) or "cpu" (never the GPU); words like
+    "off" or "gpu" are understood too (config). Any other value means cpu, with one warning. Read on every call,
+    so a running server picks up a change in .env on its next job."""
+    mode = load_settings().video_decode
+    if mode in ("auto", "cpu"):
+        return mode
+    if mode not in _warned:
+        _warned.add(mode)
+        log.warning("VIDEO_DECODE=%s is not auto or cpu; decoding in software", mode)
+    return "cpu"
+
+
+def _file_key(info: VideoInfo) -> tuple | None:
+    """Which file a check's result belongs to. The probed facts are part of it, so another video copied over this
+    one with the same size and modified time is checked again."""
+    try:
+        st = info.path.stat()
+    except OSError:
+        return None
+    return (str(info.path.resolve()), st.st_size, st.st_mtime_ns, info.duration, info.width, info.height, info.fps,
+            info.codec, info.pix_fmt)
+
+
+def gpu_decode_ok(info: VideoInfo, start: float) -> bool:
+    """Whether to decode this video on the GPU: Windows, a codec and pixel format that can match software, no
+    display matrix (ffmpeg turns and flips software frames, not GPU frames: they came out different), and a check
+    that the frames do match (_same_frames). The check is done once per file in this process. Any failure means
+    software, with one log line."""
+    if (sys.platform != "win32" or info.codec not in _GPU_CODECS or info.pix_fmt not in _GPU_PIX_FMTS
+            or info.rotation % 360 or info.display_matrix or decode_setting() == "cpu"):
+        return False
+    key = _file_key(info)
+    if key is None:
+        return False
+    with _gpu_lock:  # one check per file, even when SAM's chunks and the capture all start at once
+        ok = _gpu_ok.get(key)
+        if ok is None:
+            ok = _same_frames(info, start)
+            if ok is not None:
+                _gpu_ok[key] = ok
+        return bool(ok)
+
+
+def gpu_decode_failed(info: VideoInfo, why: str) -> None:
+    """A GPU run failed after its check passed: software for this file from now on. `why` completes "GPU decoding
+    ...", e.g. "stopped after 9 frames (Invalid data found when processing input)"."""
+    key = _file_key(info)
+    if key is None:
+        return
+    with _gpu_lock:
+        first = _gpu_ok.get(key) is not False
+        _gpu_ok[key] = False
+    if first:
+        log.warning("%s: GPU decoding %s; decoding in software", info.path.name, why)
+
+
+def _same_frames(info: VideoInfo, start: float, n: int = 8) -> bool | None:
+    """n frames at `start`, decoded both ways at full size: True if every timestamp and checksum matches, in the
+    software decoder's pixel format (what SAM's copies are scaled from) and as BGR (which also depends on the
+    colour range and matrix the frames carry). False as well if a frame read asks for the picture to be turned or
+    flipped, which ffmpeg does to software frames only: a start that looks the same flipped (black, say) would hide
+    it from the comparison. The frames read for that are the first of the video and those from the keyframe
+    before `start`, which is where ffmpeg takes it from. None if software gives no frame at `start` (too near the
+    end to tell)."""
+    with tempfile.TemporaryDirectory(prefix="replay-gpu-check-", ignore_cleanup_errors=True) as tmp:
+        bgr = [Path(tmp) / "cpu.framemd5", Path(tmp) / "gpu.framemd5"]
+
+        def args(gpu: bool) -> list[str]:
+            pre, back = _gpu_parts(info) if gpu else ([], "")
+            outs = []
+            for pix_fmt, dest in ((info.pix_fmt, "-"), ("bgr24", str(bgr[gpu]))):
+                outs += ["-an", "-sn", *(["-vf", back.rstrip(",")] if gpu else []), "-frames:v", str(n),
+                         "-fps_mode", "passthrough", "-enc_time_base", "demux", "-pix_fmt", pix_fmt, "-f", "framemd5",
+                         dest]
+            return [_tool("ffmpeg"), "-v", "error", "-nostdin", *pre, "-ss", f"{start:.3f}", "-i", str(info.path),
+                    *outs]
+
+        turned = [_tool("ffprobe"), "-v", "error", "-select_streams", "V", "-read_intervals",
+                  f"%+#1,{start:.3f}%+#{n}", "-show_entries", "frame_side_data=side_data_type", "-of", "csv=p=0",
+                  str(info.path)]
+        procs: list[subprocess.Popen] = []
+        try:
+            procs = [subprocess.Popen(a, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                     for a in (args(False), args(True), turned)]
+            (sw, _), (hw, hw_err), (sides, _) = (p.communicate(timeout=60) for p in procs)
+            if procs[0].returncode != 0 or not any(line and not line.startswith(b"#") for line in sw.splitlines()):
+                return None
+            if procs[2].returncode != 0:
+                why = "could not read the frames' side data"
+            elif b"displaymatrix" in sides.lower().replace(b" ", b""):
+                why = "the video asks for its picture to be turned or flipped"
+            elif procs[1].returncode != 0:
+                why = last_line(hw_err) or "ffmpeg error"
+            elif hw != sw or bgr[1].read_bytes() != bgr[0].read_bytes():
+                why = "frames differ from software decoding"
+            else:
+                return True
+        except (OSError, subprocess.SubprocessError) as e:
+            for p in procs:
+                p.kill()
+                p.wait()
+            why = f"check failed: {e if isinstance(e, OSError) else 'ffmpeg took too long'}"
+    log.info("%s: not decoding on the GPU (%s)", info.path.name, why)
+    return False
+
+
+def _read_frames(args: list[str], w: int, h: int, prefetch: int, status: dict) -> Iterator[np.ndarray]:
+    """BGR frames from an ffmpeg writing rawvideo to stdout. At the end, status gets its exit code ("rc") and the
+    last line it printed ("err")."""
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=w * h * 3 * 4)
     err_chunks: list[bytes] = []
     err_reader = threading.Thread(target=lambda: err_chunks.append(proc.stderr.read()), daemon=True)
@@ -148,29 +308,64 @@ def iter_frames(info: VideoInfo, fps: float, width: int, start: float = 0.0,
 
     pumper = threading.Thread(target=pump, daemon=True)
     pumper.start()
-    k = 0
+    ended = False
     try:
         while True:
             buf = frames.get()
             if buf is None:
                 break
-            yield s + k / fps, np.frombuffer(buf, np.uint8).reshape(h, w, 3)
-            k += 1
+            yield np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+        ended = True
     finally:
         stop.set()
-        if proc.poll() is None:
-            proc.kill()
+        if not ended and proc.poll() is None:
+            proc.kill()  # the caller stopped early
         while pumper.is_alive():
             try:
                 frames.get(timeout=0.1)
             except queue.Empty:
                 pass
         proc.stdout.close()
-        proc.wait()
+        try:
+            status["rc"] = proc.wait(timeout=60)  # at the end of the output: its own exit code, not a kill's
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            status["rc"] = proc.wait()
         err_reader.join(timeout=1)
+        status["err"] = last_line(b"".join(err_chunks))
+
+
+def iter_frames(info: VideoInfo, fps: float, width: int, start: float = 0.0,
+                end: float | None = None, prefetch: int = 8) -> Iterator[tuple[float, np.ndarray]]:
+    """Decode frames at `fps`, scaled to `width` (height keeps the aspect). Yields (t, BGR).
+
+    On the GPU where gpu_decode_ok says it gives the same frames. If the GPU's ffmpeg fails part way, a software
+    run carries on from the next frame: frame k is at start + k/fps and has the pixels software alone gives it.
+    That run starts at `start` like a plain software run and drops the frames already given: starting it later,
+    or dropping them inside ffmpeg, changes which frames ffmpeg's -t lets through at the end."""
+    s, e = clip_range(info, start, end)
+    w, h = scaled_size(info, width)
+    out = ["-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+    k = 0
+    status: dict = {}
+    if gpu_decode_ok(info, s):
+        with closing(_read_frames(decode_args(info, s, e - s, fps, w, h, gpu=True) + out, w, h, prefetch,
+                                  status)) as frames:
+            for frame in frames:
+                yield s + k / fps, frame
+                k += 1
+        if status["rc"] == 0 and k:
+            return
+        if status["rc"] != 0:
+            gpu_decode_failed(info, f"stopped after {k} frames ({status['err'] or 'no message from ffmpeg'})")
+    given = k  # by the GPU run
+    with closing(_read_frames(decode_args(info, s, e - s, fps, w, h) + out, w, h, prefetch, status)) as frames:
+        for i, frame in enumerate(frames):
+            if i >= given:
+                yield s + i / fps, frame
+                k = i + 1
     if k == 0:
-        err = b"".join(err_chunks).decode("utf-8", "replace").strip().splitlines()
-        raise MediaError(f"no frames decoded from {info.path.name}" + (f": {err[-1]}" if err else ""))
+        raise MediaError(f"no frames decoded from {info.path.name}" + (f": {status['err']}" if status["err"] else ""))
 
 
 def grab_frame(info: VideoInfo, t: float, width: int) -> np.ndarray:

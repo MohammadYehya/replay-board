@@ -11,7 +11,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .media import MediaError, VideoInfo, _tool, clip_range, grab_frame, scaled_size
+from .media import (MediaError, VideoInfo, clip_range, decode_args, gpu_decode_failed, gpu_decode_ok, grab_frame,
+                    last_line, scaled_size)
 from .meta_api import MetaAPIError, MetaClient, paste_mask
 
 BOARD_PROMPTS = {"white": ["whiteboard", "blackboard", "chalkboard", "projector screen"],
@@ -141,15 +142,23 @@ class PersonTrack:
 
 
 def _encode_chunk(info: VideoInfo, start: float, dur: float, fps: float, width: int, out: Path) -> None:
+    """The low-fps copy SAM gets for one chunk. Decoded on the GPU where media.gpu_decode_ok found that gives the
+    same frames: x264 then writes the same bytes, so SAM answers cached for this copy still apply. If the GPU run
+    fails, the copy is made again in software."""
     w, h = scaled_size(info, width)
-    args = [_tool("ffmpeg"), "-v", "error", "-nostdin", "-y", "-ss", f"{start:.3f}", "-i", str(info.path),
-            "-t", f"{dur:.3f}", "-an", "-sn", "-vf", f"fps={fps}:round=up,scale={w}:{h}:flags=area,setsar=1",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
-            "-threads", "4", "-movflags", "+faststart", str(out)]
-    res = subprocess.run(args, capture_output=True)
+    enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
+           "-threads", "4", "-movflags", "+faststart", str(out)]
+    res = None
+    if gpu_decode_ok(info, start):
+        res = subprocess.run(decode_args(info, start, dur, fps, w, h, gpu=True, overwrite=True) + enc,
+                             capture_output=True)
+        if res.returncode != 0 or not out.exists():
+            gpu_decode_failed(info, f"for SAM's copy failed ({last_line(res.stderr) or 'no message from ffmpeg'})")
+            res = None
+    if res is None:
+        res = subprocess.run(decode_args(info, start, dur, fps, w, h, overwrite=True) + enc, capture_output=True)
     if res.returncode != 0 or not out.exists():
-        err = res.stderr.decode("utf-8", "replace").strip().splitlines()
-        raise MediaError(f"could not make the low-fps copy for SAM: {err[-1] if err else 'ffmpeg error'}")
+        raise MediaError(f"could not make the low-fps copy for SAM: {last_line(res.stderr) or 'ffmpeg error'}")
 
 
 def track_people(client: MetaClient, info: VideoInfo, start: float = 0.0, end: float | None = None,
