@@ -13,6 +13,7 @@ import { formatTime, isWrittenLine, schedule, seekTarget, typesetIds } from './t
 import { badgePlaces, boxOverlap, canPopout, drawingOnBoard, explainedAt, type BadgeSpot, type MadeScene } from './popoutable';
 import { preloadView3D } from './popoutLoader';
 import { labelText } from './sceneText';
+import { SliceQueue } from './sliceQueue';
 import { kindLabel, sameReading, tipTex } from './tip';
 
 export interface BoardHandle {
@@ -45,6 +46,12 @@ const HIGHLIGHT_MS = 2400;
 const PILL_PX: [number, number] = [104, 23];
 const BADGE_PX: [number, number] = [46, 20];
 const BADGE_GAP_PX = 3;
+
+/** The typeset readings waiting to be fitted (by their inner element), fitted a slice at a time between frames. */
+const fitQueue = new SliceQueue<HTMLElement>();
+
+/** Top of a text block th high in a box h high, centred on the ink's centre cy (0..1) and kept inside the box. */
+const placeTop = (cy: number, h: number, th: number) => Math.min(Math.max(0, cy * h - th / 2), Math.max(0, h - th));
 
 /** Largest font size (board px, at most maxFont) at which the content fits the piece's box. */
 function fitText(inner: HTMLElement, w: number, h: number, maxFont: number): number {
@@ -136,9 +143,27 @@ const TypesetPiece = memo(function TypesetPiece(props: {
   const text = writtenText(piece.read?.text ?? '') || latex;
   const candidates = useMemo(() => candidatesFor(latex, text), [latex, text]);
   const registerEl = useCallback((el: HTMLDivElement | null) => register(piece.id, el), [register, piece.id]);
+  // The fitted text block's height, and where the ink's centre is: the block is placed again when the centre arrives
+  // (with the piece's image) without fitting it again.
+  const blockH = useRef(0);
+  const cyRef = useRef(cy);
+  cyRef.current = cy;
+  const fitted = useRef(false);
   useLayoutEffect(() => {
     const inner = innerRef.current;
     if (!inner) return;
+    // Not legible until fitted: the handwriting stands in meanwhile (typeset mode is off when the player opens).
+    if (!fitted.current) onFit(piece.id, false);
+    // Fitting forces a few layouts per reading: it runs in slices between frames (fitQueue), not in the commit that
+    // first shows the player.
+    fitQueue.add(inner, () => fit(inner));
+    return () => fitQueue.cancel(inner);
+  }, [piece.id, w, h, candidates, maxFont, minFont, fontsVersion, onFit]);
+  useLayoutEffect(() => {
+    const inner = innerRef.current;
+    if (inner && blockH.current) inner.style.top = `${placeTop(cy, h, blockH.current)}px`;
+  }, [cy, h]);
+  function fit(inner: HTMLDivElement) {
     // The inner element is filled here, not by React: try each layout and keep the one that fits largest.
     // Unwrapped layouts scale linearly with the font size, so one measurement at a reference size is enough;
     // only wrapping text needs the (costlier) search.
@@ -184,11 +209,12 @@ const TypesetPiece = memo(function TypesetPiece(props: {
       }
     }
     // Centre the text block on where the ink actually is (a box can hold more than its main line).
-    const th = inner.offsetHeight;
-    inner.style.top = `${Math.min(Math.max(0, cy * h - th / 2), Math.max(0, h - th))}px`;
+    blockH.current = inner.offsetHeight;
+    inner.style.top = `${placeTop(cyRef.current, h, blockH.current)}px`;
+    fitted.current = true;
     // Too small to read: keep the handwriting for this piece instead.
     onFit(piece.id, size >= minFont);
-  }, [piece.id, w, h, cy, candidates, maxFont, minFont, fontsVersion, onFit]);
+  }
   // Opacity, visibility and the left-to-right reveal are set every frame by BoardRenderer.
   return (
     <div className="ts-piece" ref={registerEl} style={{ left: x, top: y, width: w, height: h, color: ink }}>

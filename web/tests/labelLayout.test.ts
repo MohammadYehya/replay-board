@@ -191,6 +191,27 @@ test("a label that has to move never lands on an angle's mark (test2 #7: beta's 
   assert.deepEqual(e, { dx: 0, dy: 0, dim: true });
 });
 
+test('no label stays under Reset view, even in its own place: it moves off it, or is dimmed if it cannot move', () => {
+  // Reset view over the stage's top right corner (the button and 6 px round it), as in "Try it" at 1080 x 1080, where
+  // test-full's "right side" sat at the top right of its curve, partly under the button
+  const reset = { x: 600 - 111, y: 0, w: 111, h: 44 };
+  const right = box(458, 30, 64, 18);
+  const [a] = placeLabels([right], { ...STAGE, block: [reset] });
+  assert.equal(a.dim, false);
+  const r = { x: 458 + a.dx, y: 30 + a.dy, w: 64, h: 18 };
+  assert.ok(r.x + r.w <= reset.x || r.y >= reset.y + reset.h, `off the button: ${JSON.stringify(a)}`);
+  assert.ok(Math.hypot(a.dx, a.dy) <= 44, 'within reach');
+  // without it, the label stays where it is
+  assert.deepEqual(placeLabels([right], STAGE)[0], { dx: 0, dy: 0, dim: false });
+  // a label that cannot move (an axis number) is dimmed there; one clear of it is untouched
+  assert.deepEqual(placeLabels([box(500, 10, 30, 14, false)], { ...STAGE, block: [reset] })[0], { dx: 0, dy: 0, dim: true });
+  assert.deepEqual(placeLabels([box(300, 10)], { ...STAGE, block: [reset] })[0], { dx: 0, dy: 0, dim: false });
+  // and one nudged off another label never goes onto it
+  const [, c] = placeLabels([box(430, 60), box(440, 64)], { ...STAGE, block: [reset] });
+  assert.equal(c.dim, false);
+  assert.ok(!(440 + c.dx + 40 > reset.x && 64 + c.dy < reset.h), JSON.stringify(c));
+});
+
 test('a label slides to its new place, starting and ending gently, never past it, and ends exactly on it (no hop)', () => {
   // test2 #4: placed afresh once the drawing was still, a label hopped up to 32 px in one frame
   const to = { dx: 0, dy: -32 };

@@ -13,14 +13,14 @@ import threading
 import traceback
 import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 from urllib.parse import urlsplit
 
 import anyio
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from . import ask
 from .config import ROOT
@@ -35,11 +35,12 @@ NO_CACHE = {"Cache-Control": "no-cache"}
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
 
-def _process(job_dir: Path, video: Path, start, end):
-    """One queued job. The pipeline reports its own failures, except those before it starts its status (a bad
-    file, a start past the end): those are written here, or the job would stay 'queued' for good."""
+def _process(job_dir: Path, video: Path, start, end, name: str | None = None):
+    """One queued job (name: the uploaded file's own name; it is saved as upload.mp4). The pipeline reports its own
+    failures, except those before it starts its status (a bad file, a start past the end): those are written here,
+    or the job would stay 'queued' for good."""
     try:
-        run(video, job_dir, start, end, log=lambda m: None)
+        run(video, job_dir, start, end, log=lambda m: None, name=name)
     except Exception as e:
         path = job_dir / "status.json"
         st = _read_json(path) if path.exists() else {}
@@ -137,7 +138,7 @@ async def create_job(file: UploadFile = File(...), start: float | None = Form(No
         (d / "deck.pdf").write_bytes(await deck.read())
     (d / "status.json").write_text(json.dumps({"state": "queued", "error": None, "name": name, "stages": {}}),
                                    encoding="utf-8")
-    _work.put((d, upload, start, end))
+    _work.put((d, upload, start, end, name))
     return {"id": job_id}
 
 
@@ -159,6 +160,60 @@ def job_replay(job_id: str):
     if not data:
         raise HTTPException(503, "replay.json is being written; try again")
     return JSONResponse(data, headers=NO_CACHE)
+
+
+_posters: dict[tuple, bytes] = {}
+_posters_lock = threading.Lock()
+
+
+@app.get("/api/jobs/{job_id}/poster.jpg")
+def job_poster(job_id: str, t: float | None = None):
+    """The video's own frame at t (default: where the processed part starts), shown in the video's place until the
+    browser has the first frame. A fragmented MP4 (a phone's or OBS's recording: 88 fragments in test-full's 8
+    minutes) stays black for 2-3 s while Chrome reads every fragment's header, one request each; ffmpeg reads the
+    frame from the local file in about 0.3 s. Kept in memory per file and time; 404 when there is no frame to show."""
+    import cv2
+
+    from .core import media
+
+    d = _job_dir(job_id).resolve()
+    video = _read_json(d / "replay.json").get("video") or {}
+    name = video.get("file")
+    p = (d / name).resolve() if isinstance(name, str) and name else None
+    if p is None or d not in p.parents or not p.is_file():
+        raise HTTPException(404, "no video")
+    st = p.stat()
+
+    def num(v):
+        return float(v) if isinstance(v, (int, float)) and v == v and abs(v) != float("inf") else None
+
+    start = max(0.0, num(video.get("start")) or 0.0)
+    end = num(video.get("end")) or num(video.get("duration"))
+    if t is None or t != t:  # none (or NaN): the start
+        t = start
+    # Where the player opens: never outside the processed part, as the player clamps it (gest-test opened at ?t=0
+    # showed the 0:00 frame while the player started at its clip's 6:20).
+    t = max(start, t)
+    if end is not None:
+        t = min(t, max(start, end))
+    key = (str(p), st.st_mtime_ns, st.st_size, round(t, 1))
+    jpg = _posters.get(key)
+    if jpg is None:
+        try:
+            info = media.probe(p)
+            frame = media.grab_frame(info, t, min(1280, info.width))
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        except Exception:
+            ok = False
+        if not ok:
+            raise HTTPException(404, "no frame")
+        jpg = buf.tobytes()
+        with _posters_lock:
+            if len(_posters) >= 64:
+                _posters.clear()
+            _posters[key] = jpg
+    # kept by the browser for a few minutes: the progress page fetches it before the player asks for it
+    return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
 
 
 @app.get("/api/jobs/{job_id}/notes.md")
@@ -422,14 +477,54 @@ def job_slides_pptx(job_id: str):
                     headers={"Content-Disposition": export.content_disposition(data["title"]), **NO_CACHE})
 
 
+_RANGE = re.compile(r"bytes=(\d*)-(\d*)")
+
+
+async def _file_part(path: Path, start: int, end: int) -> AsyncIterator[bytes]:
+    """Bytes [start, end) of a file, read on the event loop: a read from the local disk takes a fraction of a
+    millisecond, a hop to a worker thread about one on Windows."""
+    with open(path, "rb") as f:
+        f.seek(start)
+        while start < end:
+            # Let the server see a browser that went away: a video element drops most of what it asks for (it
+            # reads a fragment's header and asks again further on), and uvicorn then drops each chunk sent without
+            # waiting, so this loop would read on to the end of the file before the next request is even accepted.
+            await anyio.sleep(0)
+            chunk = f.read(min(1 << 16, end - start))
+            if not chunk:
+                return
+            start += len(chunk)
+            yield chunk
+
+
 @app.get("/api/jobs/{job_id}/files/{path:path}")
-def job_file(job_id: str, path: str):
+async def job_file(job_id: str, path: str, request: Request):
     d = _job_dir(job_id).resolve()
     p = (d / path).resolve()
     if d not in p.parents or not p.is_file():
         raise HTTPException(404, "no such file")
+    st = p.stat()
     # Revalidate: a re-processed job rewrites its piece images under the same names.
-    return FileResponse(p, headers=NO_CACHE)  # supports Range requests, so the video can seek
+    whole = FileResponse(p, headers=NO_CACHE, stat_result=st)
+    # One plain byte range (what a video element asks for) is answered here, without the hops to worker threads
+    # FileResponse makes (8 ms a request in all, 2 ms here): Chrome opens a fragmented MP4 (a phone's or OBS's
+    # recording) with one request per fragment, 88 in a row for test-full's 8 minutes, and its first frame came
+    # about 0.3 s sooner (2.6 s instead of 2.9-3.3; the poster covers the rest). Anything else (no range, several,
+    # If-Range) goes to FileResponse, which handles them all.
+    m = _RANGE.fullmatch(request.headers.get("range", "").strip())
+    if not m or not (m[1] or m[2]) or "if-range" in request.headers:
+        return whole
+    size = st.st_size
+    if m[1]:
+        start, end = int(m[1]), (min(size, int(m[2]) + 1) if m[2] else size)
+    else:  # the last n bytes
+        start, end = max(0, size - int(m[2])), size
+    if start >= end:
+        return JSONResponse({"detail": "range not satisfiable"}, status_code=416,
+                            headers={"Content-Range": f"bytes */{size}", **NO_CACHE})
+    headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in whole.raw_headers}
+    headers.update({"content-range": f"bytes {start}-{end - 1}/{size}", "content-length": str(end - start)})
+    return StreamingResponse(_file_part(p, start, end), status_code=206, headers=headers)
 
 
 # The built player (web/dist), if present, at /

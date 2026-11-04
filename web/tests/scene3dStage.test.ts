@@ -3,7 +3,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CylinderGeometry, Mesh, Vector3 } from 'three';
-import { axisScales, CURVE_LABEL_AT, dashesGeom, DASH, EMPH, GAP, placeRod } from '../src/player/scene3dStage.ts';
+import {
+  axisScales, cornerInsets, cornerSide, CURVE_LABEL_AT, dashesGeom, DASH, EMPH, fitDistanceOf, fullViewOf, GAP, placeRod,
+  type Insets,
+} from '../src/player/scene3dStage.ts';
 import { sampleSegments } from '../src/player/plotMath.ts';
 
 /** The x of every vertex the index uses (the faces actually drawn). */
@@ -91,4 +94,57 @@ test('a tall surface over x and y gets its z axis drawn as long as x and y', () 
 test('a step emphasises its lines and names curves away from their middle', () => {
   assert.equal(EMPH, 1.3);
   assert.ok(CURVE_LABEL_AT >= 0.8 && CURVE_LABEL_AT <= 0.85);
+});
+
+// "Try it" at 1368 x 825: the stage is 702 x 340, the sliders cover its left 256 px and the caption its bottom 60;
+// Reset view covers the top right corner, 111 px in and 44 down.
+const STAGE = { w: 702, h: 340, fov: 36 };
+const EDGES: Insets = { top: 0, right: 0, bottom: 60, left: 256 };
+const RESET = { width: 111, height: 44 };
+const box = (x: number, y: number) => {
+  const pts: Vector3[] = [];
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) pts.push(new Vector3(sx * x, sy * y, sz * 0.3));
+  return pts;
+};
+const FRONT = new Vector3(0, 0, 1);
+const O = new Vector3();
+/** Pixels per world unit with the corner kept clear from that side. */
+const scaleFrom = (pts: Vector3[], side: 'top' | 'right') => {
+  const ins = cornerInsets(EDGES, RESET, side);
+  return fullViewOf(STAGE.w, STAGE.h, ins).h / fitDistanceOf(pts, O, FRONT, STAGE.fov, STAGE.w, STAGE.h, ins);
+};
+const sideFor = (pts: Vector3[], current: 'top' | 'right' = 'top') =>
+  cornerSide(pts, O, FRONT, STAGE.fov, STAGE.w, STAGE.h, EDGES, RESET, current);
+
+test('a tall drawing passes Reset view on its left, a wide one below it: whichever shows it larger', () => {
+  // test2's tall unit cell: a band across the top took 22% of its size; one down the right costs it nothing
+  const tall = box(0.5, 1.2);
+  assert.equal(sideFor(tall), 'right');
+  assert.ok(scaleFrom(tall, 'right') > scaleFrom(tall, 'top') * 1.1);
+  const free = fullViewOf(STAGE.w, STAGE.h, EDGES).h / fitDistanceOf(tall, O, FRONT, STAGE.fov, STAGE.w, STAGE.h, EDGES);
+  assert.ok(Math.abs(scaleFrom(tall, 'right') - free) < 1e-9, 'as large as with nothing over the corner');
+  // a wide, flat drawing: the band down the right would shrink it, the one across the top does not
+  const wide = box(1.6, 0.3);
+  assert.equal(sideFor(wide), 'top');
+  assert.equal(sideFor(wide, 'right'), 'top');
+  assert.ok(scaleFrom(wide, 'top') > scaleFrom(wide, 'right'));
+  // the band is the corner box's: across the top as deep as it reaches down, or down the right as wide as it reaches in
+  assert.deepEqual(cornerInsets(EDGES, RESET, 'top'), { ...EDGES, top: 44 });
+  assert.deepEqual(cornerInsets(EDGES, RESET, 'right'), { ...EDGES, right: 111 });
+  assert.deepEqual(cornerInsets({ ...EDGES, top: 70 }, RESET, 'top'), { ...EDGES, top: 70 }); // already clear
+});
+
+test('the side changes only when the other one is clearly better, so the drawing does not hop as a slider moves', () => {
+  // a drawing about as large either way: it stays on the side it is on
+  let near: Vector3[] | null = null;
+  for (let y = 0.3; y <= 1.6 && !near; y += 0.01) {
+    const pts = box(0.8, y);
+    const r = scaleFrom(pts, 'right') / scaleFrom(pts, 'top');
+    if (r > 1 && r < 1.02) near = pts;
+  }
+  assert.ok(near, 'a drawing the two sides show within 2% of each other');
+  assert.equal(sideFor(near!, 'top'), 'top');
+  assert.equal(sideFor(near!, 'right'), 'right');
+  // nothing over the corner: nothing to choose
+  assert.equal(cornerSide(box(0.5, 1.2), O, FRONT, STAGE.fov, STAGE.w, STAGE.h, EDGES, { width: 0, height: 0 }, 'top'), 'top');
 });

@@ -119,3 +119,28 @@ test('labels are cut on a word boundary', () => {
   assert.ok(cut.endsWith('…'));
   assert.ok(long.startsWith(cut.slice(0, -1)));
 });
+
+test('the Ask drawer reopens by itself only when it was left open in this page, or the Notes page asked', async () => {
+  const tray = await import('../src/ask/tray.ts');
+  const store = new MemoryStorage();
+  assert.equal(tray.askStartsOpen(store, 'job-1'), false); // a first opening, or a reload: closed
+  tray.rememberAskOpen('job-1', true); // the student opened it, then went to Slides and came back
+  assert.equal(tray.askStartsOpen(store, 'job-1'), true);
+  assert.equal(tray.askStartsOpen(store, 'job-2'), false); // per lecture
+  assert.equal(store.map.size, 0); // kept in memory: a reload of the page forgets it
+  tray.rememberAskOpen('job-1', false);
+  assert.equal(tray.askStartsOpen(store, 'job-1'), false);
+  // the Notes page's "Ask" asks for one opening
+  store.setItem(tray.openKey('job-3'), '1');
+  assert.equal(tray.askStartsOpen(store, 'job-3'), true);
+  tray.takeAskRequest(store, 'job-3');
+  assert.equal(tray.askStartsOpen(store, 'job-3'), false);
+  // blocked storage: closed, and nothing throws
+  const blocked = { getItem: () => { throw new Error('SecurityError'); }, removeItem: () => { throw new Error('SecurityError'); } };
+  assert.equal(tray.askStartsOpen(blocked, 'job-4'), false);
+  assert.doesNotThrow(() => tray.takeAskRequest(blocked as never, 'job-4'));
+  // a fresh copy of the module is a reloaded page: nothing is left open
+  tray.rememberAskOpen('job-5', true);
+  const reloaded = await import('../src/ask/tray.ts?reload');
+  assert.equal(reloaded.askStartsOpen(store, 'job-5'), false);
+});

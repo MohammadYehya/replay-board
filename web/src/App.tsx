@@ -15,9 +15,12 @@ export function App() {
     window.addEventListener('hashchange', on);
     return () => window.removeEventListener('hashchange', on);
   }, []);
+  // The tab names the lecture once its page knows the name (JobPage, NotesPage, SlidesPage), never the job's folder
+  // id ("zylinder-woche-3-entwurf-84fec595"); until then, the app's.
+  const pageKey = route.page === 'home' ? 'home' : `${route.page}/${route.id}`;
   useEffect(() => {
-    document.title = route.page === 'home' ? 'Replay Board' : `${route.id} · Replay Board`;
-  }, [route]);
+    document.title = 'Replay Board';
+  }, [pageKey]);
   // A file dropped outside the upload page's handler must never replace the app with the file itself.
   useEffect(() => {
     const block = (e: DragEvent) => {

@@ -105,9 +105,16 @@ Measured on an 8-minute 1080p board lecture, nothing cached, on a 4-core laptop:
 | API cost | $1.17: base $0.39 (SAM person masks $0.19) + pointing gestures $0.78 (SAM hands $0.29, Muse Spark judging 74 candidates $0.49) |
 | First replay ready | 5.0 min |
 | Word times refined (MMS) | 5.8 min (the replay is rewritten in place; the player picks it up) |
-| Board capture alone | 3–12× real time, depending on what else the machine is doing |
+| Board capture alone | 3–9× real time on 1080p, depending on what else the machine is doing |
 
 That is about $9 per hour of lecture; with `--no-gestures` (no pointing on the board) about $3 per hour.
+
+An hour, measured for $0 on a 60-minute 1080p file with the model calls replaced by saved answers (gestures off):
+capture took 9.0–9.8 min (6.1–6.6× real time), the first replay was written after 12.5 min and the MMS word times
+after 26.4 min. Adding the model calls' logged latencies gives about 16–18 min to the first replay and about 30 min
+to the final one; pointing gestures add about 4–7 min. Peak memory was 7.6 GB, most of it the MMS aligner. The
+player shows the hour-long replay's board and transcript (10,060 words, 252 pieces) in under 2 s and seeks in
+under 0.5 s.
 Re-running a lecture is free: every model answer is cached.
 
 ## Run it (Windows, PowerShell)
@@ -198,8 +205,9 @@ data/           videos, job folders and the model cache (never committed)
 
 ## Limits
 - The camera must stay still (a tripod or a fixed classroom camera). Panning or zooming cameras are not handled.
-- MMS word alignment runs on the CPU at 1–3× real time; for long lectures the replay appears first with
-  turn-level word times and is refined in place.
+- MMS word alignment runs on the CPU at about 2–4× real time; for long lectures the replay appears first with
+  turn-level word times and is refined in place. It needs a lot of memory (7.6 GB at its peak on an hour), so
+  use a machine with 16 GB.
 - Handwriting reading is as good as the frame: very small or blurry writing may be read partly.
 
 ## What's next

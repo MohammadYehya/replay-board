@@ -6,7 +6,9 @@ import { askMuse, clearChat, getChat } from '../api';
 import { texHtml } from '../player/tex';
 import { formatTime } from '../player/timing';
 import type { AskRef, AskTurn } from '../types';
-import { askRefOf, filterGroups, savedEntry, type LectureIndex, type LectureItem } from './items';
+import {
+  askRefOf, entryLatex, entryTime, filterGroups, savedEntry, type LectureIndex, type LectureItem,
+} from './items';
 import { parseMarkdown } from './markdown';
 import { costLabel, historyFor, QUESTION_MAX, requestSelection } from './protocol';
 import { renderBlocks, type RenderContext } from './render';
@@ -60,11 +62,15 @@ const KIND_NAMES: Record<string, string> = {
   moment: 'Moment',
 };
 
-/** A chip for an attached item: label and time; clicking it shows the item in the lecture. */
-function Chip({ entry, onOpen, onRemove }: { entry: TrayEntry; onOpen(e: TrayEntry): void; onRemove?(e: TrayEntry): void }) {
+/** A chip for an attached item: label and time; clicking it shows the item in the lecture. Writing with a formula is
+ *  typeset as Browse shows it (the board's raw text, like "A=P(1+r)^n", reads badly next to it). */
+function Chip(props: { entry: TrayEntry; index: LectureIndex; onOpen(e: TrayEntry): void; onRemove?(e: TrayEntry): void }) {
+  const { entry, index, onOpen, onRemove } = props;
   const kind = entry.item.kind;
   const what = KIND_NAMES[kind] ?? 'Item';
-  const time = formatTime(entry.t);
+  const time = formatTime(entryTime(entry, index)); // where a click jumps (openEntry)
+  const latex = entryLatex(entry, index);
+  const html = latex ? texHtml(latex) : null;
   return (
     <span className={`ask-chip kind-${kind}`}>
       <button
@@ -74,7 +80,11 @@ function Chip({ entry, onOpen, onRemove }: { entry: TrayEntry; onOpen(e: TrayEnt
         title={`${what}: ${entry.label} · ${time}`}
       >
         <KindIcon kind={kind} />
-        <span className="ask-chip-label">{entry.label}</span>
+        {html ? (
+          <span className="ask-chip-label ask-chip-math" dangerouslySetInnerHTML={{ __html: html }} />
+        ) : (
+          <span className="ask-chip-label">{entry.label}</span>
+        )}
         {/* a saved moment is labelled "The board at 3:20" already */}
         {!entry.label.endsWith(time) && <span className="ask-chip-time">{time}</span>}
       </button>
@@ -152,7 +162,7 @@ function Turn(props: {
         {attached > 0 && (
           <div className="ask-q-items" aria-label="Attached">
             {turn.entries.map((e) => (
-              <Chip key={itemKey(e.item)} entry={e} onOpen={onOpenEntry} />
+              <Chip key={itemKey(e.item)} entry={e} index={index} onOpen={onOpenEntry} />
             ))}
           </div>
         )}
@@ -668,7 +678,7 @@ export const AskDrawer = memo(function AskDrawer(props: Props) {
             </div>
             <div className="ask-chips">
               {tray.map((e) => (
-                <Chip key={itemKey(e.item)} entry={e} onOpen={openEntry} onRemove={removeFromTray} />
+                <Chip key={itemKey(e.item)} entry={e} index={index} onOpen={openEntry} onRemove={removeFromTray} />
               ))}
             </div>
           </div>

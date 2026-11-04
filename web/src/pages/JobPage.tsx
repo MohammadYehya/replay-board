@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getJob, getReplay } from '../api';
+import { getJob, getReplay, warmPoster } from '../api';
 import { Logo, Player } from '../player/Player';
 import { formatTime } from '../player/timing';
 import type { JobStatus, Replay, StageStatus } from '../types';
@@ -209,6 +209,7 @@ export function JobPage({ jobId, startAt = null }: { jobId: string; startAt?: nu
         // Open the player as soon as a replay exists, even while the job still refines it (word times): the
         // player watches the job itself and swaps in the rewritten replay.
         if (st.ready) {
+          warmPoster(jobId, startAt); // the video's first frame, before the player's own requests queue it
           try {
             const r = await getReplay(jobId, ctrl.signal);
             if (!stopped) setReplay(r);
@@ -242,6 +243,13 @@ export function JobPage({ jobId, startAt = null }: { jobId: string; startAt?: nu
       window.clearTimeout(timer);
     };
   }, [jobId]);
+
+  // The tab: the lecture's subject once the replay names it (the player's title), else the file's own name.
+  const subject = replay?.subject?.trim();
+  const tabName = subject ? subject.charAt(0).toUpperCase() + subject.slice(1) : status?.name;
+  useEffect(() => {
+    if (tabName) document.title = `${tabName} · Replay Board`;
+  }, [tabName]);
 
   if (replay) {
     const running = status ? status.state === 'running' || status.state === 'queued' : undefined;

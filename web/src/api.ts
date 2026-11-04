@@ -8,6 +8,25 @@ export function jobFileUrl(jobId: string, path: string): string {
   return `/api/jobs/${encodeURIComponent(jobId)}/files/${clean}`;
 }
 
+/** The video's own frame where the player opens (t seconds, or by default where the processed part starts), which
+ *  the video element shows until it has its first frame: a long fragmented MP4 kept it black for 2-3 s
+ *  (app/server.py job_poster). */
+export function posterUrl(jobId: string, t?: number | null): string {
+  const base = `/api/jobs/${encodeURIComponent(jobId)}/poster.jpg`;
+  return t != null && Number.isFinite(t) ? `${base}?t=${Math.max(0, Math.round(t * 10) / 10)}` : base;
+}
+
+const warmed = new Set<string>();
+
+/** Fetch the poster before the player asks for it: the player's first requests (a hundred or more board images on
+ *  a long lecture) would queue it behind them. */
+export function warmPoster(jobId: string, t?: number | null): void {
+  const url = posterUrl(jobId, t);
+  if (warmed.has(url) || typeof Image === 'undefined') return;
+  warmed.add(url);
+  new Image().src = url;
+}
+
 /** One plain line for the owner, never a stack trace. */
 async function errorLine(r: Response): Promise<string> {
   try {

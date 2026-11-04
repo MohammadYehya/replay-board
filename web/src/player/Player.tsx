@@ -1,10 +1,12 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { getJob, getMadeScenes, getReplay, jobFileUrl } from '../api';
+import { getJob, getMadeScenes, getReplay, jobFileUrl, posterUrl } from '../api';
 import { AskDrawer } from '../ask/AskDrawer';
 import { SparkIcon } from '../ask/icons';
 import { lectureIndex } from '../ask/items';
 import { spanEntry, type SpanPick } from '../ask/selection';
-import { addEntry, loadTray, openKey, saveTray, session, TRAY_MAX, type TrayEntry } from '../ask/tray';
+import {
+  addEntry, askStartsOpen, loadTray, rememberAskOpen, saveTray, session, takeAskRequest, TRAY_MAX, type TrayEntry,
+} from '../ask/tray';
 import { SlidesIcon } from '../slides/icons';
 import type { AskRef, BoardLine, Piece, Replay, SlideElement } from '../types';
 import { Board, type BoardHandle } from './Board';
@@ -126,14 +128,11 @@ export function Player({
   );
 
   // Ask Muse: the drawer (kept mounted once opened, so a conversation survives closing it) and the tray of things
-  // attached to the next question, kept per lecture in sessionStorage.
-  const [askOpen, setAskOpen] = useState(() => {
-    try {
-      return session()?.getItem(openKey(jobId)) === '1';
-    } catch {
-      return false;
-    }
-  });
+  // attached to the next question, kept per lecture in sessionStorage. The drawer opens by itself only when the Notes
+  // page's "Ask" sent the student here, or when it was left open before going to Slides or Notes: never after a
+  // reload (pressing A to open it then closed it).
+  const [askOpen, setAskOpen] = useState(() => askStartsOpen(session(), jobId));
+  useEffect(() => takeAskRequest(session(), jobId), [jobId]);
   const [askMounted, setAskMounted] = useState(askOpen);
   const [askFocus, setAskFocus] = useState(0);
   const [tray, setTrayState] = useState<TrayEntry[]>(() => loadTray(session(), jobId));
@@ -207,6 +206,38 @@ export function Player({
     };
   }, [jobId, refining]);
 
+  // The poster: the video's own frame where it opens (the server clamps the time to the processed part, as
+  // onLoadedMetadata does), until the video has a frame of its own. A move before then (a chapter clicked in the first
+  // seconds of a long fragmented MP4, while Chrome still reads its fragments) shows the frame moved to, fetched first so
+  // the one before stays until it is there: the opening frame stayed up for seconds while the board and transcript
+  // were at 2:56. The clock below sees every move (no "seeking" event comes before the video has its metadata).
+  const [poster, setPoster] = useState<string | undefined>(() => posterUrl(jobId, startAt));
+  const hadFrame = useRef(false);
+  /** The player has moved the video to startAt (onLoadedMetadata): before that its clock reads 0, not a move. */
+  const startedAt = useRef(false);
+  const posterAt = useRef(Math.min(Math.max(startAt ?? clipStart, clipStart), clipEnd));
+  const posterTimer = useRef(0);
+  const followPoster = useCallback(
+    (now: number) => {
+      const t = Math.min(Math.max(now, clipStart), clipEnd);
+      if (hadFrame.current || Math.abs(t - posterAt.current) < 0.05) return;
+      posterAt.current = t;
+      window.clearTimeout(posterTimer.current);
+      posterTimer.current = window.setTimeout(() => {
+        const url = posterUrl(jobId, t);
+        const show = (to: string | undefined) => {
+          if (!hadFrame.current && posterAt.current === t) setPoster(to);
+        };
+        const img = new Image();
+        img.onload = () => show(url);
+        img.onerror = () => show(undefined); // black, rather than a frame from somewhere else
+        img.src = url;
+      }, 120); // a drag along the bar asks for the frame it stops at
+    },
+    [jobId, clipStart, clipEnd],
+  );
+  useEffect(() => () => window.clearTimeout(posterTimer.current), []);
+
   // One clock: the video's currentTime drives the board and the transcript, even while paused or scrubbing.
   useEffect(() => {
     let raf = 0;
@@ -226,6 +257,7 @@ export function Player({
         }
         prev = t;
         timeRef.current = t;
+        if (!hadFrame.current && (startAt == null || startedAt.current)) followPoster(t);
         if (!popoutOpen.current) boardRef.current?.render(t); // the 3D view reads timeRef itself
         slidesRef.current?.render(t);
         const up = lastStartedWord(words, t);
@@ -242,7 +274,7 @@ export function Player({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [words, wordTurn, turns, chapters, clipEnd]);
+  }, [words, wordTurn, turns, chapters, clipEnd, followPoster, startAt]);
 
   useEffect(() => {
     if (!toast) return;
@@ -308,12 +340,7 @@ export function Player({
   );
   useEffect(() => saveTray(session(), jobId, tray), [jobId, tray]);
   useEffect(() => {
-    try {
-      if (askOpen) session()?.setItem(openKey(jobId), '1');
-      else session()?.removeItem(openKey(jobId));
-    } catch {
-      /* storage blocked: the drawer just won't reopen by itself after a reload */
-    }
+    rememberAskOpen(jobId, askOpen);
     if (askOpen) setAskMounted(true);
   }, [askOpen, jobId]);
   useEffect(() => {
@@ -450,7 +477,6 @@ export function Player({
       v.currentTime = Math.min(Math.max(startAt, clipStart), clipEnd);
     }
   };
-  const startedAt = useRef(false);
 
   const viewSize = board?.size ?? slides?.size;
   const boardAspect = viewSize && viewSize[0] > 0 && viewSize[1] > 0 ? viewSize[0] / viewSize[1] : 16 / 9;
@@ -549,13 +575,17 @@ export function Player({
               <video
                 ref={videoRef}
                 src={jobFileUrl(jobId, replay.video.file)}
+                poster={poster}
                 controls
                 preload="auto"
                 playsInline
                 onLoadedMetadata={onLoadedMetadata}
                 onPlay={() => setPlaying(true)}
                 onPause={() => setPlaying(false)}
-                onLoadedData={() => setVideoError(null)}
+                onLoadedData={() => {
+                  hadFrame.current = true;
+                  setVideoError(null);
+                }}
                 onError={(e) => {
                   const code = e.currentTarget.error?.code;
                   setVideoError(

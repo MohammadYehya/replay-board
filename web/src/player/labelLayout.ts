@@ -38,6 +38,9 @@ export interface PlaceOptions {
   /** Places a label that has to move never moves onto (the angles' arcs and wedges, so a name never covers the mark
    *  it or another angle is about); a label in its own place may sit on one. */
   avoid?: readonly Rect[];
+  /** What is laid over the stage (Reset view): no label stays under it, even in its own place (one that cannot move
+   *  is dimmed). Test-full's "right side", at the top right of its curve, ran under Reset view in "Try it". */
+  block?: readonly Rect[];
 }
 
 export interface Rect {
@@ -63,6 +66,7 @@ export function placeLabels(boxes: readonly LabelBox[], opts: PlaceOptions): Lab
   const pad = opts.pad ?? 2;
   const reach = opts.reach ?? 44;
   const avoid = opts.avoid ?? [];
+  const block = opts.block ?? [];
   const placed: Rect[] = [];
   const out: LabelPlace[] = [];
   const inside = (r: Rect) => r.x >= 0 && r.y >= 0 && r.x + r.w <= opts.width && r.y + r.h <= opts.height;
@@ -74,7 +78,12 @@ export function placeLabels(boxes: readonly LabelBox[], opts: PlaceOptions): Lab
     const wasInside = inside(b);
     const free = (dx: number, dy: number) => {
       const r = at(dx, dy);
-      return (!wasInside || inside(r)) && !placed.some((q) => hits(r, q, pad)) && (!(dx || dy) || !avoid.some((q) => hits(r, q, 0)));
+      return (
+        (!wasInside || inside(r)) &&
+        !placed.some((q) => hits(r, q, pad)) &&
+        (!(dx || dy) || !avoid.some((q) => hits(r, q, 0))) &&
+        !block.some((q) => hits(r, q, pad))
+      );
     };
     const take = (dx: number, dy: number): LabelPlace => {
       placed.push(at(dx, dy));
@@ -90,14 +99,24 @@ export function placeLabels(boxes: readonly LabelBox[], opts: PlaceOptions): Lab
     // shortest that is free wins. A move within reach can only meet the labels within reach.
     const local = placed.filter((q) => hits(at(0, 0), q, reach + pad));
     const marks = avoid.filter((q) => hits(at(0, 0), q, reach + pad));
+    const over = block.filter((q) => hits(at(0, 0), q, reach + pad));
     const freeHere = (dx: number, dy: number) => {
       const r = at(dx, dy);
-      return (!wasInside || inside(r)) && !local.some((q) => hits(r, q, pad)) && !marks.some((q) => hits(r, q, 0));
+      return (
+        (!wasInside || inside(r)) &&
+        !local.some((q) => hits(r, q, pad)) &&
+        !marks.some((q) => hits(r, q, 0)) &&
+        !over.some((q) => hits(r, q, pad))
+      );
     };
     const cx = b.x + b.w / 2;
     const cy = b.y + b.h / 2;
     const dist = (q: Rect) => Math.hypot(q.x + q.w / 2 - cx, q.y + q.h / 2 - cy);
-    const near = [...local.slice().sort((q, r) => dist(q) - dist(r)).slice(0, 6), ...marks.slice().sort((q, r) => dist(q) - dist(r)).slice(0, 4)];
+    const near = [
+      ...local.slice().sort((q, r) => dist(q) - dist(r)).slice(0, 6),
+      ...marks.slice().sort((q, r) => dist(q) - dist(r)).slice(0, 4),
+      ...over,
+    ];
     const xs = [0];
     const ys = [0];
     for (const q of near) {

@@ -48,6 +48,10 @@ export interface StageOptions {
   /** Pixels at each edge of the stage covered by what is laid over it (the caption bar at the bottom, the values at
    *  the top, the "Try it" sliders at the left): the drawing is framed in the rest. */
   insets?(): Insets;
+  /** A box laid over the stage's top right corner (Reset view): how far it reaches in from the right edge and down
+   *  from the top. The drawing is framed below it or to the left of it, whichever shows the drawing larger (keeping
+   *  the whole top of the stage clear made "Try it" drawings up to 22% smaller). */
+  corner?(): { width: number; height: number } | null;
   /** What is laid over the stage: when one changes size (a longer caption, the sliders opening), the drawing is
    *  framed again. */
   insetElements?(): (Element | null)[];
@@ -451,6 +455,62 @@ export function axisScales(spans: Vec3, axesShown: boolean, surface: boolean): V
   if (axesShown && surface && xy > 1e-9 && spans[2] > xy)
     return spans.map((s, a) => (a === 2 ? L / s : s > 1e-9 && s < 0.35 * xy ? (L * 0.35) / s : L / xy)) as Vec3;
   return spans.map((s) => (axesShown && s > 1e-9 && s < 0.35 * maxSpan ? (L * 0.35) / s : L / maxSpan)) as Vec3;
+}
+
+// ---------------------------------------------------------------- framing in the part of the stage nothing covers
+
+/** The full view the camera renders a window of (setViewOffset): a w x h stage, widened and heightened so that the
+ *  centre of the view is the centre of the part `ins` leaves uncovered. */
+export function fullViewOf(w: number, h: number, ins: Insets) {
+  const dx = ins.left - ins.right;
+  const dy = ins.top - ins.bottom;
+  return { w: w + Math.abs(dx), h: h + Math.abs(dy), x: dx < 0 ? -dx : 0, y: dy < 0 ? -dy : 0 };
+}
+
+/** Distance from `centre` along `dir` at which every point fits the part of a w x h stage that `ins` leaves uncovered
+ *  (with a 10% margin), for a camera of vertical field `fov` degrees rendering the full view (fullViewOf). */
+export function fitDistanceOf(points: Vector3[], centre: Vector3, dir: Vector3, fov: number, w: number, h: number, ins: Insets) {
+  const full = Math.tan((fov * DEG) / 2);
+  const fullH = Math.max(1, fullViewOf(w, h, ins).h);
+  const tv = (full * Math.max(1, h - ins.top - ins.bottom)) / fullH;
+  const th = (full * Math.max(1, w - ins.left - ins.right)) / fullH;
+  const right = UP.clone().cross(dir);
+  if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+  right.normalize();
+  const up = dir.clone().cross(right).normalize();
+  const margin = 1.1;
+  let d = 0.5;
+  for (const c of points) {
+    const p = c.clone().sub(centre);
+    const depth = p.dot(dir);
+    d = Math.max(d, depth + (Math.abs(p.dot(right)) * margin) / th, depth + (Math.abs(p.dot(up)) * margin) / tv);
+  }
+  return d + 0.05;
+}
+
+export type CornerSide = 'top' | 'right';
+
+/** The insets with a box over the top right corner (`corner`: how far it reaches in from the right and down from
+ *  the top) kept clear from `side`: below it (a band across the top) or left of it (a band down the right). */
+export const cornerInsets = (edges: Insets, corner: { width: number; height: number }, side: CornerSide): Insets =>
+  side === 'top'
+    ? { ...edges, top: Math.max(edges.top, corner.height) }
+    : { ...edges, right: Math.max(edges.right, corner.width) };
+
+/** Which side the drawing passes the corner box on, seen from `dir`: the one that shows it larger (pixels per world
+ *  unit go with the full view's height over the distance). From `current`, it changes only for 3% or more, so the
+ *  drawing does not hop from one side to the other as the student moves a slider. */
+export function cornerSide(
+  points: Vector3[], centre: Vector3, dir: Vector3, fov: number, w: number, h: number,
+  edges: Insets, corner: { width: number; height: number }, current: CornerSide = 'top',
+): CornerSide {
+  if (!(corner.width > 0 && corner.height > 0)) return current;
+  const scale = (side: CornerSide) => {
+    const ins = cornerInsets(edges, corner, side);
+    return fullViewOf(w, h, ins).h / fitDistanceOf(points, centre, dir, fov, w, h, ins);
+  };
+  const other: CornerSide = current === 'top' ? 'right' : 'top';
+  return scale(other) > scale(current) * 1.03 ? other : current;
 }
 
 /** Builds the stage in `host`. Throws when WebGL is not available (the caller shows a plain line). */
@@ -1430,39 +1490,38 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
 
   let width = 0;
   let height = 0;
+  /** What the drawing is framed clear of: what covers the stage's edges (opts.insets), and the corner box on the
+   *  side chosen for it (clearCorner). */
   const inset: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
-  /** The full view the camera renders a window of (setViewOffset): the stage, widened and heightened so that the
-   *  centre of the view is the centre of the part nothing covers. */
-  const fullView = () => {
-    const dx = inset.left - inset.right;
-    const dy = inset.top - inset.bottom;
-    return { w: width + Math.abs(dx), h: height + Math.abs(dy), x: dx < 0 ? -dx : 0, y: dy < 0 ? -dy : 0 };
-  };
+  const edges: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
+  const corner = { width: 0, height: 0 };
+  let side: CornerSide = 'top';
+  const fullView = () => fullViewOf(width, height, inset);
   /** Distance at which every framing point fits the part of the stage nothing covers (the caption, the values, the
-   *  sliders). */
-  const fitDistance = (dir: Vector3) => {
-    const full = Math.tan((camera.fov * DEG) / 2);
-    const fullH = Math.max(1, fullView().h);
-    const tv = (full * Math.max(1, height - inset.top - inset.bottom)) / fullH;
-    const th = (full * Math.max(1, width - inset.left - inset.right)) / fullH;
-    const right = UP.clone().cross(dir);
-    if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
-    right.normalize();
-    const up = dir.clone().cross(right).normalize();
-    const margin = 1.1;
-    let d = 0.5;
-    for (const c of fc) {
-      const p = c.clone().sub(ft);
-      const depth = p.dot(dir);
-      d = Math.max(d, depth + (Math.abs(p.dot(right)) * margin) / th, depth + (Math.abs(p.dot(up)) * margin) / tv);
-    }
-    return d + 0.05;
-  };
+   *  sliders, Reset view). */
+  const fitDistance = (dir: Vector3) => fitDistanceOf(fc, ft, dir, camera.fov, width, height, inset);
   /** The viewer's zoom (Ctrl + wheel, a pinch): a share of the fitted distance, kept when the steps turn the camera. */
   let zoom = 1;
+  const dirFor = (preset: Camera) => frame.dir(preset === 'iso' && scene.isoFrom === 'left' ? ISO_LEFT : CAMERA_DIRS[preset]);
   const viewFor = (preset: Camera) => {
-    const dir = frame.dir(preset === 'iso' && scene.isoFrom === 'left' ? ISO_LEFT : CAMERA_DIRS[preset]);
+    const dir = dirFor(preset);
     return { pos: ft.clone().addScaledVector(dir, fitDistance(dir) * zoom), target: ft.clone() };
+  };
+  /** Frames the drawing past the corner box on the side that shows it larger from `dir` (cornerSide). Returns whether
+   *  the insets changed (applyView then). */
+  const clearCorner = (dir: Vector3) => {
+    side = cornerSide(fc, ft, dir, camera.fov, width, height, edges, corner, side);
+    const next = cornerInsets(edges, corner, side);
+    const changed = (Object.keys(next) as (keyof Insets)[]).some((k) => next[k] !== inset[k]);
+    Object.assign(inset, next);
+    return changed;
+  };
+  /** The camera renders the window of the full view that is the stage (fullViewOf). */
+  const applyView = () => {
+    const fv = fullView();
+    camera.aspect = fv.w / fv.h;
+    camera.setViewOffset(fv.w, fv.h, fv.x, fv.y, width, height);
+    camera.updateProjectionMatrix();
   };
 
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -1537,6 +1596,7 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
   let lastOwn = '';
   let refitAt = 0;
   const moveTo = (p: Camera, animate: boolean) => {
+    if (clearCorner(dirFor(p))) applyView(); // this step's drawing may pass Reset view better on the other side
     const to = viewFor(p);
     if (!animate) {
       tween = null;
@@ -1582,12 +1642,19 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
       left: clamp(Math.round(want.left), 0, Math.round(wpx * 0.4)),
       right: clamp(Math.round(want.right), 0, Math.round(wpx * 0.4)),
     };
-    const same = (Object.keys(ins) as (keyof Insets)[]).every((k) => ins[k] === inset[k]);
+    const box = opts.corner?.();
+    const cw = box ? clamp(Math.round(box.width), 0, Math.round(wpx * 0.4)) : 0;
+    const ch = box ? clamp(Math.round(box.height), 0, Math.round(hpx * 0.25)) : 0;
+    const same =
+      (Object.keys(ins) as (keyof Insets)[]).every((k) => ins[k] === edges[k]) && cw === corner.width && ch === corner.height;
     if (wpx === width && hpx === height && same) return;
     const resized = wpx !== width || hpx !== height;
     width = wpx;
     height = hpx;
-    Object.assign(inset, ins);
+    Object.assign(edges, ins);
+    corner.width = cw;
+    corner.height = ch;
+    Object.assign(inset, cornerInsets(edges, corner, side)); // moveTo picks the side again, unless the viewer turned it
     if (resized) {
       renderer.setSize(wpx, hpx);
       labels.setSize(wpx, hpx);
@@ -1600,10 +1667,7 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
             m.m.linewidth = linePx * m.width * it.emph * (1 + 1.2 * Math.max(0, it.glow));
           }
     }
-    const fv = fullView();
-    camera.aspect = fv.w / fv.h;
-    camera.setViewOffset(fv.w, fv.h, fv.x, fv.y, wpx, hpx);
-    camera.updateProjectionMatrix();
+    applyView();
     // Refit the view to the new shape (not one the viewer chose). The caption grows and shrinks from step to step,
     // the sliders open and close: the drawing then glides to stay clear of them.
     if (!placed || !turned) moveTo(preset, placed && !resized && !opts.reducedMotion);
@@ -1837,6 +1901,8 @@ export function mountScene(host: HTMLElement, scene: Scene3D, opts: StageOptions
       // test2 #4's step 2 put "α 90°" 22 px from where playing there had).
       prev: settled ? undefined : keep.map((e) => lastPlace.get(e.inner)),
       avoid,
+      // Reset view: the drawing is framed past it (clearCorner), and a label sticking out of the framing is moved off it
+      block: corner.width && corner.height ? [{ x: width - corner.width, y: 0, w: corner.width, h: corner.height }] : undefined,
     });
     // A label slides to its place rather than jumping there: while things move it keeps its spot when it can, and
     // once all is still it is placed afresh, which hopped labels up to 32 px on a still drawing (test2 #4). A label

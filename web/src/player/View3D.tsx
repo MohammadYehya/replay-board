@@ -5,7 +5,7 @@
 // Every value the scene's parameters take shows on the stage as it changes; "Try it" opens a slider per parameter, so
 // a student can move one and see what it does (on top of the lecture: the video keeps playing, and the other values
 // keep following it) until they go back to the lecture.
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { getScene3D, jobFileUrl } from '../api';
 import { SparkIcon } from '../ask/icons';
 import type { Piece, Scene3D, Scene3DParam } from '../types';
@@ -16,6 +16,7 @@ import {
   stepHeading, tryValue, type SceneState, type ShapeGuard,
 } from './scene3dState';
 import { displayName, formatValue, sliderStep, viewTitle } from './sceneText';
+import { cutChips, endRoom, scrollFor, type StripLayout } from './stepStrip';
 import { formatTime } from './timing';
 
 interface Props {
@@ -95,6 +96,7 @@ export default function View3D(props: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const captionRef = useRef<HTMLDivElement>(null);
   const valuesRef = useRef<HTMLDivElement>(null);
+  const resetRef = useRef<HTMLButtonElement>(null);
   const chipsRef = useRef<HTMLOListElement>(null);
   const stageRef = useRef<Stage3D | null>(null);
   const indexRef = useRef(-1);
@@ -215,7 +217,15 @@ export default function View3D(props: Props) {
           }
           return out;
         },
-        insetElements: () => [captionRef.current, valuesRef.current],
+        // Reset view, over the top right: the drawing passes it below or to its left. With the sliders open nothing
+        // else kept the top clear, and test2 #4's cell at a = 6 ran under the button.
+        corner: () => {
+          const r = resetRef.current;
+          const stage = r?.offsetParent as HTMLElement | null;
+          if (!r || !stage || !over(r)) return null;
+          return { width: stage.clientWidth - r.offsetLeft + 6, height: r.offsetTop + r.offsetHeight + 6 };
+        },
+        insetElements: () => [captionRef.current, valuesRef.current, resetRef.current],
         frame: (now) => {
           const opts = { reducedMotion: reduced, overrides: overridesRef.current, guard };
           const st = scene.synced
@@ -253,18 +263,94 @@ export default function View3D(props: Props) {
     regionRef.current?.focus({ preventScroll: true });
   }, []);
 
-  // Keep the current step's chip in sight inside the strip (without scrolling the page).
-  useEffect(() => {
+  // The step strip scrolls in whole chips (stepStrip.ts): the current step's chip whole in sight (without scrolling
+  // the page), a chip the strip's edge would cut hidden instead of a sliver, and room after the last chip so the strip
+  // can end on whole chips too. With 8 steps it used to stop with a sliver of a chip next to "‹" or "›".
+  const [stripEnd, setStripEnd] = useState({ room: 0, gap: 0 });
+  const stripLayout = useCallback((): StripLayout | null => {
     const ol = chipsRef.current;
-    const li = ol?.children[Math.max(0, index)] as HTMLElement | undefined;
-    if (!ol || !li) return;
-    const left = li.offsetLeft;
-    const right = left + li.offsetWidth;
-    let to = ol.scrollLeft;
-    if (left < ol.scrollLeft + 8) to = left - 8;
-    else if (right > ol.scrollLeft + ol.clientWidth - 8) to = right - ol.clientWidth + 8;
-    if (to !== ol.scrollLeft) ol.scrollTo({ left: Math.max(0, to), behavior: reduced ? 'auto' : 'smooth' });
-  }, [index, reduced, scene]);
+    if (!ol) return null;
+    const lis = [...ol.querySelectorAll<HTMLElement>(':scope > li.v3-step')];
+    return {
+      lefts: lis.map((li) => li.offsetLeft),
+      widths: lis.map((li) => li.offsetWidth),
+      pad: parseFloat(getComputedStyle(ol).paddingLeft) || 0,
+      view: ol.clientWidth,
+    };
+  }, []);
+  const markCut = useCallback(() => {
+    const ol = chipsRef.current;
+    const s = stripLayout();
+    if (!ol || !s) return;
+    const cut = new Set(cutChips(s, ol.scrollLeft));
+    ol.querySelectorAll<HTMLElement>(':scope > li.v3-step').forEach((li, i) => li.classList.toggle('cut', cut.has(i)));
+  }, [stripLayout]);
+  const showStep = useCallback(
+    (animate: boolean) => {
+      const ol = chipsRef.current;
+      const s = stripLayout();
+      if (!ol || !s || !s.lefts.length) return;
+      const to = scrollFor(s, indexRef.current, ol.scrollLeft, ol.scrollWidth - ol.clientWidth);
+      if (Math.abs(to - ol.scrollLeft) > 0.5) ol.scrollTo({ left: to, behavior: animate && !reduced ? 'smooth' : 'auto' });
+      markCut();
+    },
+    [stripLayout, markCut, reduced],
+  );
+  /** The strip is on the page (the view is live and has steps): its listeners go with it. */
+  const stripOn = !!scene && scene.objects.length > 0 && scene.steps.length > 0 && !failed;
+  useLayoutEffect(() => {
+    const ol = chipsRef.current;
+    if (!ol || !stripOn) return;
+    const fit = () => {
+      const s = stripLayout();
+      if (!s || !s.lefts.length) return;
+      const cs = getComputedStyle(ol);
+      const last = s.lefts.length - 1;
+      const end = s.lefts[last] + s.widths[last] + (parseFloat(cs.paddingRight) || 0);
+      const next = { room: endRoom(s, end), gap: parseFloat(cs.columnGap) || 0 };
+      setStripEnd((cur) => (cur.room === next.room && cur.gap === next.gap ? cur : next));
+    };
+    fit();
+    let raf = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(markCut);
+    };
+    // the strip's width changes with the window and the Ask drawer, a chip's when its font arrives: room and position
+    // are worked out again
+    const ro = new ResizeObserver(() => {
+      fit();
+      showStep(false);
+    });
+    ro.observe(ol);
+    ol.querySelectorAll(':scope > li.v3-step').forEach((li) => ro.observe(li));
+    ol.addEventListener('scroll', onScroll, { passive: true });
+    // A chip that takes the keyboard focus (Tab) comes whole into the strip: the browser's own scrolling left test2
+    // #4's fifth chip at the edge, hidden as cut, with the focus on it. After the browser's scroll (next frame).
+    let focusRaf = 0;
+    const onFocus = (e: FocusEvent) => {
+      const li = e.target instanceof Element ? e.target.closest('li.v3-step') : null;
+      if (!li) return;
+      cancelAnimationFrame(focusRaf);
+      focusRaf = requestAnimationFrame(() => {
+        const s = stripLayout();
+        const i = [...ol.querySelectorAll(':scope > li.v3-step')].indexOf(li);
+        if (!s || i < 0) return;
+        const to = scrollFor(s, i, ol.scrollLeft, ol.scrollWidth - ol.clientWidth);
+        if (Math.abs(to - ol.scrollLeft) > 0.5) ol.scrollTo({ left: to, behavior: reduced ? 'auto' : 'smooth' });
+        markCut();
+      });
+    };
+    ol.addEventListener('focusin', onFocus);
+    return () => {
+      ro.disconnect();
+      ol.removeEventListener('scroll', onScroll);
+      ol.removeEventListener('focusin', onFocus);
+      cancelAnimationFrame(raf);
+      cancelAnimationFrame(focusRaf);
+    };
+  }, [stripOn, scene, stripLayout, markCut, showStep, reduced]);
+  useEffect(() => showStep(true), [index, stripEnd, showStep]);
 
   /** Back to the lecture's values: the sliders follow it again. */
   const endOverrides = useCallback(() => {
@@ -545,6 +631,7 @@ export default function View3D(props: Props) {
         {live && (
           <>
             <button
+              ref={resetRef}
               className={`v3-reset ${turned ? 'on' : ''}`}
               onClick={() => {
                 endOverrides();
@@ -608,7 +695,7 @@ export default function View3D(props: Props) {
           </button>
           <ol className="v3-chips" ref={chipsRef}>
             {scene!.steps.map((s, i) => (
-              <li key={i}>
+              <li key={i} className="v3-step">
                 <button
                   className={`v3-chip ${i === index ? 'on' : i < index ? 'done' : ''}`}
                   aria-current={i === index ? 'step' : undefined}
@@ -620,6 +707,9 @@ export default function View3D(props: Props) {
                 </button>
               </li>
             ))}
+            {stripEnd.room > 0 && (
+              <li className="v3-chips-end" aria-hidden style={{ width: Math.max(0, stripEnd.room - stripEnd.gap) }} />
+            )}
           </ol>
           <button
             className="v3-nav"

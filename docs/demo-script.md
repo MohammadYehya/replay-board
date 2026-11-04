@@ -30,8 +30,12 @@ bookmarks bar.
 - `cd web; npm run build`, then use the built player at http://127.0.0.1:8000 (smoother than dev mode).
 - The lecture list shows only your lectures: move the old test jobs out of `data\jobs` (for example into
   `data\jobs-archive`) rather than deleting them.
-- Open each lecture you will show once before the take: on a long lecture the video's first frame can take a
-  few seconds the first time.
+- Open each lecture you will show once before the take. When a lecture opens, the video panel shows a still
+  frame until the video itself is ready: 2–3 s for a phone or OBS recording, every time it opens. Wait for that
+  before you press play on camera.
+- Check the 0:55 moment in your own lecture: the "was hidden" tag only shows for writing the camera never saw
+  being written (you stood in front of that spot for more than 10 s while writing, then stepped away). Writing
+  that was covered for less than that simply appears when it comes into view, without the tag.
 - Make the 3D view you will show beforehand, so it opens at once: open it once in the player (the first time takes
   30–70 s), or run `.venv\Scripts\python -m app.popout <job> <piece>` (it shows the cost and asks first). Play
   through every step and check each change happens at the right word; if one is off, delete

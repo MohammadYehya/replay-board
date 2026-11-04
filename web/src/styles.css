@@ -2136,9 +2136,24 @@ kbd {
   list-style: none;
   overflow-x: auto;
   scrollbar-width: thin;
+  /* whole chips (stepStrip.ts): a scroll stops at a chip, and a chip the edge cuts is hidden, not a sliver */
+  scroll-snap-type: x mandatory;
+  scroll-padding-inline-start: 2px;
 }
 .v3-chips li {
   flex: none;
+}
+.v3-chips li.v3-step {
+  scroll-snap-align: start;
+  transition: opacity 0.12s;
+}
+/* never the chip with the keyboard focus: it scrolls in whole (View3D.tsx), and shows with its focus ring meanwhile */
+.v3-chips li.cut:not(:focus-within) {
+  opacity: 0;
+  pointer-events: none;
+}
+.v3-chips-end {
+  height: 1px;
 }
 .v3-chip {
   display: flex;
@@ -2909,6 +2924,16 @@ pre.md-code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* a chip of writing with a formula: typeset as Browse shows it, small, clipped if it is long */
+.ask-chip-math {
+  max-width: 18em;
+  padding: 1px 0;
+  line-height: 1.2;
+}
+.ask-chip-math .katex {
+  font-size: 1.05em;
+  color: var(--text);
 }
 .ask-chip-time {
   flex: none;

@@ -123,6 +123,36 @@ export function saveTray(storage: Writer | null | undefined, jobId: string, tray
   }
 }
 
+/** Lectures whose Ask drawer was left open earlier in this page's life: going to Slides or Notes and back finds it
+ *  as it was. Kept in memory only, so a reload starts with the drawer closed (it reopened by itself, and pressing A
+ *  for Ask Muse then closed it). */
+const leftOpen = new Set<string>();
+
+export function rememberAskOpen(jobId: string, open: boolean): void {
+  if (open) leftOpen.add(jobId);
+  else leftOpen.delete(jobId);
+}
+
+/** Whether the player opens with the Ask drawer: when it was left open on this lecture earlier in this page, or when
+ *  another page asked for it just now (the Notes page's "Ask" sets openKey; takeAskRequest clears it). */
+export function askStartsOpen(storage: Reader | null | undefined, jobId: string): boolean {
+  if (leftOpen.has(jobId)) return true;
+  try {
+    return storage?.getItem(openKey(jobId)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** The request is for the one opening that follows it. */
+export function takeAskRequest(storage: Writer | null | undefined, jobId: string): void {
+  try {
+    storage?.removeItem(openKey(jobId));
+  } catch {
+    /* storage blocked: there was no request either */
+  }
+}
+
 /** sessionStorage, or null where the browser blocks it. */
 export function session(): (Reader & Writer) | null {
   try {
