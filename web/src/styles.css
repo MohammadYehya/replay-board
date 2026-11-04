@@ -990,8 +990,25 @@ kbd {
   font-size: 12.5px;
   line-height: 1.4;
 }
-.stream-line.stopped {
-  color: var(--amber);
+/* The job failed: the board stops where it is. The line is the app's error line; no spinner on the board. */
+.stream-status .error-line.stream-failed {
+  margin-top: 6px;
+  line-height: 1.4;
+}
+.ready-bar.failed > div {
+  background: var(--err);
+}
+.board-catchup.failed {
+  border-color: rgba(232, 134, 108, 0.45);
+  color: var(--err);
+  white-space: normal;
+}
+.board-catchup.failed::before {
+  width: 8px;
+  height: 8px;
+  border: 0;
+  background: var(--err);
+  animation: none;
 }
 .ask-sub.partial {
   color: var(--amber);

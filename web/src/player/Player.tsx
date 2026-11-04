@@ -13,8 +13,8 @@ import { Board, type BoardHandle } from './Board';
 import { boardSpriteKeys, preloadBoard } from './boardRenderer';
 import { SpriteCache } from './sprites';
 import {
-  accepts, boardTime, catchUpText, gateTitle, heldOf, jobEnded, knowsUpTo, pastReady, planPoll, PRELOAD_MS,
-  readyFraction, readyUntil, replaySeq, reuseUnchanged, shouldWatch, stopAfterTaking, streamLine, WATCH_MS,
+  accepts, boardTime, catchUpText, failureOf, gateTitle, heldOf, jobEnded, knowsUpTo, pastReady, planPoll,
+  PRELOAD_MS, readyFraction, readyUntil, replaySeq, reuseUnchanged, shouldWatch, stopAfterTaking, streamLine, WATCH_MS,
 } from './stream';
 import { Slides, type SlidesHandle } from './Slides';
 import { drawable } from './slideTiming';
@@ -130,9 +130,10 @@ export function Player({
   // A partial replay (the lecture still streams): its board covers only the part up to `ready`.
   const ready = readyUntil(replay);
   const streaming = ready != null;
-  const stopped = streaming && job?.state === 'failed';
-  /** Notes, Slides and 3D need the final replay: their title while they wait for it, else null. */
-  const gate = gateTitle(streaming, stopped);
+  /** The job failed (or was interrupted) while the replay was partial: the board stops where it is, for good. */
+  const failure = streaming ? failureOf(job, clipStart, clipEnd) : null;
+  /** Notes, Slides and 3D need the final replay: their title while they wait for it (or will not get it), else null. */
+  const gate = gateTitle(streaming, failure);
   const timeRef = useRef<number>(clipStart);
   /** The board's clock: the video's, held at `ready` while the playhead is past it. */
   const boardTimeRef = useRef<number>(clipStart);
@@ -541,9 +542,11 @@ export function Player({
   const annotationCount = slides?.annotations?.length ?? 0;
   const api = replay.stats?.api;
   const readyPct = Math.round(readyFraction(ready, clipStart, clipEnd) * 1000) / 10;
-  // Past what is ready (or before anything is): the board says how far it is.
+  // Past what is ready (or before anything is): the board says how far it is, or that it stops there.
   const catchUp =
-    ready != null && board && (pastReadyNow || ready - clipStart < 1) ? catchUpText(ready, stopped) : null;
+    ready != null && board && (pastReadyNow || ready - clipStart < 1) ? catchUpText(ready, failure, clipStart) : null;
+  /** "so far" while more of the board is coming. */
+  const soFar = streaming && !failure ? ' so far' : '';
   const rowStyle = {
     '--cols': `${videoAspect.toFixed(4)}fr ${boardAspect.toFixed(4)}fr`,
     '--av': videoAspect.toFixed(4),
@@ -658,17 +661,24 @@ export function Player({
             {ready != null && (
               <div className="stream-status">
                 <div
-                  className="ready-bar"
+                  className={`ready-bar ${failure ? 'failed' : ''}`}
                   role="progressbar"
                   aria-label="Board ready"
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={readyPct}
-                  title={`The board is ready up to ${formatTime(ready)}`}
+                  title={`${failure ? 'The board stops at' : 'The board is ready up to'} ${formatTime(ready)}`}
                 >
                   <div style={{ width: `${readyPct}%` }} />
                 </div>
-                <p className={`stream-line ${stopped ? 'stopped' : ''}`}>{streamLine(job, ready, clipStart, clipEnd)}</p>
+                {failure ? (
+                  <p className="error-line stream-failed" role="alert">
+                    {/* the job's whole line (with where its details are) is the tooltip */}
+                    <span title={failure.error || undefined}>{streamLine(job, ready, clipStart, clipEnd)}</span>
+                  </p>
+                ) : (
+                  <p className="stream-line">{streamLine(job, ready, clipStart, clipEnd)}</p>
+                )}
               </div>
             )}
             {videoError && <p className="error-line">{videoError}</p>}
@@ -682,7 +692,7 @@ export function Player({
               {board && (
                 <>
                   <span className="panel-note">
-                    {pieces.length} {pieces.length === 1 ? 'piece' : 'pieces'} of writing{streaming && ' so far'}
+                    {pieces.length} {pieces.length === 1 ? 'piece' : 'pieces'} of writing{soFar}
                     {hiddenCount > 0 && ` · ${hiddenCount} written while hidden`}
                     {gestureCount > 0 &&
                       ` · ${gestureCount} pointing ${gestureCount === 1 ? 'gesture' : 'gestures'}`}
@@ -732,6 +742,7 @@ export function Player({
                 sprites={sprites}
                 partial={streaming}
                 catchUp={catchUp}
+                catchUpFailed={!!failure}
                 popoutLock={gate}
               />
             ) : slides ? (
@@ -780,7 +791,7 @@ export function Player({
               <ul className="facts">
                 {board && (
                   <li>
-                    <b>{pieces.length}</b> pieces of writing{streaming && ' so far'}
+                    <b>{pieces.length}</b> pieces of writing{soFar}
                     {hiddenCount ? (
                       <>
                         , <b>{hiddenCount}</b> uncovered from behind the teacher
@@ -827,7 +838,7 @@ export function Player({
             currentTurn={turnIdx}
             timing={replay.transcript?.timing}
             refining={refining}
-            pending={streaming && !stopped}
+            pending={streaming && !failure}
             onSeek={seekWord}
             onAskSpan={askSpan}
           />

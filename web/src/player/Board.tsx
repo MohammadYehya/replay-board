@@ -46,6 +46,8 @@ interface Props {
   partial?: boolean;
   /** A calm line over the board while the playhead is past what is ready ("Board catching up: ready up to 3:20"). */
   catchUp?: string | null;
+  /** The job failed: the line says the board stops there (no spinner, the error colour). */
+  catchUpFailed?: boolean;
   /** While set, the 3D buttons and badges are shown disabled with this title (the replay is not final yet). */
   popoutLock?: string | null;
 }
@@ -238,7 +240,7 @@ export const Board = memo(
   forwardRef<BoardHandle, Props>(function Board(props, ref) {
     const {
       jobId, board, typeset, timeRef, clipStart, playing, onSeekPiece, onTogglePlay, onPopout, onAsk, made, sprites,
-      partial, catchUp, popoutLock,
+      partial, catchUp, catchUpFailed, popoutLock,
     } = props;
     const [W, H] = board.size;
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -903,7 +905,7 @@ export const Board = memo(
         )}
 
         {catchUp && (
-          <div className="board-catchup" role="status">
+          <div className={`board-catchup ${catchUpFailed ? 'failed' : ''}`} role="status">
             {catchUp}
           </div>
         )}

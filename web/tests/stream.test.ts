@@ -3,9 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  accepts, boardTime, catchUpText, gateTitle, GATE_TITLE, GATE_TITLE_STOPPED, heldOf, isPartial, jobEnded, knowsUpTo,
-  pastReady, planPoll, readyFraction, readyUntil, replaySeq, reuseUnchanged, shouldWatch, spriteKey, stopAfterTaking,
-  streamLine,
+  accepts, boardTime, catchUpText, failureOf, gateTitle, GATE_TITLE, GATE_TITLE_FAILED, GATE_TITLE_INTERRUPTED, heldOf,
+  isPartial, jobEnded, knowsUpTo, pastReady, planPoll, readyFraction, readyUntil, replaySeq, reuseUnchanged,
+  shouldWatch, spriteKey, stopAfterTaking, streamLine,
 } from '../src/player/stream.ts';
 import type { JobStatus, Piece, Replay } from '../src/types.ts';
 
@@ -162,11 +162,69 @@ test('unchanged transcript and chapters are kept from the replay held', () => {
   assert.equal(out2.chapters, c.chapters);
 });
 
-test('Notes, Slides and 3D wait for the final replay', () => {
-  assert.equal(gateTitle(false, false), null);
-  assert.equal(gateTitle(true, false), GATE_TITLE);
+// The job's own lines (app/pipeline.py plain_error and INTERRUPTED).
+const KEY_ERROR = 'something went wrong (KeyError: 53); details are in error.log';
+const INTERRUPTED = 'processing was interrupted before it finished; process the video again';
+/** test3.mp4 (7:52): capture crashed at 4:46 with the board ready up to 2:48, the voice transcribed. */
+const crashed = (error: string | null = KEY_ERROR, over: Partial<JobStatus> = {}) =>
+  status({
+    state: 'failed',
+    error,
+    stages: {
+      speech: { state: 'done', progress: 1 },
+      capture: { state: 'running', progress: 0.607 },
+      read: { state: 'pending' },
+    },
+    ...over,
+  });
+
+test('Notes, Slides and 3D wait for the final replay, and say when it will not come', () => {
+  assert.equal(gateTitle(false), null);
+  assert.equal(gateTitle(true), GATE_TITLE);
   assert.equal(GATE_TITLE, 'Available when processing finishes');
-  assert.equal(gateTitle(true, true), GATE_TITLE_STOPPED);
+  assert.equal(gateTitle(true, failureOf(crashed(), 0, 472)), GATE_TITLE_FAILED);
+  assert.equal(GATE_TITLE_FAILED, 'Not available: processing failed before the end');
+  assert.equal(gateTitle(true, failureOf(crashed(INTERRUPTED), 0, 472)), GATE_TITLE_INTERRUPTED);
+  assert.equal(GATE_TITLE_INTERRUPTED, 'Not available: processing was interrupted before the end');
+  assert.equal(gateTitle(false, failureOf(crashed(), 0, 472)), null); // a final replay: nothing waits
+});
+
+test('a failed job: its own line, how far capture got, and nothing while it runs or once it is done', () => {
+  assert.equal(failureOf(null, 0, 472), null);
+  assert.equal(failureOf(status(), 0, 472), null);
+  assert.equal(failureOf(status({ state: 'done' }), 0, 472), null);
+  const f = failureOf(crashed(), 0, 472)!;
+  assert.equal(f.interrupted, false);
+  assert.equal(f.cause, 'something went wrong (KeyError: 53)'); // where the details are: in the tooltip
+  assert.equal(f.error, KEY_ERROR);
+  assert.ok(Math.abs(f.at! - 286.5) < 0.01); // capture's progress over the clip, on the video clock
+  assert.equal(f.doing, null);
+  const i = failureOf(crashed(INTERRUPTED), 0, 472)!;
+  assert.equal(i.interrupted, true);
+  assert.equal(i.cause, ''); // said in the player's own words
+  assert.equal(i.error, INTERRUPTED);
+  // a clip: capture's progress is over the clip
+  assert.ok(Math.abs(failureOf(crashed(), 380, 478)!.at! - (380 + 0.607 * 98)) < 0.01);
+  // capture done: the stage still running says where it stopped
+  const read = crashed('boom', {
+    stages: { capture: { state: 'done', progress: 1 }, read: { state: 'running', progress: 0.3 } },
+  });
+  assert.deepEqual(failureOf(read, 0, 472), {
+    interrupted: false, cause: 'boom', error: 'boom', at: null, doing: 'reading the writing',
+  });
+  // capture running without progress yet
+  const early = crashed('boom', { stages: { capture: { state: 'running', progress: 0 } } });
+  assert.equal(failureOf(early, 0, 472)!.doing, 'capturing the writing');
+  // no error, no stages
+  assert.deepEqual(failureOf(status({ state: 'failed' }), 0, 472), {
+    interrupted: false, cause: '', error: '', at: null, doing: null,
+  });
+  // a long line is cut (the whole one is the tooltip); one on several lines is one line
+  const long = failureOf(crashed(`chat failed: ${'x'.repeat(400)}`), 0, 472)!;
+  assert.equal(long.cause.length, 160);
+  assert.ok(long.cause.endsWith('…'));
+  assert.equal(long.error.length, 413);
+  assert.equal(failureOf(crashed('first line\n  second line.'), 0, 472)!.cause, 'first line second line');
 });
 
 test('the processing line names the stage the board waits for and how much is ready', () => {
@@ -177,15 +235,67 @@ test('the processing line names the stage the board waits for and how much is re
   assert.equal(streamLine(null, 30, 0, 480), 'Processing: 0:30 of 8:00 ready');
   // a clip: the times are within the clip
   assert.equal(streamLine(status(), 410, 380, 478), 'Processing: 0:30 of 1:38 ready');
-  assert.equal(streamLine(status({ state: 'failed' }), 90, 0, 480), 'Processing stopped. The board covers 1:30 of 8:00.');
   assert.equal(streamLine(status({ state: 'done' }), 480, 0, 480), 'Processing: finishing, 8:00 of 8:00 ready');
   // the final replay is on disk while the player still loads its board images (the aligner runs on): not "refining"
   const written = status({ stages: { align: { state: 'running' } }, replay: { seq: 20, partial: false, ready_until: null } });
   assert.equal(streamLine(written, 470, 0, 480), 'Processing done: loading the finished board');
 });
 
+test('once the job failed, the line under the video says so, why, how far the board goes and what to do', () => {
+  // what the owner saw on test3.mp4
+  assert.equal(
+    streamLine(crashed(), 168, 0, 472),
+    'Processing failed at 4:46 of the video: something went wrong (KeyError: 53). ' +
+      'The board stops at 2:48; process the video again.',
+  );
+  assert.equal(
+    streamLine(crashed(INTERRUPTED), 168, 0, 472),
+    'Processing was interrupted at 4:46 of the video. The board stops at 2:48; process the video again.',
+  );
+  // nothing known but the state
+  const bare = 'Processing failed. The board stops at 1:30; process the video again.';
+  assert.equal(streamLine(status({ state: 'failed' }), 90, 0, 480), bare);
+  assert.equal(streamLine(status({ state: 'failed', error: null }), 90, 0, 480), bare);
+  // the job's line says what to do already
+  assert.equal(
+    streamLine(crashed('ran out of memory; try a shorter part of the video with --start/--end'), 90, 0, 472),
+    'Processing failed at 4:46 of the video: ran out of memory; try a shorter part of the video with --start/--end. ' +
+      'The board stops at 1:30.',
+  );
+  // after capture: the stage it stopped in, and a board that reaches the end but is not finished
+  const read = crashed('chat (muse-spark) failed after 3 tries: HTTP 500', {
+    stages: { capture: { state: 'done', progress: 1 }, read: { state: 'running', progress: 0.3 } },
+  });
+  assert.equal(
+    streamLine(read, 472, 0, 472),
+    'Processing failed while reading the writing: chat (muse-spark) failed after 3 tries: HTTP 500. ' +
+      'The board reaches the end but is not finished; process the video again.',
+  );
+  // failed before any of the board was ready
+  assert.equal(
+    streamLine(crashed('boom.', { stages: { capture: { state: 'running', progress: 0.01 } } }), 0, 0, 480),
+    'Processing failed at 0:04 of the video: boom. None of the board was ready; process the video again.',
+  );
+  // a clip: times on the video clock
+  assert.equal(
+    streamLine(crashed(null, { stages: { capture: { state: 'running', progress: 0.5 } } }), 400, 380, 478),
+    'Processing failed at 7:09 of the video. The board stops at 6:40; process the video again.',
+  );
+  // capture is never said to be behind the board
+  assert.equal(
+    streamLine(crashed(null, { stages: { capture: { state: 'running', progress: 0.1 } } }), 90, 0, 480),
+    'Processing failed at 1:30 of the video. The board stops at 1:30; process the video again.',
+  );
+});
+
 test('the board and Ask Muse say how far they reach', () => {
-  assert.equal(catchUpText(200, false), 'Board catching up: ready up to 3:20');
-  assert.equal(catchUpText(90, true), 'Processing stopped: the board is ready up to 1:30');
+  assert.equal(catchUpText(200), 'Board catching up: ready up to 3:20');
+  assert.equal(catchUpText(200, null), 'Board catching up: ready up to 3:20');
+  assert.equal(catchUpText(168, failureOf(crashed(), 0, 472)), 'Processing failed: the board stops at 2:48');
+  assert.equal(
+    catchUpText(168, failureOf(crashed(INTERRUPTED), 0, 472)),
+    'Processing was interrupted: the board stops at 2:48',
+  );
+  assert.equal(catchUpText(380.5, failureOf(crashed(), 380, 478), 380), 'Processing failed: none of the board was ready');
   assert.equal(knowsUpTo(200), 'Knows the lecture up to 3:20');
 });

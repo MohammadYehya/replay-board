@@ -13,9 +13,15 @@ export const PRELOAD_MS = 30000;
 const SLACK = 0.25;
 
 export const GATE_TITLE = 'Available when processing finishes';
-export const GATE_TITLE_STOPPED = 'Not available: processing stopped before the end';
+export const GATE_TITLE_FAILED = 'Not available: processing failed before the end';
+export const GATE_TITLE_INTERRUPTED = 'Not available: processing was interrupted before the end';
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** The job's error line when its run stopped without an error of its own (app/pipeline.py INTERRUPTED). */
+const INTERRUPTED = /^processing was interrupted\b/i;
+/** The job's own line is cut to this many characters under the video (the whole line is its tooltip). */
+const CAUSE_MAX = 160;
 
 /** Whether the job has stopped running (done or failed): nothing more will be written. */
 export const jobEnded = (st: Pick<JobStatus, 'state'>) => st.state !== 'running' && st.state !== 'queued';
@@ -130,9 +136,10 @@ export function reuseUnchanged(held: Replay, next: Replay): Replay {
 }
 
 /** The title of the Notes, Slides and 3D buttons while they are not available, or null when they are. */
-export function gateTitle(partial: boolean, stopped: boolean): string | null {
+export function gateTitle(partial: boolean, failure: Failure | null = null): string | null {
   if (!partial) return null;
-  return stopped ? GATE_TITLE_STOPPED : GATE_TITLE;
+  if (!failure) return GATE_TITLE;
+  return failure.interrupted ? GATE_TITLE_INTERRUPTED : GATE_TITLE_FAILED;
 }
 
 // The stage the "Processing" line names when several run at once: the one the board is waiting for first.
@@ -150,10 +157,63 @@ const DOING: [string, string][] = [
   ['probe', 'reading the video file'],
 ];
 
+/** Why a job will not finish: it failed with an error of its own, or its run was interrupted (stopped, or the server
+ *  restarted while it ran). Nothing more of the board comes; the viewer keeps what they have. */
+export interface Failure {
+  interrupted: boolean;
+  /** The job's own one line as shown under the video: without "; details are in error.log", cut to a short length
+   *  ('' when there is none, and for an interruption, whose line the player says in its own words). */
+  cause: string;
+  /** The job's whole line ('' when there is none): the tooltip of the line under the video. */
+  error: string;
+  /** How far capture had got when it stopped, seconds on the video clock (null when capture was not running). */
+  at: number | null;
+  /** What was being done when it stopped ("reading the writing"), when capture's position does not say. */
+  doing: string | null;
+}
+
+/** How the job failed, from its status (null while it runs, once it is done, or without a status). The stages a job
+ *  stopped in stay "running" in its status, with their progress: capture's says how far into the video it got. */
+export function failureOf(st: JobStatus | null, clipStart: number, clipEnd: number): Failure | null {
+  if (!st || st.state !== 'failed') return null;
+  const error = typeof st.error === 'string' ? st.error.replace(/\s+/g, ' ').trim() : '';
+  const interrupted = INTERRUPTED.test(error);
+  let cause = interrupted ? '' : error.replace(/;\s*details are in \S+$/i, '').replace(/[\s.;:,]+$/, '');
+  if (cause.length > CAUSE_MAX) cause = `${cause.slice(0, CAUSE_MAX - 1).trimEnd()}…`;
+  const stages = st.stages ?? {};
+  const p = num(stages.capture?.progress);
+  const len = clipEnd - clipStart;
+  const at =
+    stages.capture?.state === 'running' && p != null && p > 0 && len > 0 ? clipStart + Math.min(1, p) * len : null;
+  const doing = at == null ? (DOING.find(([k]) => stages[k]?.state === 'running')?.[1] ?? null) : null;
+  return { interrupted, cause, error, at, doing };
+}
+
+const failedVerb = (f: Failure) => (f.interrupted ? 'Processing was interrupted' : 'Processing failed');
+
+/** The line under the video once the job failed: what happened, where, why, how far the board goes and what to do.
+ *  "Processing failed at 4:46 of the video: something went wrong (KeyError: 53). The board stops at 2:48; process
+ *  the video again." */
+export function failedLine(f: Failure, ready: number, clipStart: number, clipEnd: number): string {
+  const where =
+    f.at != null ? ` at ${formatTime(Math.max(f.at, ready))} of the video` : f.doing ? ` while ${f.doing}` : '';
+  const head = `${failedVerb(f)}${where}${f.cause ? `: ${f.cause}` : ''}.`;
+  const board =
+    ready - clipStart < 1
+      ? 'None of the board was ready'
+      : ready >= clipEnd - 0.5
+        ? 'The board reaches the end but is not finished'
+        : `The board stops at ${formatTime(ready)}`;
+  // the job's own line may say what to do already ("try a shorter part of the video")
+  const advice = /\b(again|try)\b/i.test(f.cause) ? '' : '; process the video again';
+  return `${head} ${board}${advice}.`;
+}
+
 /** The line under the video while the replay is partial: "Processing: capturing the writing, 3:20 of 8:00 ready". */
 export function streamLine(st: JobStatus | null, ready: number, clipStart: number, clipEnd: number): string {
   const have = `${formatTime(Math.max(0, ready - clipStart))} of ${formatTime(Math.max(0, clipEnd - clipStart))}`;
-  if (st && st.state === 'failed') return `Processing stopped. The board covers ${have}.`;
+  const failure = failureOf(st, clipStart, clipEnd);
+  if (failure) return failedLine(failure, ready, clipStart, clipEnd);
   // The final replay is written (the status says so) and its board images load before it is shown.
   if (st?.replay && st.replay.partial === false) return 'Processing done: loading the finished board';
   if (st && jobEnded(st)) return `Processing: finishing, ${have} ready`;
@@ -162,11 +222,14 @@ export function streamLine(st: JobStatus | null, ready: number, clipStart: numbe
   return doing ? `Processing: ${doing}, ${have} ready` : `Processing: ${have} ready`;
 }
 
-/** What the board says while the playhead is past what is ready (or nothing is on it yet). */
-export const catchUpText = (ready: number, stopped: boolean) =>
-  stopped
-    ? `Processing stopped: the board is ready up to ${formatTime(ready)}`
-    : `Board catching up: ready up to ${formatTime(ready)}`;
+/** What the board says while the playhead is past what is ready (or nothing is on it yet). Once the job failed,
+ *  nothing more comes: it says so, and where the board stops. */
+export function catchUpText(ready: number, failure: Failure | null = null, clipStart = 0): string {
+  if (!failure) return `Board catching up: ready up to ${formatTime(ready)}`;
+  return ready - clipStart < 1
+    ? `${failedVerb(failure)}: none of the board was ready`
+    : `${failedVerb(failure)}: the board stops at ${formatTime(ready)}`;
+}
 
 /** What Ask Muse knows while the replay is partial. */
 export const knowsUpTo = (ready: number) => `Knows the lecture up to ${formatTime(ready)}`;

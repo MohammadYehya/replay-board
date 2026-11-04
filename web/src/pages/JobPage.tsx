@@ -120,7 +120,7 @@ function JobProgress({ status, error, missing }: { status: JobStatus | null; err
               {!missing && (status || !error) && (
                 <p className="muted">
                   {failed
-                    ? 'Processing stopped.'
+                    ? 'The replay was not finished.'
                     : `Meta models read the ${slides ? 'slides' : 'board'} and the voice; the replay opens as soon as it is ready.`}
                 </p>
               )}
