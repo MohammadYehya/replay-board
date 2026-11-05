@@ -146,8 +146,9 @@ per-pixel measurement.
 | **Muse Voice Transcribe** | The words, in parallel pieces | Meta Model API (hosted), called by the backend | 3 |
 | **MMS forced aligner** (Meta's MMS, via torchaudio) | The time of every word | **Locally**, on your CPU, in the backend | none |
 
-- **No text-to-speech is used anywhere**, neither in the app nor in the demo video (which is captioned, with no
-  voice-over).
+- **Text-to-speech:** the app uses none; every model it calls at runtime is a Meta model. The only TTS is the
+  demo video's voice-over, generated with ElevenLabs for the video alone; the background music is synthesised by
+  code.
 
 - Every call goes through **one client** (`app/core/meta_api.py`): retries, byte uploads, a cost log and a disk
   cache keyed by model and request.
