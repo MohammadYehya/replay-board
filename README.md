@@ -129,14 +129,25 @@ per-pixel measurement.
 
 </details>
 
+## Built during the hackathon
+
+- **Built during the event:** all the code and docs in this repository: the backend, the board and slide
+  analysis, the Meta model client, the player, the tests and the self-tests. The first commit is from
+  1 Nov 2026 and the GitHub repository was created on 4 Nov 2026.
+- **Pre-existing:** only the written plan (`SPEC.md`) and a throwaway prototype of the board-capture idea, which
+  is not in this repository.
+
 ## Meta models, and what each one does
 
-| Model | Used for | Calls to process an 8-min lecture |
-|---|---|---|
-| **Muse Spark 1.3** | Board or slides? · reading every piece of writing · linking writing to speech · chapters · what a pointing gesture means · Ask Muse · 3D steps · slides export | 86 |
-| **SAM 3.1** | Finding the board · tracking the teacher and their hands (video mode) | 11 |
-| **Muse Voice Transcribe** | The words, in parallel pieces | 3 |
-| **MMS forced aligner** (torchaudio) | The time of every word | runs locally |
+| Model | Used for | Where it runs | Calls to process an 8-min lecture |
+|---|---|---|---|
+| **Muse Spark 1.3** | Board or slides? · reading every piece of writing · linking writing to speech · chapters · what a pointing gesture means · Ask Muse · 3D steps · slides export | Meta Model API (hosted, `https://api.meta.ai/v1`), called by the backend with your key | 86 |
+| **SAM 3.1** | Finding the board · tracking the teacher and their hands (video mode) | Meta Model API (hosted), called by the backend | 11 |
+| **Muse Voice Transcribe** | The words, in parallel pieces | Meta Model API (hosted), called by the backend | 3 |
+| **MMS forced aligner** (Meta's MMS, via torchaudio) | The time of every word | **Locally**, on your CPU, in the backend | none |
+
+- **No text-to-speech is used anywhere**, neither in the app nor in the demo video (which is captioned, with no
+  voice-over).
 
 - Every call goes through **one client** (`app/core/meta_api.py`): retries, byte uploads, a cost log and a disk
   cache keyed by model and request.
@@ -163,7 +174,16 @@ cd web; npm install; npm run build; cd ..
 ```
 
 **3. Use it:** open `http://127.0.0.1:8000`, drop a lecture video, click **Upload and process**, and watch the
-stages tick. A board lecture's player opens as soon as the board is found (about 15 s in) and its board fills in
+stages tick. **There is no login**: the app has no accounts and nothing to sign up for. It runs on your machine, and
+its only outside service is the Meta Model API, using the key you put in `.env`.
+
+**Without a key:** the self-tests and the test suite run offline, on generated lectures with known answers; in
+the tests, the model answers are clearly labeled mock data, never a real call. Processing a real video needs a
+key.
+```powershell
+.venv\Scripts\python -m tests.selftest_board
+$env:MODEL_API_KEY = "fake-no-spend"; .venv\Scripts\python -m pytest -q
+``` A board lecture's player opens as soon as the board is found (about 15 s in) and its board fills in
 while it processes; a slide lecture's opens when it's ready. `STREAM_REPLAY=off` in `.env` waits for the end.
 
 <details>
@@ -357,6 +377,20 @@ data/           videos, job folders and the model cache (never committed)
 ## Privacy
 
 Videos and anything made from them stay in `data/`, which is never committed.
+
+## Third-party assets, and how to get them
+
+Nothing third-party is committed; the setup steps above fetch all of it.
+
+| Asset | What for | How you get it |
+|---|---|---|
+| Python packages (FastAPI, OpenCV, NumPy, torch/torchaudio, python-pptx, …) | Backend | `pip install -r requirements.txt` |
+| MMS forced-alignment weights (`torchaudio.pipelines.MMS_FA`) | Word times, run locally | Downloaded by torchaudio from PyTorch's servers on first use, then cached |
+| ffmpeg | Reading and cutting video | Install it yourself and put it on PATH (for example `winget install Gyan.FFmpeg`) |
+| npm packages (React, Vite, KaTeX, three.js, fonts from Fontsource) | Player | `npm install` in `web\` |
+| Demo lecture footage | The demo video only; not needed to run the app | "Derivative With a Discontinuity", 18.01SC Single Variable Calculus, Fall 2010, David Jerison, MIT OpenCourseWare, CC BY-NC-SA 4.0: download `MIT18_01SCF10Rec_28_300k.mp4` from https://archive.org/details/MIT18_01SCF10. The demo uses 2:14.5–2:39: `ffmpeg -ss 134.5 -to 159 -i MIT18_01SCF10Rec_28_300k.mp4 demo.mp4` |
+
+Any lecture video of your own works too. The app never changes the original video.
 
 ## License
 

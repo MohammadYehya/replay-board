@@ -1,52 +1,113 @@
-# Demo video script (3 minutes)
+# Demo video: what to record, what to say, and the hand-off
 
-Use **your own recordings only**: one board lecture (ideally where you step in front of what you write,
-point at a result with your arm stretched out, erase something, and draw one shape or graph that you then explain
-in a few spoken stages, e.g. "first a cube... now stretch it upwards... now tilt it", for the 3D view) and one
-slide lecture with a cursor or laser. Process both before filming
-(`python -m app.server`, drop the files), so the player opens instantly; show the upload with a short clip.
-Record at 1920×1080 with the browser at 100% zoom. This laptop's screen is 1368×912 at 200%, so the page
-would be only about 1368 px wide: use a 1080p monitor, or capture a 16:9 region. Close other tabs; hide the
-bookmarks bar.
+A 3-minute video. You record three things: a short board lecture, screen clips of the app, and your narration.
+Claude edits them into the final video: cuts, zooms, title and model cards, captions, clean sound and an end card.
 
-| Time | On screen | Say (roughly) |
-|---|---|---|
-| 0:00–0:15 | A recorded board lecture where the teacher stands in front of the writing; then a slide recording with a cursor flying around. | "Rewatching a recorded lecture is hard: the teacher blocks the board, the camera can't read it, the cursor never stops moving." |
-| 0:15–0:30 | Replay Board home page. Drag a short clip in and click "Upload and process". The stages tick: Find the board, Find the teacher, Capture the writing, Transcribe the voice, Read the writing, Link writing to speech. | "Replay Board takes the recording as it is. Meta's models do the understanding: SAM 3.1 finds the board and tracks the teacher, Voice Transcribe and Meta's MMS aligner get every word and its time, Muse Spark reads the board and links it to what was said." |
-| 0:30–0:55 | Player: original video left (untouched), clean board right, drawing stroke by stroke in sync. Scrub back and forth. | "The original video plays untouched. Beside it, a clean board redraws your writing as you write it, on the same clock as the video." |
-| 0:55–1:10 | Seek to a moment where you stand in front of the writing: the board already shows it, with the "was hidden" tag. | "When the teacher stands in front of what they're writing, the camera can't see it. Replay Board draws it anyway, at the moment it was actually said." |
-| 1:10–1:25 | Hover a piece (tooltip with typeset maths); click it: the video jumps to where it was explained. Switch Handwriting to Typeset (or press T). | "Click any line to jump to where it was explained. Switch handwriting to typeset maths." |
-| 1:25–1:35 | Transcript highlighting word by word; click a chapter. Partial erase visible on the board. | "Every word is timed; chapters come from the lecture itself. Erasing works too." |
-| 1:35–1:45 | A moment where you point at a result on the board: the virtual board spotlights or underlines it while the video plays untouched. | "When the teacher points at the board, the clean board shows what they meant: SAM 3.1 follows the hand, Muse Spark decides if it was pointing and at what." |
-| 1:45–2:00 | While the video plays, the "Watch in 3D" pill appears on your 3D-ish drawing; click it (made beforehand, so it opens at once). Click the first step chip: the video jumps there and the model changes at each word, its angles and values updating, while the video plays beside it. Click "Try it" and drag one slider for a second. | "Drawings come alive in 3D: Muse Spark builds a model of what you drew and changes it step by step, at the exact words you explain it with." |
-| 2:00–2:20 | Press A: Ask Muse. Attach a formula from the start (board tooltip "Ask") and the result from the end (Browse lecture), ask "How are these connected?". The answer streams with typeset item chips and times; click a chip: the video jumps and the board outlines it. | "And you can ask about it. Muse Spark sees the whole lecture, so it can connect the first minute to the last, and every claim links back to the moment and the writing." |
-| 2:20–2:35 | Slide lecture: clean slide (no cursor, webcam blanked); the cursor's wiggle becomes a calm circle; a sweep becomes an underline; an A→B move becomes an arrow; a rest becomes a spotlight. | "For slides, the restless cursor becomes calm, meaningful animations. Code tracks the pointer; Muse Spark looks at the path on the slide and what was being said, and decides what it meant." |
-| 2:35–2:45 | Click "Slides": Muse Spark's deck of the lecture. Scroll past the agenda to a formula slide, a worked example and the key takeaways. Click "Download PowerPoint" and show the file open in PowerPoint for two seconds (speaker notes visible). | "And when you're done, Muse Spark turns the whole lecture into a slide deck: typeset formulas, worked steps, the teacher's drawings and the key takeaways, as a real PowerPoint with what was said in the notes." |
-| 2:45–2:55 | The architecture diagram from the README; the self-test result lines (136/136, 47/47). | "Under the hood: plain code measures every pixel, fast and exact; Meta models make every judgement about meaning. Generated lectures with known answers keep it honest." |
-| 2:55–3:00 | Back to the board replay. | "Replay Board: every lecture, as if you had the best seat in the room." |
+**Timeline (deadline 02:00 UTC):**
 
-## Checklist before filming
-- `.venv\Scripts\python -m pytest -q` and `.venv\Scripts\python -m tests.selftest_board` pass.
-- `cd web; npm run build`, then use the built player at http://127.0.0.1:8000 (smoother than dev mode).
-- The lecture list shows only your lectures: move the old test jobs out of `data\jobs` (for example into
-  `data\jobs-archive`) rather than deleting them.
-- Open each lecture you will show once before the take. When a lecture opens, the video panel shows a still
-  frame until the video itself is ready: 2–3 s for a phone or OBS recording, every time it opens. Wait for that
-  before you press play on camera.
-- Check the 0:55 moment in your own lecture: the "was hidden" tag only shows for writing the camera never saw
-  being written (you stood in front of that spot for more than 10 s while writing, then stepped away). Writing
-  that was covered for less than that simply appears when it comes into view, without the tag.
-- Make the 3D view you will show beforehand, so it opens at once: open it once in the player (the first time takes
-  30–70 s), or run `.venv\Scripts\python -m app.popout <job> <piece>` (it shows the cost and asks first). Play
-  through every step and check each change happens at the right word; if one is off, delete
-  `data\jobs\<job>\popout\NNN.v2.json` and open it again for a new take (about $0.03–0.10). Make it after the
-  last time you process that lecture: processing it again makes the 3D view stale, and it has to be made again.
-- Open the Slides page of the lecture you film once before (Muse Spark writes the deck in about 25–30 s the first
-  time, then it's cached) and read every slide. Download the PowerPoint and open it in PowerPoint once before
-  filming: it was only checked in LibreOffice here. PowerPoint isn't installed on this PC, so for the 2:35 shot
-  use PowerPoint for the web (upload the file to OneDrive) or another PC. The Notes page is no longer in the script; show it only if you
-  have spare seconds.
-- Decide on the Ask Muse question beforehand. A question asked before comes from the cache, free, but appears at
-  once instead of streaming in; to show the streaming, ask it fresh on camera (about a cent). The cache only
-  matches the same question at the same moment, with the same attachments in the same order, in an empty
-  conversation.
+| By (UTC) | You |
+|---|---|
+| 01:05 | Lecture recorded (recipe below) and copied to the PC |
+| 01:12 | Lecture uploaded and processed; 3D view and Slides opened once (warm-up below) |
+| 01:30 | Screen clips and narration recorded, files in the hand-off folder |
+| 01:45 | Claude hands back the finished video |
+| 01:55 | Uploaded to YouTube (unlisted), link pasted in the form, submitted |
+
+**Running late?** Do the **fast lane**: shots 1, 3, 4, 5, 6 and 9 only. Claude makes shots 2, 11 and 12 without you,
+for a video of about 2 minutes. That is better than a rushed 3.
+
+Use only your own lecture, or a video whose licence allows reuse, with its credit in the end card. Never use
+`data\test*.mp4`.
+
+---
+
+## 1. The lecture you'll show (record it first, about 3 minutes)
+
+**Topic: "The volume of a cylinder".** Each beat makes one feature show up in the app.
+
+**Camera:**
+- A phone in landscape on a tripod or a stack of books, 1080p.
+- The whole board in frame with a small margin.
+- Don't touch the phone once it's recording. Before you start, long-press the screen to lock focus and exposure.
+- Good light on the board and no glare. A dark marker (black or blue). Write big: letters at least 5 cm tall.
+
+| Lecture time | Do | Say | Makes this work |
+|---|---|---|---|
+| 0:00 | Stand to the side. | "Today: the volume of a cylinder." | |
+| 0:10 | On the left, write **A = πr²**. | "The area of a circle is pi r squared." | Ask Muse, first item |
+| 0:25 | In the middle, draw a cylinder: an ellipse on top, two straight sides, and a curved bottom whose back half is dashed. | "Here's a cylinder." | 3D |
+| 0:45 | Point at the drawing as you speak. | "First, the circle: the base. Now stretch it straight up to a height h. Now double the height: twice as tall holds twice as much." | 3D steps change at these words |
+| 1:10 | Stand **between the camera and the right side of the board** and write **V = πr²h** with your body hiding it the whole time, for at least 10 seconds. Then step aside. | "So the volume is the base area times the height." | "was hidden" |
+| 1:35 | Stretch your arm out fully and point at **πr²**. Hold it for 2 seconds. | "This part is just the base area." | Pointing |
+| 1:50 | Write **V = 2πrh**, then erase it. | "Not this: that's the area of the side." | Erasing |
+| 2:10 | Bottom right, write **r = 3, h = 5 → V = 45π ≈ 141**. | "With r 3 and h 5, the volume is 45 pi, about 141." | Ask Muse, second item; typeset |
+| 2:40 | Step aside, face the camera. | "Base times height. That's the whole idea." | |
+
+Copy the file to the PC.
+
+## 2. Process it and warm up (while you set up recording)
+
+1. In the server window: Ctrl+C, then `.venv\Scripts\python -m app.server`.
+2. **Clear the lecture list.** Move every old job out of `data\jobs` into `data\jobs-archive`. They come from the test
+   videos, which can't appear on camera.
+3. Open http://127.0.0.1:8000, press Ctrl+F5, upload the lecture and let it finish. A 3-minute lecture costs about
+   $0.45.
+4. Open the lecture once. Hover the cylinder and click **3D** in its tooltip. It takes 30–70 s the first time.
+   Play through the steps once.
+5. Click **Slides** once. The deck takes about 30 s the first time. Click **Download PowerPoint** once.
+6. Pick your Ask Muse question: **"How are these connected?"**, with A = πr² and the 45π result attached.
+
+## 3. Recording the screen
+
+- **Tool:** Xbox Game Bar is already in Windows and records just the browser window. Click Chrome, then press
+  **Win+Alt+R** to start and again to stop. Files go to `Videos\Captures`.
+- Before you start:
+  - Chrome in full screen (**F11**), zoom at 100%, the bookmarks bar hidden.
+  - Notifications off: Focus or Do not disturb.
+- **One clip per shot, in order.** Don't rename them; Claude sorts them by time.
+- At the start and end of each clip, keep still for 2 seconds.
+- Move the mouse slowly. Hover for 1 second before each click. When you're not using the cursor, park it at the edge
+  of the screen.
+- Fluffed something? Pause 2 seconds and do it again in the same clip. Claude keeps the last good try.
+- Record the screen **silently**. The narration is recorded separately (section 4), so you can concentrate on
+  the mouse.
+
+## 4. Recording the narration
+
+- **Tool:** the phone's voice recorder, or the Sound Recorder app on Windows.
+- **Room:** quiet, with soft furnishings if possible (a bedroom beats a kitchen).
+- **Mic:** 15–20 cm from your mouth, a little to the side.
+- **How:** read the lines below in order, as **one file**, with a 2-second pause between lines. Fluffed a line?
+  Pause, then read the whole line again.
+- **Pace:** calm, a bit slower than talking. Smile on the first and last lines; it can be heard.
+
+## 5. Shots and lines
+
+Shots marked **(Claude)** need nothing from you. Times are for the final cut.
+
+| # | Final time | You record (silent screen clip) | You say (narration) | Claude adds |
+|---|---|---|---|---|
+| 1 | 0:00–0:10 | Nothing: Claude cuts it from your lecture file, while you stand in front of the board. | "Recorded lectures are hard to learn from. The teacher stands in front of the board, the camera can't read it, and finding one step means scrubbing through the whole thing." | Caption: "The board, hidden." |
+| 2 | 0:10–0:15 | **(Claude)** | "This is Replay Board. It takes the recording as it is, and Meta's models do the understanding." | Title card |
+| 3 | 0:15–0:38 | Home page → drag the lecture file in → **Upload and process** → watch the stages tick → when the player opens, press play and let the board fill in for about 20 s. Keep recording through the waiting. | "I drop in a lecture. SAM 3.1 finds the board and tracks the teacher. Muse Voice Transcribe and Meta's MMS aligner give every word its time. Muse Spark reads the writing and links it to what was said. And I don't wait: the lecture opens as soon as the board is found, and the clean board fills in as it goes." | The waiting sped up, with a "4×" tag; a model name pops up as each stage ticks |
+| 4 | 0:38–0:55 | Open the finished lecture. Play from 0:10 for 15 s, then drag the timeline back and forth once. | "The original plays untouched. Beside it, a clean board redraws every stroke as it was written, on the same clock. Scrub anywhere, and the board is exactly as it was at that second." | Gentle zoom on the board |
+| 5 | 0:55–1:10 | Seek to about 1:05 and play to about 1:25, through the moment you step aside. Then hover the "was hidden" tag. | "Here I'm standing right in front of what I'm writing. The camera never saw it. Replay Board draws it anyway, when I said it, and marks it as hidden." | Zoom on the tag |
+| 6 | 1:10–1:25 | Hover V = πr²h (tooltip with typeset maths) → click it (the video jumps) → press **T** (typeset) → press **T** again. | "Every line is clickable: the video jumps to where it was explained. Press T, and the handwriting becomes typeset maths, read by Muse Spark." | Key hint "T" on screen |
+| 7 | 1:25–1:35 | Seek to about 1:33 and play through the pointing. | "When I point, the clean board shows what I meant. SAM follows the hand; Muse Spark decides whether it was a point, and at what." | |
+| 8 | 1:35–1:55 | Seek to about 0:40 → click **Watch in 3D** when it appears → let it play through the steps → click **Try it** and drag one slider for 2 s. | "Drawings come alive. Muse Spark turns my sketch into a 3D model, and it changes at the exact words I explain it with. Try it gives a slider for every value." | |
+| 9 | 1:55–2:15 | Press **A** → attach A = πr² (its tooltip's **Ask**) and the 45π line (**Browse lecture**) → type "How are these connected?" → send → let the answer stream → click one item chip in it. | "And I can ask about it. Muse Spark sees the whole lecture, so it can connect the first minute to the last, and every claim links back to the moment and the writing." | Zoom on the answer |
+| 10 | 2:15–2:30 | Click **Slides** → scroll slowly through four or five slides → click **Download PowerPoint**. | "When I'm done, Muse Spark turns the lecture into a deck that teaches it: typeset formulas, worked steps, my own drawings, and what I said in the speaker notes." | |
+| 11 | 2:30–2:50 | **(Claude)** | "Under the hood, plain code measures every pixel, fast and exact, and Meta's models make every judgement about meaning. Generated lectures with known answers keep it honest: 136 out of 136 on boards, 47 out of 47 on slides." | "How it works" card: the four models and what each does; the self-test scores |
+| 12 | 2:50–3:00 | **(Claude)** | "Replay Board. Every lecture, as if you had the best seat in the room." | End card: name, repo link, models, credits |
+
+About 400 words of narration, so roughly 3 minutes at a calm pace.
+
+## 6. Hand-off
+
+Put everything in **`C:\Users\MYH\Documents\Replay Board\data\demo\raw\`**. The `data` folder is never committed.
+- the screen clips (straight from `Videos\Captures`);
+- the narration file;
+- the lecture file (if it isn't already there).
+
+Then tell Claude "files are in". You get back `data\demo\replay-board-demo.mp4` (1080p, YouTube loudness, captions
+burned in), plus a `.srt` caption file to upload to YouTube as well.
